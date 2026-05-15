@@ -1,7 +1,11 @@
 uniffi::setup_scaffolding!();
 
-/// Stub error for initial bindgen smoke test.
-/// Full error types added in AGENT-006.
+pub mod events;
+pub mod message;
+pub mod session;
+
+/// Stub top-level error for initial bindgen smoke test.
+/// Full error enum added in AGENT-006.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AgentError {
     #[error("Internal error: {0}")]
