@@ -1,40 +1,62 @@
-# agent_core
+# `agent_core` (Rust)
 
-Shared Rust agent harness for Pocket Crew. Exposed to Android via UniFFI. Desktop-ready via native Rust host traits (no UniFFI required for direct consumers).
+Deterministic agent loop: compaction tiers, tool repair, guardrails, and session accounting.
 
-See [`plans/FEAT-agent-core-rust/`](https://gitlab.com/browntown.development-group/pocket-crew/-/tree/main/plans/FEAT-agent-core-rust) for the full feature plan and ADR.
-
-## Building
-
-### Host (tests)
+## Tests
 
 ```bash
+cd third_party/agent_core
 cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
 ```
 
-### Android (aarch64)
+## Keeping the tool catalog in sync (AGENT-038 / AGENT-050)
+
+- **Name parity:** `./scripts/check-tool-catalog-sync.sh` — every `name = "..."` in Kotlin `ToolDefinition` must exist in `resources/tool_catalog.json`.
+- **Schema hint parity:** `python3 scripts/check-catalog-schema-parity.py` — for each `schema_hint.required_fields` entry in the JSON catalog, the matching Kotlin `ToolParameters` data class must declare a property with the same name.
+
+Regenerate Android bindings after changing the FFI surface:
 
 ```bash
-# From pocket-crew repo root:
-scripts/build-agent-bindings.sh
+./scripts/build-agent-bindings.sh
 ```
 
-Requires: Android NDK 27, API 34, `cargo-ndk`. See [AGENT-023](../plans/FEAT-agent-core-rust/tickets/AGENT-023.md) for setup.
+## Versioning (AGENT-042)
 
-## Desktop integration
+Bump `version` in `third_party/agent_core/Cargo.toml` when the serialized event schema or UniFFI surface changes in a breaking way; regenerate Kotlin and commit `agent_core.kt` + `libagent_core.so` together.
 
-Add as a path dependency (no UniFFI required):
+Release process:
+
+1. Tag Rust releases as `agent_core-vMAJOR.MINOR.PATCH`.
+2. Align Pocket Crew release notes with the exact `agent_core` tag or submodule revision.
+3. Run `./scripts/build-agent-bindings.sh` after each Rust tag bump.
+4. Commit generated Kotlin bindings and Android native libraries in the same change as the Rust bump.
+5. Run Android QA against the generated bindings before merging the release change.
+
+Semver rules:
+
+- Major: breaking native trait, UniFFI, serialized event, or fixture schema changes.
+- Minor: backwards-compatible event additions, new compaction tiers, or new optional capabilities.
+- Patch: bug fixes with no host-facing contract changes.
+
+## Desktop integration (AGENT-041)
+
+Future desktop consumers can depend on this crate directly:
 
 ```toml
 [dependencies]
-agent_core = { path = "../../third_party/agent_core" }
+agent_core = { path = "../pocket-crew/third_party/agent_core" }
 ```
 
-Implement `AgentTransport`, `AgentToolExecutor`, `AgentSummarizer` from `agent_core::host` directly.
+Desktop hosts use native Rust traits from `agent_core::host`:
 
-## Version / submodule sync
+- `AgentTransport` for model turns
+- `AgentToolExecutor` for repaired tool calls
+- `AgentSummarizer` for summary-tier compaction
 
-See [AGENT-042](../plans/FEAT-agent-core-rust/tickets/AGENT-042.md) for versioning strategy.
-To update the submodule ref in `pocket-crew`: `cd third_party/agent_core && git pull origin main && cd ../.. && git add third_party/agent_core && git commit`.
+UniFFI is only required by Android. Native Rust hosts should not go through the Kotlin callback bridge. The smoke example
+in `examples/mock_desktop_loop.rs` exercises a three-turn tool loop through the native trait surface:
+
+```bash
+cd third_party/agent_core
+cargo run --example mock_desktop_loop
+```

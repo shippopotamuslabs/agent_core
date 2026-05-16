@@ -1,0 +1,58 @@
+{
+  "name": "fuzzy_repair",
+  "initial_session": {
+    "messages": [
+      {
+        "id": "u1",
+        "role": "user",
+        "content": "hi",
+        "metadata": null
+      }
+    ],
+    "config": {
+      "max_turns": 20,
+      "threshold_ratio": 0.8,
+      "micro_keep_recent": 2,
+      "tool_retry_limit": 3,
+      "greedy_append_blocks": true,
+      "tool_result_budget_cloud_bytes": 4096,
+      "token_correction": {}
+    },
+    "capabilities": {
+      "summarization_allowed": false,
+      "kv_fixed": false,
+      "tool_result_budget_tokens": null
+    },
+    "session_context": {}
+  },
+  "model_responses": [
+    {
+      "assistant_text": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "web_seach",
+          "arguments_json": "{\"query\":\"x\"}"
+        }
+      ],
+      "finish_reason": "tool_use"
+    },
+    {
+      "assistant_text": "done",
+      "tool_calls": [],
+      "finish_reason": "stop"
+    }
+  ],
+  "expected_actions": [
+    "CallModel",
+    "ExecuteTools",
+    "CallModel",
+    "Finished"
+  ],
+  "io": {
+    "provider": "anthropic",
+    "context_window_tokens": 200000,
+    "tools_schema_json": "[]",
+    "system_prompt": "sys"
+  }
+}
