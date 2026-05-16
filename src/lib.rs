@@ -1,6 +1,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod action;
+pub mod budget;
 pub mod catalog;
 pub mod events;
 pub mod host;
