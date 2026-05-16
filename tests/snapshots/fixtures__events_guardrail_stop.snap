@@ -1,0 +1,50 @@
+---
+source: tests/fixtures.rs
+expression: events
+---
+[
+  {
+    "type": "turn_started",
+    "turn_index": 1,
+    "allow_tool_call": true
+  },
+  {
+    "type": "turn_completed",
+    "turn_index": 1,
+    "tool_call_count": 1,
+    "terminal": false
+  },
+  {
+    "type": "turn_started",
+    "turn_index": 2,
+    "allow_tool_call": true
+  },
+  {
+    "type": "turn_completed",
+    "turn_index": 2,
+    "tool_call_count": 2,
+    "terminal": false
+  },
+  {
+    "type": "turn_started",
+    "turn_index": 3,
+    "allow_tool_call": true
+  },
+  {
+    "type": "turn_completed",
+    "turn_index": 3,
+    "tool_call_count": 3,
+    "terminal": false
+  },
+  {
+    "type": "turn_started",
+    "turn_index": 4,
+    "allow_tool_call": false
+  },
+  {
+    "type": "turn_completed",
+    "turn_index": 4,
+    "tool_call_count": 3,
+    "terminal": true
+  }
+]

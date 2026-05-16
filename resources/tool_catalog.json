@@ -54,8 +54,7 @@
       "reproducible": false,
       "schema_hint": {
         "required_fields": [
-          { "name": "title", "ty": "string", "description": "Human-readable artifact title" },
-          { "name": "kind",  "ty": "string", "description": "Artifact type (e.g. document, code)" }
+          { "name": "title", "ty": "string", "description": "Human-readable artifact title" }
         ],
         "defaults": {}
       }

@@ -128,7 +128,6 @@ mod tests {
         let hint = spec.schema_hint.as_ref().unwrap();
         let fields: Vec<&str> = hint.required_fields.iter().map(|f| f.name.as_str()).collect();
         assert!(fields.contains(&"title"));
-        assert!(fields.contains(&"kind"));
     }
 
     #[test]

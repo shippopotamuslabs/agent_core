@@ -1,0 +1,32 @@
+---
+source: tests/fixtures.rs
+expression: events
+---
+[
+  {
+    "type": "context_pressure",
+    "ratio": 3.1367188
+  },
+  {
+    "type": "compaction_applied",
+    "tier": "fifo",
+    "tokens_before": 803,
+    "tokens_after": 1,
+    "trigger": "preflight"
+  },
+  {
+    "type": "kv_cache_invalidated",
+    "reason": "Compacted: fifo"
+  },
+  {
+    "type": "turn_started",
+    "turn_index": 1,
+    "allow_tool_call": true
+  },
+  {
+    "type": "turn_completed",
+    "turn_index": 1,
+    "tool_call_count": 0,
+    "terminal": true
+  }
+]

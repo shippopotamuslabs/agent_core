@@ -88,6 +88,11 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens,
             tools_schema_json: "[]".into(),
+            capabilities: crate::session::SessionCapabilities {
+                summarization_allowed: true,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+            },
             trigger: CompactionTrigger::Preflight,
         }
     }
