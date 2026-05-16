@@ -1,0 +1,107 @@
+{
+  "tools": [
+    {
+      "name": "web_search",
+      "aliases": ["websearch"],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "web_extract",
+      "aliases": ["web_fetch"],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "attached_image_inspect",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "search_chat_history",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "search_chat",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "get_message_context",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "search_current_artifact",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "search_x_recent",
+      "aliases": ["x_search"],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "start_artifact",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": {
+        "required_fields": [
+          { "name": "title", "ty": "string", "description": "Human-readable artifact title" },
+          { "name": "kind",  "ty": "string", "description": "Artifact type (e.g. document, code)" }
+        ],
+        "defaults": {}
+      }
+    },
+    {
+      "name": "append_blocks",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": {
+        "required_fields": [
+          { "name": "artifactId", "ty": "string", "description": "ID returned by start_artifact" },
+          { "name": "blocks",     "ty": "array",  "description": "Content blocks to append" }
+        ],
+        "defaults": {
+          "isComplete": false
+        }
+      }
+    },
+    {
+      "name": "manage_memories",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": {
+        "required_fields": [
+          { "name": "action", "ty": "string", "description": "Memory action (add, update, delete, list)" }
+        ],
+        "defaults": {}
+      }
+    },
+    {
+      "name": "generate_image",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": null
+    },
+    {
+      "name": "generate_video",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": null
+    },
+    {
+      "name": "generate_music",
+      "aliases": [],
+      "reproducible": false,
+      "schema_hint": null
+    }
+  ]
+}
