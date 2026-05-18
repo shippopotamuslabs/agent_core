@@ -1,0 +1,777 @@
+//! Public Rust entry point for canonical tool-call parsing.
+
+pub mod envelope;
+pub mod json_repair;
+pub mod result;
+pub mod schema_coerce;
+
+use crate::catalog::{FieldHint, ToolCatalog, ToolSchemaHint};
+pub use envelope::{EnvelopeError, EnvelopeFormat, ExtractedEnvelope};
+pub use json_repair::{repair_json, JsonRepairError};
+pub use result::{ToolParseBatch, ToolParseField, ToolParseFailure, ToolParseFailureReason};
+pub use schema_coerce::coerce_to_schema;
+use regex::Regex;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+
+/// Run the full pipeline: normalize → envelope extract → json_repair →
+/// catalog resolve → schema_coerce → emit [`ToolParseBatch`].
+pub fn parse_tool_calls(raw: &str) -> ToolParseBatch {
+    let normalized = normalize_model_text(raw);
+    match extract_envelopes(&normalized) {
+        Ok(extracted) if extracted.is_empty() => ToolParseBatch::empty(raw),
+        Ok(extracted) => build_batch(raw, extracted),
+        Err(error) => ToolParseBatch {
+            successes: Vec::new(),
+            failures: vec![ToolParseFailure {
+                reason: ToolParseFailureReason::MalformedEnvelope,
+                original: raw.to_string(),
+                format_hint: error.format.and_then(format_hint),
+            }],
+            visible_prefix: String::new(),
+            visible_suffix: String::new(),
+        },
+    }
+}
+
+/// Coerce already-extracted provider arguments through `repair_json` and
+/// `coerce_to_schema`.
+pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseField {
+    let mut repaired = false;
+    let mut repairs = Vec::new();
+    let mut value = match repair_json(args_json) {
+        Ok(value) => {
+            if serde_json::from_str::<Value>(args_json).is_err() {
+                repaired = true;
+                collect_repairs(args_json, &mut repairs);
+            }
+            value
+        }
+        Err(_) => serde_json::from_str(args_json).unwrap_or(Value::Object(Default::default())),
+    };
+
+    let canonical_name = ToolCatalog::global()
+        .resolve(tool_name)
+        .map(|spec| spec.name.clone())
+        .unwrap_or_else(|| tool_name.to_string());
+    let hint = schema_hint_for(&canonical_name);
+    let coerced = hint
+        .as_ref()
+        .map(|hint| coerce_to_schema(&mut value, hint))
+        .unwrap_or(value);
+    let mut coerced = coerced;
+    normalize_special_values(&canonical_name, &mut coerced, &mut repaired, &mut repairs);
+
+    ToolParseField {
+        tool_name: canonical_name.clone(),
+        arguments_json: canonical_arguments_json(&canonical_name, &coerced),
+        repaired,
+        repairs,
+    }
+}
+
+/// True iff `system_prompt` contains a local-tool marker AND names a tool
+/// registered in `ToolCatalog::global()`.
+pub fn has_local_tool_contract(system_prompt: &str) -> bool {
+    let has_marker = ["<tool_call", "{\"name\"", "<![CDATA[<tool", "DSML", "invoke name="]
+        .iter()
+        .any(|marker| system_prompt.contains(marker));
+    has_marker
+        && ToolCatalog::global()
+            .all()
+            .iter()
+            .any(|tool| system_prompt.contains(&tool.name))
+}
+
+fn build_batch(raw: &str, extracted: Vec<ExtractedEnvelope>) -> ToolParseBatch {
+    let visible_prefix = extracted
+        .first()
+        .map(|env| env.visible_prefix.clone())
+        .unwrap_or_default();
+    let visible_suffix = extracted
+        .last()
+        .map(|env| env.visible_suffix.clone())
+        .unwrap_or_default();
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+
+    for envelope in extracted {
+        match parse_extracted_envelope(&envelope) {
+            Ok(field) => successes.push(field),
+            Err(reason) => failures.push(ToolParseFailure {
+                reason,
+                original: raw.to_string(),
+                format_hint: format_hint(envelope.format),
+            }),
+        }
+    }
+
+    ToolParseBatch {
+        successes,
+        failures,
+        visible_prefix,
+        visible_suffix,
+    }
+}
+
+fn parse_extracted_envelope(envelope: &ExtractedEnvelope) -> Result<ToolParseField, ToolParseFailureReason> {
+    let canonical_name = ToolCatalog::global()
+        .resolve(&envelope.tool_name)
+        .map(|spec| spec.name.clone())
+        .ok_or_else(|| ToolParseFailureReason::UnknownTool {
+            name: envelope.tool_name.clone(),
+        })?;
+    let hint = schema_hint_for(&canonical_name);
+    let mut repairs = Vec::new();
+    repairs.extend(envelope.repair_hints.clone());
+    collect_repairs(&envelope.arguments_raw, &mut repairs);
+    let mut value = repair_json(&envelope.arguments_raw).map_err(|error| ToolParseFailureReason::InvalidJson {
+        detail: error.to_string(),
+    })?;
+    let originally_valid = serde_json::from_str::<Value>(&envelope.arguments_raw).is_ok();
+    let mut repaired = !originally_valid || !repairs.is_empty();
+    if envelope.arguments_raw.contains("[https://") || envelope.arguments_raw.contains("[http://") {
+        push_repair(&mut repairs, "stripped leading bracket from bracketed URL string");
+    }
+
+    validate_unknown_and_duplicate(&canonical_name, &value)?;
+    if let Some(hint) = &hint {
+        let before_coerce = value.clone();
+        value = coerce_to_schema(&mut value, hint);
+        if value != before_coerce {
+            repaired = true;
+        }
+    }
+    normalize_special_values(&canonical_name, &mut value, &mut repaired, &mut repairs);
+    validate_required(&canonical_name, &value)?;
+
+    Ok(ToolParseField {
+        tool_name: canonical_name.clone(),
+        arguments_json: canonical_arguments_json(&canonical_name, &value),
+        repaired,
+        repairs,
+    })
+}
+
+fn extract_envelopes(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    if raw.contains("[TOOL_CALLS]") {
+        return extract_mistral(raw);
+    }
+    if raw.contains("DSML") {
+        return extract_dsml(raw);
+    }
+    if raw.contains("<tool_call") {
+        return extract_tool_call(raw);
+    }
+    if raw.contains("<![CDATA[<tool") {
+        return extract_cdata(raw);
+    }
+    if raw.contains("\"name\"") || raw.contains("'name'") || raw.contains("\u{201C}name\u{201D}") {
+        return extract_raw_json(raw);
+    }
+    Ok(Vec::new())
+}
+
+fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let sentinel = "[TOOL_CALLS]";
+    let start = raw.find(sentinel).unwrap_or_default();
+    let after = start + sentinel.len();
+    let Some(array_start_rel) = raw[after..].find('[') else {
+        return Err(malformed(Some(EnvelopeFormat::Mistral), "missing Mistral array"));
+    };
+    let array_start = after + array_start_rel;
+    let Some(array_end) = matching_delimiter(raw, array_start, '[', ']') else {
+        return Err(malformed(Some(EnvelopeFormat::Mistral), "unclosed Mistral array"));
+    };
+    let payload = &raw[array_start..=array_end];
+    let values = repair_json(payload)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::Mistral), "invalid Mistral array"))?;
+    calls_from_values(
+        values,
+        EnvelopeFormat::Mistral,
+        raw[..start].trim().to_string(),
+        raw[array_end + 1..].to_string(),
+        Vec::new(),
+    )
+}
+
+fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let block_open = Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
+    let block_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
+    let invoke_open = Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*invoke\s+name\s*=\s*"([^"]+)"\s*>"#).unwrap();
+    let invoke_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*invoke\s*>"#).unwrap();
+    let parameter_open =
+        Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*parameter\s+name\s*=\s*"([^"]+)"(?:\s+string\s*=\s*"([^"]*)")?\s*>"#)
+            .unwrap();
+    let parameter_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*parameter\s*>"#).unwrap();
+
+    let starts: Vec<_> = block_open.find_iter(raw).collect();
+    if starts.is_empty() {
+        return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML block"));
+    }
+
+    let mut envelopes = Vec::new();
+    for block_start in starts {
+        let block_end = block_close
+            .find_at(raw, block_start.end())
+            .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML block"))?;
+        let block = &raw[block_start.end()..block_end.start()];
+        let mut search_at = 0usize;
+        let mut found_invoke = false;
+        while let Some(invoke) = invoke_open.captures(&block[search_at..]) {
+            found_invoke = true;
+            let full = invoke.get(0).unwrap();
+            let invoke_start = search_at + full.start();
+            let invoke_content_start = search_at + full.end();
+            let close = invoke_close
+                .find_at(block, invoke_content_start)
+                .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML invoke"))?;
+            let body = &block[invoke_content_start..close.start()];
+            let tool_name = invoke.get(1).unwrap().as_str().trim().to_string();
+            let mut args = serde_json::Map::new();
+            let mut seen = HashSet::new();
+            let mut parameter_search_at = 0usize;
+            let mut found_parameter = false;
+            while let Some(parameter) = parameter_open.captures(&body[parameter_search_at..]) {
+                found_parameter = true;
+                let p_full = parameter.get(0).unwrap();
+                let p_start = parameter_search_at + p_full.start();
+                let p_body_start = parameter_search_at + p_full.end();
+                let p_close = parameter_close
+                    .find_at(body, p_body_start)
+                    .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter"))?;
+                if invoke_close.is_match(&body[p_body_start..p_close.start()]) {
+                    return Err(malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter"));
+                }
+                let param_name = parameter.get(1).unwrap().as_str().trim().to_string();
+                if !seen.insert(param_name.clone()) {
+                    envelopes.push(failure_envelope(
+                        tool_name.clone(),
+                        format!("__duplicate__:{param_name}"),
+                        block_start.start(),
+                        block_end.end(),
+                        raw,
+                    ));
+                    parameter_search_at = p_close.end();
+                    continue;
+                }
+                let body_raw = body[p_body_start..p_close.start()].trim();
+                args.insert(param_name, dsml_parameter_value(body_raw));
+                parameter_search_at = p_close.end().max(p_start + 1);
+            }
+            if !found_parameter {
+                return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML parameter"));
+            }
+            envelopes.push(ExtractedEnvelope {
+                tool_name,
+                arguments_raw: Value::Object(args).to_string(),
+                visible_prefix: raw[..block_start.start()].to_string(),
+                visible_suffix: raw[block_end.end()..].to_string(),
+                format: EnvelopeFormat::Dsml,
+                repair_hints: Vec::new(),
+            });
+            search_at = close.end().max(invoke_start + 1);
+        }
+        if !found_invoke {
+            return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML invoke"));
+        }
+    }
+    Ok(envelopes)
+}
+
+fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let open = Regex::new(r#"(?is)<\s*tool_call\b[^>]*>"#).unwrap();
+    let Some(start) = open.find(raw) else {
+        return Ok(Vec::new());
+    };
+    let Some(close_start_rel) = raw[start.end()..].to_ascii_lowercase().find("</tool_call>") else {
+        return Err(malformed(Some(EnvelopeFormat::ToolCall), "unclosed tool_call"));
+    };
+    let close_start = start.end() + close_start_rel;
+    let close_end = close_start + "</tool_call>".len();
+    let payload = raw[start.end()..close_start].trim();
+    if payload.contains("<arg_key>") {
+        return extract_glm_tool_call(raw, start.start(), close_end, payload);
+    }
+    let value = repair_json(payload)
+        .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
+    let repair_hints = if payload.contains('\'') {
+        vec!["converted single quotes to double quotes".to_string()]
+    } else {
+        Vec::new()
+    };
+    values_from_payload(
+        value,
+        EnvelopeFormat::ToolCall,
+        raw[..start.start()].to_string(),
+        raw[close_end..].to_string(),
+        repair_hints,
+    )
+}
+
+fn extract_glm_tool_call(
+    raw: &str,
+    start: usize,
+    end: usize,
+    payload: &str,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let glm = Regex::new(r#"(?is)^\s*([a-zA-Z0-9_]+)\s*<arg_key>([^<]+)</arg_key>\s*<arg_value>(.*?)</arg_value>\s*$"#)
+        .unwrap();
+    let caps = glm
+        .captures(payload)
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::ToolCall), "invalid GLM payload"))?;
+    let key = caps.get(2).unwrap().as_str().trim();
+    let raw_value = caps.get(3).unwrap().as_str().trim();
+    let value = repair_json(raw_value).unwrap_or_else(|_| Value::String(raw_value.trim_matches('"').to_string()));
+    Ok(vec![ExtractedEnvelope {
+        tool_name: caps.get(1).unwrap().as_str().trim().to_string(),
+        arguments_raw: Value::Object([(key.to_string(), value)].into_iter().collect()).to_string(),
+        visible_prefix: raw[..start].to_string(),
+        visible_suffix: raw[end..].to_string(),
+        format: EnvelopeFormat::ToolCall,
+        repair_hints: Vec::new(),
+    }])
+}
+
+fn extract_cdata(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let regex = Regex::new(r#"(?is)<!\[CDATA\[<tool>\s*(.*?)\s*</tool>\]\]>"#).unwrap();
+    let caps = regex
+        .captures(raw)
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::Cdata), "invalid CDATA payload"))?;
+    let full = caps.get(0).unwrap();
+    let payload = caps.get(1).unwrap().as_str();
+    let value = repair_json(payload).map_err(|_| malformed(Some(EnvelopeFormat::Cdata), "invalid CDATA json"))?;
+    values_from_payload(
+        value,
+        EnvelopeFormat::Cdata,
+        raw[..full.start()].to_string(),
+        raw[full.end()..].to_string(),
+        Vec::new(),
+    )
+}
+
+fn extract_raw_json(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    for (start, char) in raw.char_indices() {
+        if char != '{' {
+            continue;
+        }
+        if let Some(end) = matching_delimiter(raw, start, '{', '}') {
+            let payload = &raw[start..=end];
+            if !payload.contains("name") {
+                continue;
+            }
+            let value = repair_json(payload)
+                .map_err(|_| malformed(Some(EnvelopeFormat::RawJson), "invalid raw json"))?;
+            return values_from_payload(
+                value,
+                EnvelopeFormat::RawJson,
+                raw[..start].trim_end_matches([',', ' ']).to_string(),
+                raw[end + 1..].trim_start_matches([',', ' ']).to_string(),
+                Vec::new(),
+            );
+        }
+    }
+    Err(malformed(Some(EnvelopeFormat::RawJson), "raw name marker without object"))
+}
+
+fn values_from_payload(
+    value: Value,
+    format: EnvelopeFormat,
+    visible_prefix: String,
+    visible_suffix: String,
+    repair_hints: Vec<String>,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    match value {
+        Value::Array(items) => calls_from_values(items, format, visible_prefix, visible_suffix, repair_hints),
+        Value::Object(_) => calls_from_values(vec![value], format, visible_prefix, visible_suffix, repair_hints),
+        _ => Err(malformed(Some(format), "payload is not object or array")),
+    }
+}
+
+fn calls_from_values(
+    values: Vec<Value>,
+    format: EnvelopeFormat,
+    visible_prefix: String,
+    visible_suffix: String,
+    repair_hints: Vec<String>,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| malformed(Some(format.clone()), "tool call entry is not object"))?;
+            let tool_name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| malformed(Some(format.clone()), "missing tool name"))?
+                .to_string();
+            let arguments = object
+                .get("arguments")
+                .or_else(|| object.get("parameters"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            Ok(ExtractedEnvelope {
+                tool_name,
+                arguments_raw: arguments.to_string(),
+                visible_prefix: visible_prefix.clone(),
+                visible_suffix: visible_suffix.clone(),
+                format: format.clone(),
+                repair_hints: repair_hints.clone(),
+            })
+        })
+        .collect()
+}
+
+fn failure_envelope(
+    tool_name: String,
+    arguments_raw: String,
+    start: usize,
+    end: usize,
+    raw: &str,
+) -> ExtractedEnvelope {
+    ExtractedEnvelope {
+        tool_name,
+        arguments_raw,
+        visible_prefix: raw[..start].to_string(),
+        visible_suffix: raw[end..].to_string(),
+        format: EnvelopeFormat::Dsml,
+        repair_hints: Vec::new(),
+    }
+}
+
+fn dsml_parameter_value(raw: &str) -> Value {
+    Value::String(unescape_json_string(raw))
+}
+
+fn validate_unknown_and_duplicate(tool: &str, value: &Value) -> Result<(), ToolParseFailureReason> {
+    if let Some(duplicate) = value.as_str().and_then(|s| s.strip_prefix("__duplicate__:")) {
+        return Err(ToolParseFailureReason::DuplicateParameter {
+            tool: tool.to_string(),
+            param: duplicate.to_string(),
+        });
+    }
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let allowed = allowed_parameters(tool);
+    for key in object.keys() {
+        if !allowed.contains(key) {
+            return Err(ToolParseFailureReason::UnknownParameter {
+                tool: tool.to_string(),
+                param: key.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_required(tool: &str, value: &Value) -> Result<(), ToolParseFailureReason> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for required in required_parameters(tool) {
+        let missing = object.get(&required).is_none_or(is_missing_value);
+        if missing {
+            return Err(ToolParseFailureReason::MissingRequiredParameter {
+                tool: tool.to_string(),
+                param: required.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_missing_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn allowed_parameters(tool: &str) -> HashSet<String> {
+    let Some(spec) = ToolCatalog::global().resolve(tool) else {
+        return HashSet::new();
+    };
+    let mut names: HashSet<String> = spec
+        .schema_hint
+        .as_ref()
+        .map(schema_parameter_names)
+        .unwrap_or_default();
+    names.extend(explicit_catalog_parameter_names(&spec.name).into_iter().map(str::to_string));
+    names
+}
+
+fn required_parameters(tool: &str) -> Vec<String> {
+    let Some(spec) = ToolCatalog::global().resolve(tool) else {
+        return Vec::new();
+    };
+    spec.schema_hint
+        .as_ref()
+        .map(|hint| {
+            hint.required_fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect()
+        })
+        .unwrap_or_else(|| explicit_required_parameter_names(&spec.name).into_iter().map(str::to_string).collect())
+}
+
+fn schema_parameter_names(hint: &ToolSchemaHint) -> HashSet<String> {
+    hint.required_fields
+        .iter()
+        .map(|field| field.name.clone())
+        .chain(hint.defaults.keys().cloned())
+        .collect()
+}
+
+fn explicit_catalog_parameter_names(tool: &str) -> Vec<&'static str> {
+    match tool {
+        "web_search" => vec!["query"],
+        "web_extract" => vec!["urls", "extract_depth", "format"],
+        "attached_image_inspect" => vec!["question"],
+        "search_chat_history" => vec!["query", "queries"],
+        "search_chat" => vec!["chat_id", "query"],
+        "get_message_context" => vec!["message_id", "before", "after"],
+        "search_current_artifact" => vec!["artifactId", "query"],
+        "search_x_recent" => vec![
+            "keywords",
+            "any_keywords",
+            "exclude_keywords",
+            "phrases",
+            "hashtags",
+            "mentions",
+            "from_user",
+            "to_user",
+            "has_geo",
+            "has_media",
+            "place_country",
+            "has_images",
+            "has_videos",
+            "has_links",
+            "language",
+            "sort_order",
+            "query",
+        ],
+        "generate_image" => vec!["prompt", "aspect_ratio", "quality", "count"],
+        "generate_video" => vec!["prompt", "aspect_ratio", "quality", "duration", "resolution"],
+        "generate_music" => vec!["prompt", "duration"],
+        _ => Vec::new(),
+    }
+}
+
+fn explicit_required_parameter_names(tool: &str) -> Vec<&'static str> {
+    match tool {
+        "web_search" => vec!["query"],
+        "web_extract" => vec!["urls"],
+        "attached_image_inspect" => vec!["question"],
+        "search_chat_history" => vec!["queries"],
+        "search_chat" => vec!["chat_id", "query"],
+        "get_message_context" => vec!["message_id"],
+        "search_current_artifact" => vec!["artifactId", "query"],
+        "search_x_recent" => Vec::new(),
+        "generate_image" | "generate_video" | "generate_music" => vec!["prompt"],
+        _ => Vec::new(),
+    }
+}
+
+fn schema_hint_for(tool: &str) -> Option<ToolSchemaHint> {
+    let mut defaults = HashMap::new();
+    match tool {
+        "web_extract" => {
+            defaults.insert("extract_depth".to_string(), Value::String("basic".to_string()));
+            defaults.insert("format".to_string(), Value::String("markdown".to_string()));
+            Some(ToolSchemaHint {
+                required_fields: vec![FieldHint {
+                    name: "urls".to_string(),
+                    ty: "array".to_string(),
+                    description: "URLs to extract".to_string(),
+                }],
+                defaults,
+            })
+        }
+        "search_chat_history" => Some(ToolSchemaHint {
+            required_fields: vec![FieldHint {
+                name: "queries".to_string(),
+                ty: "array".to_string(),
+                description: "Queries to search".to_string(),
+            }],
+            defaults,
+        }),
+        _ => ToolCatalog::global()
+            .resolve(tool)
+            .and_then(|spec| spec.schema_hint.clone()),
+    }
+}
+
+fn normalize_special_values(
+    tool: &str,
+    value: &mut Value,
+    repaired: &mut bool,
+    repairs: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+
+    if tool == "search_chat_history" {
+        if let Some(query) = object.remove("query") {
+            object.insert("queries".to_string(), Value::Array(vec![query]));
+            *repaired = true;
+        }
+    }
+
+    if tool == "web_extract" {
+        if let Some(Value::Array(urls)) = object.get_mut("urls") {
+            for url in urls {
+                if let Some(raw) = url.as_str() {
+                    let stripped = raw.trim().trim_start_matches('[').to_string();
+                    if stripped != raw {
+                        *url = Value::String(stripped);
+                        *repaired = true;
+                        push_repair(repairs, "stripped leading bracket from bracketed URL string");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn canonical_arguments_json(tool: &str, value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return value.to_string();
+    };
+    match tool {
+        "web_search" => json!({"query": object.get("query").cloned().unwrap_or(Value::Null)}).to_string(),
+        "web_extract" => {
+            let urls = object.get("urls").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+            let depth = object
+                .get("extract_depth")
+                .cloned()
+                .unwrap_or_else(|| Value::String("basic".to_string()));
+            let format = object
+                .get("format")
+                .cloned()
+                .unwrap_or_else(|| Value::String("markdown".to_string()));
+            format!(
+                "{{\"urls\":{},\"extract_depth\":{},\"format\":{}}}",
+                urls,
+                depth,
+                format
+            )
+        }
+        "search_chat_history" => {
+            let queries = object.get("queries").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+            format!("{{\"queries\":{queries}}}")
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn normalize_model_text(raw: &str) -> String {
+    let folded = raw.replace('｜', "|");
+    let mut lines = Vec::new();
+    for line in folded.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        if trimmed.starts_with('<') || trimmed.starts_with("[TOOL_CALLS]") || trimmed.starts_with('{') {
+            lines.push(trimmed.to_string());
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn matching_delimiter(text: &str, start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut delimiter = '"';
+    let mut escape = false;
+    for (idx, char) in text.char_indices().skip_while(|(idx, _)| *idx < start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if char == '\\' {
+                escape = true;
+            } else if char == delimiter {
+                in_string = false;
+            }
+            continue;
+        }
+        match char {
+            '"' | '\'' => {
+                in_string = true;
+                delimiter = char;
+            }
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn collect_repairs(raw: &str, repairs: &mut Vec<String>) {
+    if raw.contains('\'') {
+        push_repair(repairs, "converted single quotes to double quotes");
+    }
+    if Regex::new(r#",\s*[\]}]"#).unwrap().is_match(raw) {
+        push_repair(repairs, "removed trailing comma");
+    }
+}
+
+fn push_repair(repairs: &mut Vec<String>, repair: &str) {
+    if !repairs.iter().any(|item| item == repair) {
+        repairs.push(repair.to_string());
+    }
+}
+
+fn format_hint(format: EnvelopeFormat) -> Option<String> {
+    match format {
+        EnvelopeFormat::Dsml => Some("dsml".to_string()),
+        _ => None,
+    }
+}
+
+fn malformed(format: Option<EnvelopeFormat>, detail: &str) -> EnvelopeError {
+    EnvelopeError {
+        format,
+        detail: detail.to_string(),
+    }
+}
+
+fn unescape_json_string(value: &str) -> String {
+    let mut result = String::new();
+    let mut chars = value.chars();
+    while let Some(char) = chars.next() {
+        if char != '\\' {
+            result.push(char);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => result.push('"'),
+            Some('\\') => result.push('\\'),
+            Some('n') => result.push('\n'),
+            Some('r') => result.push('\r'),
+            Some('t') => result.push('\t'),
+            Some('b') => result.push('\u{0008}'),
+            Some('f') => result.push('\u{000C}'),
+            Some(other) => result.push(other),
+            None => result.push('\\'),
+        }
+    }
+    result
+}
+

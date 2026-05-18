@@ -3,8 +3,10 @@
 use crate::catalog::ToolCatalog;
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
+use crate::tool_parse;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
+use super::types::{FfiToolParseBatch, FfiToolParseField};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RepairResult {
@@ -67,6 +69,21 @@ pub fn should_allow_tool(soft_failure_streak: u32, max_streak: u32) -> bool {
 #[uniffi::export]
 pub fn result_json_looks_soft_failure(json: &str) -> bool {
     is_soft_failure_result_json(json)
+}
+
+#[uniffi::export]
+pub fn parse_tool_calls(raw: &str) -> FfiToolParseBatch {
+    tool_parse::parse_tool_calls(raw).into()
+}
+
+#[uniffi::export]
+pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> FfiToolParseField {
+    tool_parse::coerce_provider_arguments(tool_name, args_json).into()
+}
+
+#[uniffi::export]
+pub fn has_local_tool_contract(system_prompt: &str) -> bool {
+    tool_parse::has_local_tool_contract(system_prompt)
 }
 
 #[cfg(test)]

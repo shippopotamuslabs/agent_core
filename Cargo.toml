@@ -65,6 +65,10 @@ path = "tests/compaction_triggers_test.rs"
 name = "context_management_end_to_end_test"
 path = "tests/context_management_end_to_end_test.rs"
 
+[[test]]
+name = "tool_parse_integration"
+path = "tests/tool_parse_integration.rs"
+
 [[example]]
 name = "mock_desktop_loop"
 path = "examples/mock_desktop_loop.rs"

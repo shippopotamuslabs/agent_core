@@ -9,7 +9,8 @@ mod types;
 
 pub use callbacks::{UniFfiExecutor, UniFfiSummarizer, UniFfiTransport};
 pub use policy_bridge::{
-    repair_tool, result_json_looks_soft_failure, should_allow_tool, truncate_result, RepairResult,
+    coerce_provider_arguments, has_local_tool_contract, parse_tool_calls, repair_tool,
+    result_json_looks_soft_failure, should_allow_tool, truncate_result, RepairResult,
 };
 pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,
@@ -17,7 +18,8 @@ pub use types::{
     FfiContextReference, FfiContextReferenceKind, FfiFinishReason, FfiManualCompactRequest,
     FfiManualCompactResult, FfiModelRequest, FfiModelResponse, FfiRawToolCall,
     FfiSessionCapabilities, FfiSessionIoParams, FfiSummaryRequest, FfiSummaryResult,
-    FfiToolCallRecord, FfiToolResultRecord,
+    FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason,
+    FfiToolParseField, FfiToolResultRecord,
 };
 
 use std::sync::Arc;
