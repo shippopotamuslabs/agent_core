@@ -12,7 +12,10 @@ pub trait AgentTransport: Send + Sync {
 /// Executes a batch of repaired tool calls.
 /// Implemented in Kotlin by `AgentToolExecutorAdapter` (AGENT-029) via UniFFI callback shim.
 pub trait AgentToolExecutor: Send + Sync {
-    fn execute_tools(&self, calls: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError>;
+    fn execute_tools(
+        &self,
+        calls: Vec<ToolCallRecord>,
+    ) -> Result<Vec<ToolResultRecord>, AgentError>;
 }
 
 /// Invokes LLM summarization for the summary compaction tier.
@@ -51,7 +54,10 @@ mod tests {
     struct MockExecutor;
 
     impl AgentToolExecutor for MockExecutor {
-        fn execute_tools(&self, calls: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+        fn execute_tools(
+            &self,
+            calls: Vec<ToolCallRecord>,
+        ) -> Result<Vec<ToolResultRecord>, AgentError> {
             Ok(calls
                 .into_iter()
                 .map(|c| ToolResultRecord {
@@ -74,6 +80,11 @@ mod tests {
             system_prompt: "".into(),
             tools_schema_json: "[]".into(),
             allow_tool_call: false,
+            context_references: vec![],
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: vec![],
         };
         let resp = transport.complete_model_turn(req).unwrap();
         assert_eq!(resp.assistant_text.as_deref(), Some("hello"));
@@ -82,9 +93,12 @@ mod tests {
     #[test]
     fn mock_executor_maps_calls_to_results() {
         let executor = MockExecutor;
-        let calls = vec![
-            ToolCallRecord { call_id: "c1".into(), name: "web_search".into(), arguments_json: "{}".into(), repair_metadata: None },
-        ];
+        let calls = vec![ToolCallRecord {
+            call_id: "c1".into(),
+            name: "web_search".into(),
+            arguments_json: "{}".into(),
+            repair_metadata: None,
+        }];
         let results = executor.execute_tools(calls).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].call_id, "c1");
@@ -98,6 +112,10 @@ mod tests {
             messages_to_summarize: vec![],
             instruction: "".into(),
             last_message_id: "m1".into(),
+            trigger: crate::events::CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         });
         assert!(matches!(result, Err(AgentError::Internal(_))));
     }

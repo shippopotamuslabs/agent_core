@@ -58,11 +58,9 @@ fn parse_append_blocks_success_is_complete(result_json: &str) -> Option<bool> {
     }
     match o.get("isComplete")? {
         Value::Bool(b) => Some(*b),
-        Value::String(s) => Some(
-            s.eq_ignore_ascii_case("true")
-                || s == "1"
-                || s.eq_ignore_ascii_case("yes"),
-        ),
+        Value::String(s) => {
+            Some(s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes"))
+        }
         Value::Number(n) => n.as_u64().map(|u| u == 1).or(Some(false)),
         _ => Some(false),
     }
@@ -85,9 +83,7 @@ pub fn synthetic_finalize_calls(pending: &HashSet<String>) -> Vec<ToolCallRecord
         .map(|id| ToolCallRecord {
             call_id: format!("auto-finalize-{id}"),
             name: "append_blocks".into(),
-            arguments_json: format!(
-                r#"{{"artifactId":"{id}","blocks":[],"isComplete":true}}"#
-            ),
+            arguments_json: format!(r#"{{"artifactId":"{id}","blocks":[],"isComplete":true}}"#),
             repair_metadata: None,
         })
         .collect()
@@ -134,6 +130,8 @@ mod tests {
         let calls = synthetic_finalize_calls(&p);
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|c| c.name == "append_blocks"));
-        assert!(calls.iter().all(|c| c.call_id.starts_with("auto-finalize-")));
+        assert!(calls
+            .iter()
+            .all(|c| c.call_id.starts_with("auto-finalize-")));
     }
 }

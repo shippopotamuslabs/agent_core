@@ -21,7 +21,10 @@ impl AgentTransport for UniFfiTransport {
 pub struct UniFfiExecutor(pub Box<dyn AgentToolExecutorCallback>);
 
 impl AgentToolExecutor for UniFfiExecutor {
-    fn execute_tools(&self, calls: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+    fn execute_tools(
+        &self,
+        calls: Vec<ToolCallRecord>,
+    ) -> Result<Vec<ToolResultRecord>, AgentError> {
         let ffi_calls: Vec<FfiToolCallRecord> = calls.into_iter().map(Into::into).collect();
         let out = self.0.execute_tools(ffi_calls);
         Ok(out.into_iter().map(Into::into).collect())
@@ -103,6 +106,7 @@ mod tests {
                 summarization_allowed: false,
                 kv_fixed: false,
                 tool_result_budget_tokens: None,
+                ..Default::default()
             },
             serde_json::Value::Null,
             crate::engine::SessionIoParams {

@@ -13,17 +13,17 @@ pub use policy_bridge::{
 };
 pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,
-    FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger, FfiFinishReason, FfiModelRequest,
-    FfiModelResponse, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams, FfiSummaryRequest,
-    FfiSummaryResult, FfiToolCallRecord, FfiToolResultRecord,
+    FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger, FfiContextPolicyTier,
+    FfiContextReference, FfiContextReferenceKind, FfiFinishReason, FfiManualCompactRequest,
+    FfiManualCompactResult, FfiModelRequest, FfiModelResponse, FfiRawToolCall,
+    FfiSessionCapabilities, FfiSessionIoParams, FfiSummaryRequest, FfiSummaryResult,
+    FfiToolCallRecord, FfiToolResultRecord,
 };
 
 use std::sync::Arc;
 
 use crate::engine::{AgentEngine, SessionHandle};
-use crate::{
-    AgentSummarizerCallback, AgentToolExecutorCallback, AgentTransportCallback,
-};
+use crate::{AgentSummarizerCallback, AgentToolExecutorCallback, AgentTransportCallback};
 
 pub type FfiEngineInner = AgentEngine<UniFfiTransport, UniFfiExecutor, UniFfiSummarizer>;
 
@@ -74,13 +74,9 @@ impl FfiAgentEngine {
             serde_json::from_str(&session_context_json).unwrap_or(serde_json::Value::Null);
         let msgs: Vec<crate::message::AgentMessage> =
             initial_messages.into_iter().map(Into::into).collect();
-        let handle = self.inner.create_session(
-            msgs,
-            config.into(),
-            capabilities.into(),
-            ctx,
-            io.into(),
-        );
+        let handle =
+            self.inner
+                .create_session(msgs, config.into(), capabilities.into(), ctx, io.into());
         Arc::new(FfiSession { handle })
     }
 
@@ -114,5 +110,50 @@ impl FfiAgentEngine {
             .into_iter()
             .map(Into::into)
             .collect()
+    }
+
+    pub fn request_manual_compact(
+        &self,
+        session: &FfiSession,
+        request: FfiManualCompactRequest,
+    ) -> FfiAgentAction {
+        self.inner
+            .request_manual_compact(&session.handle, request.into())
+            .into()
+    }
+
+    pub fn read_context_reference(
+        &self,
+        session: &FfiSession,
+        reference_id: String,
+    ) -> Result<String, AgentException> {
+        self.inner
+            .read_context_reference(&session.handle, reference_id)
+            .map_err(Into::into)
+    }
+
+    pub fn search_context_references(
+        &self,
+        session: &FfiSession,
+        query: String,
+        limit: u32,
+    ) -> Vec<FfiContextReference> {
+        self.inner
+            .search_context_references(&session.handle, query, limit as usize)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    pub fn insert_terminal_output(
+        &self,
+        session: &FfiSession,
+        id: String,
+        title: String,
+        content: String,
+    ) -> FfiContextReference {
+        self.inner
+            .insert_terminal_output(&session.handle, id, title, content)
+            .into()
     }
 }

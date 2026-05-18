@@ -21,7 +21,10 @@ impl AgentTransport for PanicTransport {
 struct MockExec;
 
 impl AgentToolExecutor for MockExec {
-    fn execute_tools(&self, calls: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+    fn execute_tools(
+        &self,
+        calls: Vec<ToolCallRecord>,
+    ) -> Result<Vec<ToolResultRecord>, AgentError> {
         Ok(calls
             .into_iter()
             .map(|c| ToolResultRecord {
@@ -52,6 +55,7 @@ fn main() {
             summarization_allowed: false,
             kv_fixed: false,
             tool_result_budget_tokens: None,
+            ..Default::default()
         },
         serde_json::Value::Null,
         SessionIoParams {

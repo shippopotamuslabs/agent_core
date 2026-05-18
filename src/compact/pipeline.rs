@@ -1,7 +1,8 @@
-use crate::budget::TokenLedger;
+use super::{CompactionContext, CompactionOutcome, CompactionTier};
+use crate::budget::{should_compact_at, TokenLedger};
+use crate::compact::policy::{threshold_ratio_for_trigger, CompactionPlan};
 use crate::events::CompactionEvent;
 use crate::session::{AgentConfig, AgentSession};
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
 
 /// Runs registered tiers in order (Micro→FIFO→ArtifactSquash→Summary).
 ///
@@ -33,7 +34,8 @@ impl CompactionPipeline {
             &ctx.tools_schema_json,
         );
 
-        if pressure.ratio < config.threshold_ratio {
+        let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
+        if !should_compact_at(&pressure, threshold_ratio) {
             return CompactionOutcome::NotApplicable;
         }
 
@@ -45,6 +47,9 @@ impl CompactionPipeline {
                     return CompactionOutcome::NeedsHostCall(req, s);
                 }
                 CompactionOutcome::NotApplicable => continue,
+                CompactionOutcome::Failed(err) => {
+                    return CompactionOutcome::Failed(err);
+                }
                 CompactionOutcome::Applied(new_session, event) => {
                     session = new_session;
                     session.push_compaction_event(event.clone());
@@ -57,9 +62,62 @@ impl CompactionPipeline {
                         &ctx.tools_schema_json,
                     );
 
-                    let under = new_pressure.ratio < config.threshold_ratio;
+                    let under = !should_compact_at(&new_pressure, threshold_ratio);
                     last_event = Some(event);
 
+                    if under {
+                        break;
+                    }
+                }
+            }
+        }
+
+        match last_event {
+            Some(event) => CompactionOutcome::Applied(session, event),
+            None => CompactionOutcome::NotApplicable,
+        }
+    }
+
+    pub fn run_plan(
+        &self,
+        mut session: AgentSession,
+        ctx: &CompactionContext,
+        config: &AgentConfig,
+        plan: &CompactionPlan,
+    ) -> CompactionOutcome {
+        let pressure = TokenLedger::estimate(
+            &session,
+            config,
+            &ctx.provider,
+            ctx.context_window_tokens,
+            &ctx.tools_schema_json,
+        );
+
+        if !should_compact_at(&pressure, plan.threshold_ratio) {
+            return CompactionOutcome::NotApplicable;
+        }
+
+        let mut last_event: Option<CompactionEvent> = None;
+        for tier in &self.tiers {
+            match tier.apply(session.clone(), config, ctx) {
+                CompactionOutcome::NeedsHostCall(req, s) => {
+                    return CompactionOutcome::NeedsHostCall(req, s);
+                }
+                CompactionOutcome::NotApplicable => continue,
+                CompactionOutcome::Failed(err) => return CompactionOutcome::Failed(err),
+                CompactionOutcome::Applied(new_session, event) => {
+                    session = new_session;
+                    session.push_compaction_event(event.clone());
+
+                    let new_pressure = TokenLedger::estimate(
+                        &session,
+                        config,
+                        &ctx.provider,
+                        ctx.context_window_tokens,
+                        &ctx.tools_schema_json,
+                    );
+                    let under = !should_compact_at(&new_pressure, plan.threshold_ratio);
+                    last_event = Some(event);
                     if under {
                         break;
                     }
@@ -92,6 +150,7 @@ mod tests {
                 summarization_allowed: true,
                 kv_fixed: false,
                 tool_result_budget_tokens: None,
+                ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
         }
@@ -138,7 +197,12 @@ mod tests {
     }
 
     impl CompactionTier for AlwaysApplied {
-        fn apply(&self, _: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            _: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             CompactionOutcome::Applied(self.result_session.clone(), self.event.clone())
         }
     }
@@ -146,7 +210,12 @@ mod tests {
     struct AlwaysNotApplicable;
 
     impl CompactionTier for AlwaysNotApplicable {
-        fn apply(&self, _: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            _: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             CompactionOutcome::NotApplicable
         }
     }
@@ -154,12 +223,21 @@ mod tests {
     struct AlwaysNeedsHostCall;
 
     impl CompactionTier for AlwaysNeedsHostCall {
-        fn apply(&self, session: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            session: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             CompactionOutcome::NeedsHostCall(
                 SummaryRequest {
                     messages_to_summarize: session.messages.clone(),
                     instruction: "Summarize.".into(),
                     last_message_id: "m0".into(),
+                    trigger: crate::events::CompactionTrigger::Preflight,
+                    focus_instruction: None,
+                    history_ref: None,
+                    state_ledger_snapshot: None,
                 },
                 session,
             )
@@ -169,7 +247,12 @@ mod tests {
     struct PanicIfCalled;
 
     impl CompactionTier for PanicIfCalled {
-        fn apply(&self, _: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            _: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             panic!("this tier must not be called");
         }
     }
@@ -263,17 +346,31 @@ mod tests {
     }
 
     /// Mock tier that returns the input session unchanged (still over budget after it "runs").
-    struct NoopApplied { event: CompactionEvent }
+    struct NoopApplied {
+        event: CompactionEvent,
+    }
     impl CompactionTier for NoopApplied {
-        fn apply(&self, session: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            session: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             CompactionOutcome::Applied(session, self.event.clone())
         }
     }
 
     /// Mock tier that clears all messages from the input session (brings it under budget).
-    struct ClearMessages { event: CompactionEvent }
+    struct ClearMessages {
+        event: CompactionEvent,
+    }
     impl CompactionTier for ClearMessages {
-        fn apply(&self, mut session: AgentSession, _: &AgentConfig, _: &CompactionContext) -> CompactionOutcome {
+        fn apply(
+            &self,
+            mut session: AgentSession,
+            _: &AgentConfig,
+            _: &CompactionContext,
+        ) -> CompactionOutcome {
             session.messages.clear();
             CompactionOutcome::Applied(session, self.event.clone())
         }

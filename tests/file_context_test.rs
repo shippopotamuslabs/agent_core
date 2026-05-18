@@ -1,0 +1,146 @@
+//! TDD Red -- file context condensation tests (S17, E7, M7).
+
+use std::sync::Arc;
+
+use agent_core::action::AgentAction;
+use agent_core::context_store::ContextStore;
+use agent_core::engine::{AgentEngine, SessionIoParams};
+use agent_core::events::AgentError;
+use agent_core::file_context::{condense_file_context, FileCondensationLevel};
+use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
+use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::turn_io::{ModelRequest, ModelResponse};
+
+struct PanicTransport;
+impl AgentTransport for PanicTransport {
+    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
+        panic!("unused");
+    }
+}
+
+struct PanicExec;
+impl AgentToolExecutor for PanicExec {
+    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+        panic!("unused");
+    }
+}
+
+#[test]
+fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_file_condensation = true;
+    cfg.file_outline_threshold_tokens = 100;
+    let caps = SessionCapabilities {
+        file_backed_context_supported: true,
+        ..Default::default()
+    };
+    let mut store = ContextStore::default();
+    let files = serde_json::json!([
+        {
+            "path": "src/large.rs",
+            "token_estimate": 500,
+            "content": "pub fn alpha() {}\nstruct Beta {}\nfn gamma() {}"
+        }
+    ]);
+
+    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps)
+        .expect("file context index");
+
+    assert_eq!(index.included_paths.len(), 1);
+    let summary = &index.included_paths[0];
+    assert_eq!(summary.path, "src/large.rs");
+    assert_eq!(summary.condensation_level, FileCondensationLevel::Outline);
+    let outline_ref = summary.outline_ref.as_ref().expect("outline ref");
+    assert_eq!(summary.chunk_refs.len(), 1);
+    let outline = store.get(outline_ref).expect("stored outline");
+    assert!(outline.content.contains("pub fn alpha"));
+    let chunk = store.get(&summary.chunk_refs[0]).expect("stored chunk");
+    assert!(chunk.content.contains("fn gamma"));
+}
+
+#[test]
+fn e7_unparseable_file_context_becomes_filename_only() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_file_condensation = true;
+    cfg.file_outline_threshold_tokens = 100;
+    let caps = SessionCapabilities {
+        file_backed_context_supported: true,
+        ..Default::default()
+    };
+    let mut store = ContextStore::default();
+    let files = serde_json::json!([
+        {
+            "path": "blob.bin",
+            "token_estimate": 500,
+            "content": "plain bytes without source structure"
+        }
+    ]);
+
+    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps)
+        .expect("file context index");
+
+    assert_eq!(index.included_paths.len(), 1);
+    let summary = &index.included_paths[0];
+    assert_eq!(summary.path, "blob.bin");
+    assert_eq!(
+        summary.condensation_level,
+        FileCondensationLevel::FilenameOnly
+    );
+    assert!(summary.outline_ref.is_none());
+    assert!(summary.chunk_refs.is_empty());
+}
+
+#[test]
+fn m7_file_context_does_not_inline_full_body_into_model_messages() {
+    let body = format!("pub fn alpha() {{}}\n{}", "SENTINEL_FULL_BODY".repeat(512));
+    let mut cfg = AgentConfig::default();
+    cfg.enable_file_condensation = true;
+    cfg.file_outline_threshold_tokens = 100;
+    let caps = SessionCapabilities {
+        file_backed_context_supported: true,
+        ..Default::default()
+    };
+    let session_context = serde_json::json!({
+        "included_files": [
+            {
+                "path": "src/large.rs",
+                "token_estimate": 500,
+                "content": body
+            }
+        ]
+    });
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![AgentMessage {
+            id: "u1".into(),
+            role: AgentRole::User,
+            content: "Use attached source context".into(),
+            metadata: serde_json::Value::Null,
+        }],
+        cfg,
+        caps,
+        session_context,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 8_000,
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    let request = match eng.next_action(&handle) {
+        AgentAction::CallModel(request) => request,
+        other => panic!("expected CallModel, got {other:?}"),
+    };
+
+    assert!(request.file_context_index.is_some());
+    assert!(request
+        .session_messages
+        .iter()
+        .all(|message| !message.content.contains("SENTINEL_FULL_BODY")));
+}

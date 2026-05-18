@@ -32,12 +32,17 @@ pub fn repair_tool(name: &str, args_json: &str) -> RepairResult {
             resolved_name: rec.name,
             arguments_json: rec.arguments_json,
         },
-        crate::repair::RepairOutcome::Reject { error_json_for_model } => RepairResult {
+        crate::repair::RepairOutcome::Reject {
+            error_json_for_model,
+        } => RepairResult {
             resolved_name: name.to_string(),
             arguments_json: error_json_for_model,
             repaired: false,
         },
-        crate::repair::RepairOutcome::Suggest { original, closest_name } => RepairResult {
+        crate::repair::RepairOutcome::Suggest {
+            original,
+            closest_name,
+        } => RepairResult {
             resolved_name: original,
             arguments_json: format!(
                 "{{\"error\":\"Ambiguous tool (closest match: {closest_name})\"}}"

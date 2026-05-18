@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use crate::events::AgentError;
 use crate::message::ToolCallRecord;
 use crate::turn_io::SummaryRequest;
-use crate::events::AgentError;
+use serde::{Deserialize, Serialize};
 
 /// Actions yielded by `AgentEngine::next_action()`.
 /// The host fulfills each action and calls the appropriate `submit_*` method.
@@ -28,6 +28,11 @@ pub enum AgentAction {
 
     /// Session terminated with an error.
     Failed(AgentError),
+
+    /// Manual compaction (S18/E9) finished without requiring a host round-trip
+    /// (no-op when policy disables manual compact, or after a forced summary
+    /// completes synchronously).
+    ManualCompactCompleted(crate::manual_compact::ManualCompactResult),
 }
 
 impl AgentAction {
@@ -47,6 +52,11 @@ mod tests {
             system_prompt: "test".into(),
             tools_schema_json: "[]".into(),
             allow_tool_call: true,
+            context_references: vec![],
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: vec![],
         }
     }
 
@@ -82,6 +92,10 @@ mod tests {
             messages_to_summarize: vec![],
             instruction: "Summarize.".into(),
             last_message_id: "m1".into(),
+            trigger: crate::events::CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         });
         let json = serde_json::to_string(&action).unwrap();
         let back: AgentAction = serde_json::from_str(&json).unwrap();

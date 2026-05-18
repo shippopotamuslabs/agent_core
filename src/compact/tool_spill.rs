@@ -1,0 +1,163 @@
+//! Spill oversized tool results into the [`crate::context_store::ContextStore`]
+//! and replace the prompt-facing payload with a compact `context_ref` envelope.
+
+use crate::context_store::{
+    make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
+};
+use crate::events::{CompactionEvent, CompactionTier as TierEnum};
+use crate::message::{AgentMessage, AgentRole};
+use crate::message::{ToolCallRecord, ToolResultRecord};
+use crate::session::{AgentConfig, AgentSession};
+
+use super::{CompactionContext, CompactionOutcome, CompactionTier};
+
+/// Build the canonical reference id used for a spilled tool output.
+pub fn tool_output_reference_id(call_id: &str) -> String {
+    format!("tool-output-{call_id}")
+}
+
+/// Construct the prompt-facing JSON envelope that replaces the raw result.
+///
+/// The envelope intentionally contains the literal string `context_ref` so
+/// downstream message-content matchers (and the test asserting on `context_ref`)
+/// can detect a spilled message.
+fn spill_envelope(reference: &ContextReference) -> String {
+    serde_json::json!({
+        "context_ref": reference.id,
+        "kind": "tool_output",
+        "title": reference.title,
+        "byte_len": reference.byte_len,
+        "preview": reference.preview,
+        "retrieval_hint": reference.retrieval_hint,
+    })
+    .to_string()
+}
+
+/// If `result.result_json` exceeds `threshold_bytes`, persist the raw payload
+/// in `store` and overwrite `result.result_json` with a compact reference
+/// envelope. Returns the inserted [`ContextReference`].
+pub fn spill_tool_result_if_needed(
+    store: &mut ContextStore,
+    result: &mut ToolResultRecord,
+    call: &ToolCallRecord,
+    threshold_bytes: usize,
+    turn_index: u32,
+) -> Option<ContextReference> {
+    let len = result.result_json.len();
+    if len <= threshold_bytes {
+        return None;
+    }
+    let id = tool_output_reference_id(&result.call_id);
+    let title = format!("tool_output:{}:{}", call.name, result.call_id);
+    let preview = make_preview(&result.result_json);
+    let token_estimate = (len / 4) as u32;
+    let reference = ContextReference {
+        id: id.clone(),
+        kind: ContextReferenceKind::ToolOutput,
+        title,
+        byte_len: len as u64,
+        token_estimate,
+        preview,
+        retrieval_hint: format!("read_context_reference(\"{id}\")"),
+    };
+    let entry = ContextStoreEntry {
+        reference: reference.clone(),
+        content: result.result_json.clone(),
+        source_message_ids: vec![format!("tool-{}", result.call_id)],
+        created_turn_index: turn_index,
+        expires_after_turn: None,
+    };
+    let inserted = store.insert_entry(entry);
+    // Replace the prompt-facing payload with a compact envelope.
+    result.result_json = spill_envelope(&inserted);
+    result.truncated = true;
+    Some(inserted)
+}
+
+fn tool_message_reference_id(message: &AgentMessage) -> String {
+    let call_id = message
+        .metadata
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&message.id);
+    tool_output_reference_id(call_id)
+}
+
+pub fn spill_tool_messages_in_session(
+    store: &mut ContextStore,
+    session: &mut AgentSession,
+    threshold_bytes: usize,
+    turn_index: u32,
+    trigger: crate::events::CompactionTrigger,
+) -> Option<CompactionEvent> {
+    let before = session
+        .messages
+        .iter()
+        .map(|message| (message.content.len() / 4) as u32)
+        .sum();
+    let mut changed = false;
+
+    for message in &mut session.messages {
+        if message.role != AgentRole::Tool
+            || message.content.len() <= threshold_bytes
+            || message.content.contains("\"context_ref\"")
+            || message.content.contains("\"totalBlocks\"")
+        {
+            continue;
+        }
+        let id = tool_message_reference_id(message);
+        let content = message.content.clone();
+        let reference = ContextReference {
+            id: id.clone(),
+            kind: ContextReferenceKind::ToolOutput,
+            title: format!("tool_output:{}", message.id),
+            byte_len: content.len() as u64,
+            token_estimate: (content.len() / 4) as u32,
+            preview: make_preview(&content),
+            retrieval_hint: format!("read_context_reference(\"{id}\")"),
+        };
+        let entry = ContextStoreEntry {
+            reference: reference.clone(),
+            content,
+            source_message_ids: vec![message.id.clone()],
+            created_turn_index: turn_index,
+            expires_after_turn: None,
+        };
+        let inserted = store.insert_entry(entry);
+        message.content = spill_envelope(&inserted);
+        changed = true;
+    }
+
+    changed.then(|| CompactionEvent {
+        tier: TierEnum::ToolSpill,
+        tokens_before: before,
+        tokens_after: session
+            .messages
+            .iter()
+            .map(|message| (message.content.len() / 4) as u32)
+            .sum(),
+        trigger,
+    })
+}
+
+pub struct ToolSpillCompactionTier;
+
+impl Default for ToolSpillCompactionTier {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl CompactionTier for ToolSpillCompactionTier {
+    fn apply(
+        &self,
+        session: AgentSession,
+        _config: &AgentConfig,
+        _ctx: &CompactionContext,
+    ) -> CompactionOutcome {
+        // ContextStore is engine-owned; the engine applies this stateful tier
+        // before the stateless pipeline executes.
+        let _ = session;
+        CompactionOutcome::NotApplicable
+    }
+}

@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::action::AgentAction;
-use crate::compact::{CompactionContext, CompactionPipeline};
+use crate::compact::CompactionContext;
+use crate::context_store::ContextStore;
 use crate::events::AgentEvent;
 use crate::guardrails::GuardrailState;
 use crate::message::ToolCallRecord;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
+use crate::state_ledger::StateLedger;
 use crate::turn_io::{ModelRequest, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
@@ -39,14 +41,16 @@ pub(super) struct InnerSession {
     pub(super) capabilities: SessionCapabilities,
     pub(super) io: SessionIoParams,
     pub(super) guardrails: GuardrailState,
-    pub(super) pipeline: Arc<CompactionPipeline>,
     pub(super) phase: EnginePhase,
     pub(super) pending_call_model: Option<ModelRequest>,
     pub(super) pending_execute: Option<Vec<ToolCallRecord>>,
     pub(super) pending_execute_skip_guardrail_count: bool,
     pub(super) pending_auto_finalize_finish: bool,
+    pub(super) pending_finalize_after_tool_stop: bool,
     pub(super) pending_summary_req: Option<SummaryRequest>,
     pub(super) pending_summary_ctx: Option<CompactionContext>,
+    pub(super) context_store: ContextStore,
+    pub(super) state_ledger: StateLedger,
     pub(super) pending_tool_turn_parallel: usize,
     pub(super) pending_reject_count_this_turn: usize,
     pub(super) events: Vec<AgentEvent>,

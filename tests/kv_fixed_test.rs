@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use agent_core::engine::{AgentEngine, SessionIoParams};
+use agent_core::events::AgentError;
 use agent_core::events::AgentEvent;
 use agent_core::host::{AgentToolExecutor, AgentTransport};
 use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelRequest, ModelResponse};
-use agent_core::events::AgentError;
 
 struct PanicTransport;
 impl AgentTransport for PanicTransport {
@@ -69,6 +69,7 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
             summarization_allowed: false,
             kv_fixed: true,
             tool_result_budget_tokens: None,
+            ..Default::default()
         },
         serde_json::Value::Null,
         io(),
@@ -87,6 +88,7 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
             summarization_allowed: false,
             kv_fixed: false,
             tool_result_budget_tokens: None,
+            ..Default::default()
         },
         serde_json::Value::Null,
         io(),

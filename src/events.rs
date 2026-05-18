@@ -9,6 +9,7 @@ pub enum CompactionTrigger {
     Preflight,
     MidTurn,
     PostToolResult,
+    Manual,
 }
 
 /// Which compaction strategy ran.
@@ -19,6 +20,8 @@ pub enum CompactionTier {
     Fifo,
     ArtifactSquash,
     Summary,
+    ToolSpill,
+    HistorySnapshot,
 }
 
 impl std::fmt::Display for CompactionTier {
@@ -28,6 +31,8 @@ impl std::fmt::Display for CompactionTier {
             CompactionTier::Fifo => write!(f, "fifo"),
             CompactionTier::ArtifactSquash => write!(f, "artifact_squash"),
             CompactionTier::Summary => write!(f, "summary"),
+            CompactionTier::ToolSpill => write!(f, "tool_spill"),
+            CompactionTier::HistorySnapshot => write!(f, "history_snapshot"),
         }
     }
 }
@@ -61,6 +66,15 @@ pub enum AgentError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Context reference not found: {reference_id}")]
+    ContextReferenceNotFound { reference_id: String },
+
+    #[error("Context store unavailable: {reason}")]
+    ContextStoreUnavailable { reason: String },
+
+    #[error("Policy rejected: {reason}")]
+    PolicyRejected { reason: String },
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -98,24 +112,55 @@ pub enum AgentEvent {
     KvCacheInvalidated {
         reason: String,
     },
+    PreCompact {
+        trigger: CompactionTrigger,
+    },
+    PostCompact {
+        trigger: CompactionTrigger,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        history_ref: Option<String>,
+    },
 }
 
 impl std::fmt::Display for AgentEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AgentEvent::TurnStarted { turn_index, .. } => write!(f, "TurnStarted(turn={turn_index})"),
-            AgentEvent::TurnCompleted { turn_index, tool_call_count, .. } => {
-                write!(f, "TurnCompleted(turn={turn_index}, tools={tool_call_count})")
+            AgentEvent::TurnStarted { turn_index, .. } => {
+                write!(f, "TurnStarted(turn={turn_index})")
+            }
+            AgentEvent::TurnCompleted {
+                turn_index,
+                tool_call_count,
+                ..
+            } => {
+                write!(
+                    f,
+                    "TurnCompleted(turn={turn_index}, tools={tool_call_count})"
+                )
             }
             AgentEvent::CompactionApplied(e) => write!(f, "CompactionApplied(tier={})", e.tier),
             AgentEvent::ContextPressure { ratio } => write!(f, "ContextPressure(ratio={ratio:.2})"),
-            AgentEvent::ToolRepaired { original_name, resolved_name, confidence } => {
-                write!(f, "ToolRepaired({original_name}->{resolved_name} conf={confidence:.2})")
+            AgentEvent::ToolRepaired {
+                original_name,
+                resolved_name,
+                confidence,
+            } => {
+                write!(
+                    f,
+                    "ToolRepaired({original_name}->{resolved_name} conf={confidence:.2})"
+                )
             }
-            AgentEvent::ToolSoftFailure { tool_name, turn_index } => {
+            AgentEvent::ToolSoftFailure {
+                tool_name,
+                turn_index,
+            } => {
                 write!(f, "ToolSoftFailure(tool={tool_name} turn={turn_index})")
             }
             AgentEvent::KvCacheInvalidated { reason } => write!(f, "KvCacheInvalidated({reason})"),
+            AgentEvent::PreCompact { trigger } => write!(f, "PreCompact({trigger:?})"),
+            AgentEvent::PostCompact { trigger, .. } => write!(f, "PostCompact({trigger:?})"),
         }
     }
 }
@@ -126,13 +171,18 @@ mod tests {
 
     #[test]
     fn agent_error_display() {
-        let e = AgentError::RepairFailed { name: "web_seach".into(), reason: "below threshold".into() };
+        let e = AgentError::RepairFailed {
+            name: "web_seach".into(),
+            reason: "below threshold".into(),
+        };
         assert!(e.to_string().contains("web_seach"));
     }
 
     #[test]
     fn agent_error_roundtrip() {
-        let e = AgentError::GuardrailExceeded { kind: "max_turns".into() };
+        let e = AgentError::GuardrailExceeded {
+            kind: "max_turns".into(),
+        };
         let json = serde_json::to_string(&e).unwrap();
         let back: AgentError = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, AgentError::GuardrailExceeded { kind } if kind == "max_turns"));
@@ -154,28 +204,52 @@ mod tests {
 
     #[test]
     fn agent_event_turn_started_roundtrip() {
-        let ev = AgentEvent::TurnStarted { turn_index: 3, allow_tool_call: false };
+        let ev = AgentEvent::TurnStarted {
+            turn_index: 3,
+            allow_tool_call: false,
+        };
         let json = serde_json::to_string(&ev).unwrap();
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, AgentEvent::TurnStarted { turn_index: 3, allow_tool_call: false }));
+        assert!(matches!(
+            back,
+            AgentEvent::TurnStarted {
+                turn_index: 3,
+                allow_tool_call: false
+            }
+        ));
     }
 
     #[test]
     fn agent_event_kv_cache_invalidated_roundtrip() {
-        let ev = AgentEvent::KvCacheInvalidated { reason: "Compacted: micro".into() };
+        let ev = AgentEvent::KvCacheInvalidated {
+            reason: "Compacted: micro".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, AgentEvent::KvCacheInvalidated { reason } if reason.contains("micro")));
+        assert!(
+            matches!(back, AgentEvent::KvCacheInvalidated { reason } if reason.contains("micro"))
+        );
     }
 
     #[test]
     fn all_agent_error_variants_serialize() {
         let variants: Vec<AgentError> = vec![
             AgentError::UnsupportedTool { name: "x".into() },
-            AgentError::RepairFailed { name: "x".into(), reason: "y".into() },
-            AgentError::GuardrailExceeded { kind: "max_turns".into() },
-            AgentError::CompactionFailed { tier: "fifo".into(), reason: "empty".into() },
-            AgentError::InvalidTransition { from: "idle".into(), to: "done".into() },
+            AgentError::RepairFailed {
+                name: "x".into(),
+                reason: "y".into(),
+            },
+            AgentError::GuardrailExceeded {
+                kind: "max_turns".into(),
+            },
+            AgentError::CompactionFailed {
+                tier: "fifo".into(),
+                reason: "empty".into(),
+            },
+            AgentError::InvalidTransition {
+                from: "idle".into(),
+                to: "done".into(),
+            },
             AgentError::Internal("oops".into()),
         ];
         for v in &variants {
@@ -186,7 +260,10 @@ mod tests {
 
     #[test]
     fn compaction_tier_display() {
-        assert_eq!(CompactionTier::ArtifactSquash.to_string(), "artifact_squash");
+        assert_eq!(
+            CompactionTier::ArtifactSquash.to_string(),
+            "artifact_squash"
+        );
         assert_eq!(CompactionTier::Summary.to_string(), "summary");
     }
 }

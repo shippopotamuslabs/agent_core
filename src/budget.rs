@@ -10,21 +10,28 @@ const REASONING_RESERVE_TOKENS: u32 = 256;
 /// Approximate bytes per token for local budget conversion.
 const AVG_BYTES_PER_TOKEN: usize = 4;
 
-static ENCODER: Lazy<CoreBPE> = Lazy::new(|| {
-    tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load")
-});
+static ENCODER: Lazy<CoreBPE> =
+    Lazy::new(|| tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load"));
 
 fn count_tokens(text: &str) -> u32 {
     ENCODER.encode_with_special_tokens(text).len() as u32
 }
 
 pub(crate) fn apply_correction(raw_tokens: u32, provider: &str, config: &AgentConfig) -> u32 {
-    let factor = config.token_correction.get(provider).copied().unwrap_or(1.0);
+    let factor = config
+        .token_correction
+        .get(provider)
+        .copied()
+        .unwrap_or(1.0);
     (raw_tokens as f32 * factor).round() as u32
 }
 
 fn count_session_tokens(session: &AgentSession) -> u32 {
-    session.messages.iter().map(|m| count_tokens(&m.content)).sum()
+    session
+        .messages
+        .iter()
+        .map(|m| count_tokens(&m.content))
+        .sum()
 }
 
 pub struct TokenLedger;
@@ -70,8 +77,17 @@ impl TokenLedger {
 }
 
 /// Returns true when compaction must run before the next model call.
+///
+/// `config` carries the default preflight `threshold_ratio`. For trigger-aware
+/// thresholds use [`crate::compact::policy::threshold_ratio_for_trigger`] with
+/// [`should_compact_at`].
 pub fn should_compact(pressure: &Pressure, config: &AgentConfig) -> bool {
     pressure.ratio >= config.threshold_ratio
+}
+
+/// Trigger-aware variant of [`should_compact`].
+pub fn should_compact_at(pressure: &Pressure, threshold_ratio: f32) -> bool {
+    pressure.ratio >= threshold_ratio
 }
 
 /// Per-tool-result byte budget:
@@ -210,7 +226,13 @@ mod tests {
         let session = make_session(&["hello world"]);
         let mut config = AgentConfig::default();
         config.token_correction.insert("anthropic".into(), 2.0);
-        let base = TokenLedger::estimate(&session, &AgentConfig::default(), "anthropic", 200_000, "[]");
+        let base = TokenLedger::estimate(
+            &session,
+            &AgentConfig::default(),
+            "anthropic",
+            200_000,
+            "[]",
+        );
         let doubled = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
         assert_eq!(doubled.total_tokens, base.total_tokens * 2);
     }
@@ -231,6 +253,7 @@ mod tests {
             summarization_allowed: true,
             kv_fixed: false,
             tool_result_budget_tokens: None,
+            ..Default::default()
         };
         let config = AgentConfig::default();
         assert_eq!(truncate_budget_per_result(&caps, &config), 4096);
@@ -242,6 +265,7 @@ mod tests {
             summarization_allowed: false,
             kv_fixed: true,
             tool_result_budget_tokens: Some(512),
+            ..Default::default()
         };
         let config = AgentConfig::default();
         // 512 tokens × 4 bytes/token = 2048 bytes
@@ -254,6 +278,7 @@ mod tests {
             summarization_allowed: false,
             kv_fixed: true,
             tool_result_budget_tokens: Some(0),
+            ..Default::default()
         };
         let config = AgentConfig::default();
         assert_eq!(truncate_budget_per_result(&caps, &config), 0);

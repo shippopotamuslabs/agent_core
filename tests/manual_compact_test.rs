@@ -1,0 +1,222 @@
+//! TDD Red — manual compact tests (S18, S24, E9).
+
+use std::sync::Arc;
+
+use agent_core::action::AgentAction;
+use agent_core::engine::{AgentEngine, SessionIoParams};
+use agent_core::events::{AgentError, AgentEvent, CompactionTrigger};
+use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
+use agent_core::manual_compact::ManualCompactRequest;
+use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::turn_io::{ModelRequest, ModelResponse, SummaryResult};
+
+struct PanicTransport;
+impl AgentTransport for PanicTransport {
+    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
+        panic!("unused");
+    }
+}
+struct PanicExec;
+impl AgentToolExecutor for PanicExec {
+    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+        panic!("unused");
+    }
+}
+
+fn user_msg(id: &str, body: &str) -> AgentMessage {
+    AgentMessage {
+        id: id.into(),
+        role: AgentRole::User,
+        content: body.into(),
+        metadata: serde_json::Value::Null,
+    }
+}
+
+#[test]
+fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_manual_compact = true;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        kv_fixed: false,
+        ..Default::default()
+    };
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![
+            user_msg("u0", "first"),
+            AgentMessage {
+                id: "a0".into(),
+                role: AgentRole::Assistant,
+                content: "ack".into(),
+                metadata: serde_json::Value::Null,
+            },
+            user_msg("u1", "tail"),
+        ],
+        cfg,
+        caps,
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    let action = eng.request_manual_compact(
+        &handle,
+        ManualCompactRequest {
+            focus_instruction: Some("preserve tool decisions".into()),
+            force_summary: true,
+        },
+    );
+    match action {
+        AgentAction::RequestSummary(req) => {
+            assert_eq!(req.trigger, CompactionTrigger::Manual);
+            assert_eq!(
+                req.focus_instruction.as_deref(),
+                Some("preserve tool decisions")
+            );
+        }
+        other => panic!("expected RequestSummary, got {other:?}"),
+    }
+}
+
+#[test]
+fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
+    let mut cfg = AgentConfig::default();
+    cfg.threshold_ratio = 0.80;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        kv_fixed: false,
+        ..Default::default()
+    };
+    let big = "hello ".repeat(400);
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![
+            AgentMessage {
+                id: "u0".into(),
+                role: AgentRole::User,
+                content: big.clone(),
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "a0".into(),
+                role: AgentRole::Assistant,
+                content: big.clone(),
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "tail".into(),
+                metadata: serde_json::Value::Null,
+            },
+        ],
+        cfg,
+        caps,
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 256,
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+    // Should fire preflight summary tier.
+    let _ = eng.next_action(&handle);
+    eng.submit_summary(
+        &handle,
+        SummaryResult {
+            summary_text: "SUMMARY".into(),
+            last_message_id: "a0".into(),
+        },
+    );
+    let events = eng.drain_events(&handle);
+
+    let pre_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::PreCompact { .. }))
+        .expect("PreCompact event expected");
+    let applied_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::CompactionApplied(_)))
+        .expect("CompactionApplied event expected");
+    let post_idx = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::PostCompact { .. }))
+        .expect("PostCompact event expected");
+    assert!(
+        pre_idx < applied_idx,
+        "PreCompact must precede CompactionApplied"
+    );
+    assert!(
+        applied_idx < post_idx,
+        "PostCompact must follow CompactionApplied"
+    );
+    match &events[post_idx] {
+        AgentEvent::PostCompact {
+            summary_ref,
+            history_ref,
+            ..
+        } => {
+            assert_eq!(summary_ref.as_deref(), Some("compact-summary-a0"));
+            assert_eq!(history_ref.as_deref(), Some("history-u0-a0"));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn e9_manual_compact_disabled_by_policy_returns_no_op() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_manual_compact = false;
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![],
+        cfg,
+        SessionCapabilities::default(),
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+    let action = eng.request_manual_compact(
+        &handle,
+        ManualCompactRequest {
+            focus_instruction: Some("anything".into()),
+            force_summary: true,
+        },
+    );
+    match action {
+        AgentAction::ManualCompactCompleted(result) => {
+            assert!(result.summary_ref.is_none());
+            assert!(result.history_ref.is_none());
+        }
+        other => panic!("expected ManualCompactCompleted, got {other:?}"),
+    }
+    let pre_count = eng
+        .drain_events(&handle)
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::PreCompact { .. }))
+        .count();
+    assert_eq!(pre_count, 0);
+}

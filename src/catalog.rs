@@ -108,16 +108,35 @@ mod tests {
     #[test]
     fn reproducible_classification() {
         let cat = ToolCatalog::global();
-        let reproducible = ["web_search", "web_extract", "attached_image_inspect",
-            "search_chat_history", "search_chat", "get_message_context",
-            "search_current_artifact", "search_x_recent"];
-        let non_reproducible = ["start_artifact", "append_blocks", "manage_memories",
-            "generate_image", "generate_video", "generate_music"];
+        let reproducible = [
+            "web_search",
+            "web_extract",
+            "attached_image_inspect",
+            "search_chat_history",
+            "search_chat",
+            "get_message_context",
+            "search_current_artifact",
+            "search_x_recent",
+        ];
+        let non_reproducible = [
+            "start_artifact",
+            "append_blocks",
+            "manage_memories",
+            "generate_image",
+            "generate_video",
+            "generate_music",
+        ];
         for name in &reproducible {
-            assert!(cat.resolve(name).unwrap().reproducible, "{name} should be reproducible");
+            assert!(
+                cat.resolve(name).unwrap().reproducible,
+                "{name} should be reproducible"
+            );
         }
         for name in &non_reproducible {
-            assert!(!cat.resolve(name).unwrap().reproducible, "{name} should not be reproducible");
+            assert!(
+                !cat.resolve(name).unwrap().reproducible,
+                "{name} should not be reproducible"
+            );
         }
     }
 
@@ -126,7 +145,11 @@ mod tests {
         let cat = ToolCatalog::global();
         let spec = cat.resolve("start_artifact").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
-        let fields: Vec<&str> = hint.required_fields.iter().map(|f| f.name.as_str()).collect();
+        let fields: Vec<&str> = hint
+            .required_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         assert!(fields.contains(&"title"));
     }
 
@@ -135,7 +158,10 @@ mod tests {
         let cat = ToolCatalog::global();
         let spec = cat.resolve("append_blocks").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
-        assert_eq!(hint.defaults.get("isComplete"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            hint.defaults.get("isComplete"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 
     #[test]

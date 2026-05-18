@@ -1,11 +1,23 @@
 ---
 source: tests/fixtures.rs
+assertion_line: 213
 expression: events
 ---
 [
   {
+    "type": "pre_compact",
+    "trigger": "preflight"
+  },
+  {
     "type": "context_pressure",
     "ratio": 3.1367188
+  },
+  {
+    "type": "compaction_applied",
+    "tier": "history_snapshot",
+    "tokens_before": 803,
+    "tokens_after": 803,
+    "trigger": "preflight"
   },
   {
     "type": "compaction_applied",
@@ -13,6 +25,11 @@ expression: events
     "tokens_before": 803,
     "tokens_after": 1,
     "trigger": "preflight"
+  },
+  {
+    "type": "post_compact",
+    "trigger": "preflight",
+    "history_ref": "history-u0-u1"
   },
   {
     "type": "turn_started",
