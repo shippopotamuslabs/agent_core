@@ -8,6 +8,9 @@ use crate::session::{AgentConfig, SessionCapabilities};
 use crate::turn_io::{
     FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryRequest, SummaryResult,
 };
+use crate::tool_parse::result::{
+    ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField,
+};
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiAgentRole {
@@ -379,6 +382,165 @@ impl From<crate::message::ToolResultRecord> for FfiToolResultRecord {
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiToolParseField {
+    pub tool_name: String,
+    pub arguments_json: String,
+    pub repaired: bool,
+    pub repairs: Vec<String>,
+}
+
+impl From<ToolParseField> for FfiToolParseField {
+    fn from(field: ToolParseField) -> Self {
+        Self {
+            tool_name: field.tool_name,
+            arguments_json: field.arguments_json,
+            repaired: field.repaired,
+            repairs: field.repairs,
+        }
+    }
+}
+
+impl From<FfiToolParseField> for ToolParseField {
+    fn from(field: FfiToolParseField) -> Self {
+        Self {
+            tool_name: field.tool_name,
+            arguments_json: field.arguments_json,
+            repaired: field.repaired,
+            repairs: field.repairs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiToolParseFailure {
+    pub reason: FfiToolParseFailureReason,
+    pub original: String,
+    pub format_hint: Option<String>,
+}
+
+impl From<ToolParseFailure> for FfiToolParseFailure {
+    fn from(failure: ToolParseFailure) -> Self {
+        Self {
+            reason: failure.reason.into(),
+            original: failure.original,
+            format_hint: failure.format_hint,
+        }
+    }
+}
+
+impl From<FfiToolParseFailure> for ToolParseFailure {
+    fn from(failure: FfiToolParseFailure) -> Self {
+        Self {
+            reason: failure.reason.into(),
+            original: failure.original,
+            format_hint: failure.format_hint,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiToolParseBatch {
+    pub successes: Vec<FfiToolParseField>,
+    pub failures: Vec<FfiToolParseFailure>,
+    pub visible_prefix: String,
+    pub visible_suffix: String,
+}
+
+impl From<ToolParseBatch> for FfiToolParseBatch {
+    fn from(batch: ToolParseBatch) -> Self {
+        Self {
+            successes: batch.successes.into_iter().map(Into::into).collect(),
+            failures: batch.failures.into_iter().map(Into::into).collect(),
+            visible_prefix: batch.visible_prefix,
+            visible_suffix: batch.visible_suffix,
+        }
+    }
+}
+
+impl From<FfiToolParseBatch> for ToolParseBatch {
+    fn from(batch: FfiToolParseBatch) -> Self {
+        Self {
+            successes: batch.successes.into_iter().map(Into::into).collect(),
+            failures: batch.failures.into_iter().map(Into::into).collect(),
+            visible_prefix: batch.visible_prefix,
+            visible_suffix: batch.visible_suffix,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiToolParseFailureReason {
+    MalformedEnvelope,
+    InvalidJson {
+        detail: String,
+    },
+    UnknownTool {
+        name: String,
+    },
+    UnknownParameter {
+        tool: String,
+        param: String,
+    },
+    DuplicateParameter {
+        tool: String,
+        param: String,
+    },
+    MissingRequiredParameter {
+        tool: String,
+        param: String,
+    },
+    SchemaCoercionFailed {
+        tool: String,
+        param: String,
+        expected: String,
+    },
+}
+
+impl From<ToolParseFailureReason> for FfiToolParseFailureReason {
+    fn from(reason: ToolParseFailureReason) -> Self {
+        match reason {
+            ToolParseFailureReason::MalformedEnvelope => Self::MalformedEnvelope,
+            ToolParseFailureReason::InvalidJson { detail } => Self::InvalidJson { detail },
+            ToolParseFailureReason::UnknownTool { name } => Self::UnknownTool { name },
+            ToolParseFailureReason::UnknownParameter { tool, param } => Self::UnknownParameter { tool, param },
+            ToolParseFailureReason::DuplicateParameter { tool, param } => Self::DuplicateParameter { tool, param },
+            ToolParseFailureReason::MissingRequiredParameter { tool, param } => {
+                Self::MissingRequiredParameter { tool, param }
+            }
+            ToolParseFailureReason::SchemaCoercionFailed { tool, param, expected } => {
+                Self::SchemaCoercionFailed {
+                    tool,
+                    param,
+                    expected,
+                }
+            }
+        }
+    }
+}
+
+impl From<FfiToolParseFailureReason> for ToolParseFailureReason {
+    fn from(reason: FfiToolParseFailureReason) -> Self {
+        match reason {
+            FfiToolParseFailureReason::MalformedEnvelope => Self::MalformedEnvelope,
+            FfiToolParseFailureReason::InvalidJson { detail } => Self::InvalidJson { detail },
+            FfiToolParseFailureReason::UnknownTool { name } => Self::UnknownTool { name },
+            FfiToolParseFailureReason::UnknownParameter { tool, param } => Self::UnknownParameter { tool, param },
+            FfiToolParseFailureReason::DuplicateParameter { tool, param } => Self::DuplicateParameter { tool, param },
+            FfiToolParseFailureReason::MissingRequiredParameter { tool, param } => {
+                Self::MissingRequiredParameter { tool, param }
+            }
+            FfiToolParseFailureReason::SchemaCoercionFailed { tool, param, expected } => {
+                Self::SchemaCoercionFailed {
+                    tool,
+                    param,
+                    expected,
+                }
+            }
         }
     }
 }

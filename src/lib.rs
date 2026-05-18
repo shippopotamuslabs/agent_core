@@ -3,13 +3,15 @@ uniffi::setup_scaffolding!();
 pub mod ffi;
 
 pub use ffi::{
-    create_agent_engine, repair_tool, result_json_looks_soft_failure, should_allow_tool,
-    truncate_result, AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEngine, FfiAgentEvent,
+    coerce_provider_arguments, create_agent_engine, has_local_tool_contract, parse_tool_calls,
+    repair_tool, result_json_looks_soft_failure, should_allow_tool, truncate_result,
+    AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEngine, FfiAgentEvent,
     FfiAgentMessage, FfiAgentRole, FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger,
     FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind, FfiFinishReason,
     FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
     FfiRawToolCall, FfiSession, FfiSessionCapabilities, FfiSessionIoParams, FfiSummaryRequest,
-    FfiSummaryResult, FfiToolCallRecord, FfiToolResultRecord, RepairResult,
+    FfiSummaryResult, FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure,
+    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord, RepairResult,
 };
 
 /// Kotlin / host transport — UniFFI callback (crate root required for UniFFI metadata).
@@ -46,6 +48,7 @@ pub mod repair;
 pub mod session;
 pub mod state_ledger;
 pub mod tool_context;
+pub mod tool_parse;
 pub mod truncate;
 pub mod turn_io;
 
