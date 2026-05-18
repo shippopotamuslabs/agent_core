@@ -62,7 +62,8 @@ impl GuardrailState {
         config: &AgentConfig,
         last_model_response_had_append_blocks: bool,
     ) -> bool {
-        self.tool_calls_executed < self.effective_max_tool_calls(config, last_model_response_had_append_blocks)
+        self.tool_calls_executed
+            < self.effective_max_tool_calls(config, last_model_response_had_append_blocks)
             && self.consecutive_soft_failure_turns < config.tool_retry_limit
     }
 
@@ -87,8 +88,11 @@ impl GuardrailState {
         if turn_had_hard_failure || turn_had_non_soft_outcome {
             self.consecutive_soft_failure_turns = 0;
         } else if turn_had_tool_calls {
-            self.consecutive_soft_failure_turns = self.consecutive_soft_failure_turns.saturating_add(1);
-            if parallel_tool_calls >= 2 && self.consecutive_soft_failure_turns >= config.tool_retry_limit {
+            self.consecutive_soft_failure_turns =
+                self.consecutive_soft_failure_turns.saturating_add(1);
+            if parallel_tool_calls >= 2
+                && self.consecutive_soft_failure_turns >= config.tool_retry_limit
+            {
                 warn!(
                     target: "agent_core",
                     "validation retry exhausted tag={log_tag} (repeated parallel tool calls returned only soft errors)",
@@ -208,6 +212,8 @@ mod tests {
         assert!(is_soft_failure_result_json(r#"{"status":"ERROR"}"#));
         assert!(is_soft_failure_result_json(r#"{"data":null}"#));
         assert!(!is_soft_failure_result_json(r#"{"results":[]}"#));
-        assert!(!is_soft_failure_result_json(r#"{"data":null,"results":[]}"#));
+        assert!(!is_soft_failure_result_json(
+            r#"{"data":null,"results":[]}"#
+        ));
     }
 }

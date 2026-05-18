@@ -7,12 +7,12 @@
 //! Non-reproducible tools (per [`crate::catalog::ToolCatalog`]) are never modified. User and
 //! assistant turns are never touched. `append_blocks` is explicitly excluded here (tier 3 squashes it).
 
+use super::{CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::TokenLedger;
 use crate::catalog::ToolCatalog;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
 use crate::session::{AgentConfig, AgentSession};
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
 
 const PLACEHOLDER: &str = "[Previous tool output cleared]";
 
@@ -151,6 +151,7 @@ mod tests {
                 summarization_allowed: true,
                 kv_fixed: false,
                 tool_result_budget_tokens: None,
+                ..Default::default()
             },
             trigger,
         }
@@ -186,7 +187,8 @@ mod tests {
             CompactionOutcome::Applied(s, ev) => {
                 assert_eq!(ev.tier, TierEnum::Micro);
                 assert!(ev.tokens_after < ev.tokens_before);
-                let after = TokenLedger::estimate(&s, &cfg, "anthropic", 200_000, "[]").total_tokens;
+                let after =
+                    TokenLedger::estimate(&s, &cfg, "anthropic", 200_000, "[]").total_tokens;
                 assert_eq!(after, ev.tokens_after);
                 assert!(after < before);
                 assert_eq!(s.messages[0].content, PLACEHOLDER);

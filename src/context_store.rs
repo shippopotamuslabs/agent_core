@@ -1,0 +1,251 @@
+//! In-memory context store for spilled tool output, terminal output, history
+//! snapshots, artifact snapshots, file outlines/chunks, and tool schemas.
+//!
+//! The store is engine-owned (lives on [`crate::engine::state::InnerSession`])
+//! and exposes deterministic-ish IDs that compaction tiers can attach to model
+//! requests as [`ContextReference`] handles. The host (or future model tool)
+//! retrieves the full payload via the engine's read/search APIs.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextReferenceKind {
+    ToolOutput,
+    TerminalOutput,
+    HistorySnapshot,
+    ArtifactSnapshot,
+    FileOutline,
+    FileChunk,
+    ToolSchema,
+    ToolCatalogIndex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextReference {
+    pub id: String,
+    pub kind: ContextReferenceKind,
+    pub title: String,
+    pub byte_len: u64,
+    pub token_estimate: u32,
+    pub preview: String,
+    pub retrieval_hint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextStoreEntry {
+    pub reference: ContextReference,
+    pub content: String,
+    pub source_message_ids: Vec<String>,
+    pub created_turn_index: u32,
+    pub expires_after_turn: Option<u32>,
+}
+
+const PREVIEW_MAX_CHARS: usize = 160;
+
+/// Build a short preview of the content (single-line, head-clipped).
+pub fn make_preview(content: &str) -> String {
+    let one_line: String = content
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    let chars: Vec<char> = one_line.chars().collect();
+    if chars.len() <= PREVIEW_MAX_CHARS {
+        chars.into_iter().collect()
+    } else {
+        let head: String = chars[..PREVIEW_MAX_CHARS - 1].iter().collect();
+        format!("{head}…")
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct ContextStore {
+    /// Stable insertion-ordered map keyed by reference id.
+    entries: BTreeMap<String, ContextStoreEntry>,
+    /// Monotonic counter used by callers that need to mint sequence IDs.
+    next_seq: u64,
+}
+
+impl ContextStore {
+    pub fn insert_entry(&mut self, entry: ContextStoreEntry) -> ContextReference {
+        let reference = entry.reference.clone();
+        self.entries.insert(reference.id.clone(), entry);
+        reference
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ContextStoreEntry> {
+        self.entries.get(id)
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.contains_key(id)
+    }
+
+    /// Mint a new sequential ID and return it. Used by callers that want
+    /// deterministic-per-store IDs (e.g. tool schema deferral indices).
+    pub fn next_sequence(&mut self) -> u64 {
+        let id = self.next_seq;
+        self.next_seq += 1;
+        id
+    }
+
+    /// Naive content+title+id substring search. Returns at most `limit` refs.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<ContextReference> {
+        if query.is_empty() {
+            return self
+                .entries
+                .values()
+                .take(limit)
+                .map(|e| e.reference.clone())
+                .collect();
+        }
+        let needle = query.to_lowercase();
+        let mut hits: Vec<ContextReference> = Vec::new();
+        for entry in self.entries.values() {
+            if hits.len() >= limit {
+                break;
+            }
+            let r = &entry.reference;
+            let haystack = format!(
+                "{} {} {} {}",
+                r.id.to_lowercase(),
+                r.title.to_lowercase(),
+                r.preview.to_lowercase(),
+                entry.content.to_lowercase()
+            );
+            if haystack.contains(&needle) {
+                hits.push(r.clone());
+            }
+        }
+        hits
+    }
+
+    /// Drop entries whose `expires_after_turn` is <= the supplied index.
+    /// Returns the IDs that were removed.
+    pub fn expire_after_turn(&mut self, current_turn_index: u32) -> Vec<String> {
+        let to_remove: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match entry.expires_after_turn {
+                Some(exp) if exp <= current_turn_index => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in &to_remove {
+            self.entries.remove(id);
+        }
+        to_remove
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// All current entries, useful for tests and serialization helpers.
+    pub fn entries(&self) -> impl Iterator<Item = &ContextStoreEntry> {
+        self.entries.values()
+    }
+
+    pub fn has_history_snapshot_for_ids(&self, message_ids: &[String]) -> bool {
+        self.entries.values().any(|entry| {
+            entry.reference.kind == ContextReferenceKind::HistorySnapshot
+                && message_ids
+                    .iter()
+                    .all(|id| entry.source_message_ids.iter().any(|source| source == id))
+        })
+    }
+}
+
+pub fn insert_terminal_output(
+    store: &mut ContextStore,
+    id: impl Into<String>,
+    title: impl Into<String>,
+    content: impl Into<String>,
+    turn_index: u32,
+) -> ContextReference {
+    let id = id.into();
+    let title = title.into();
+    let content = content.into();
+    let reference = ContextReference {
+        id: id.clone(),
+        kind: ContextReferenceKind::TerminalOutput,
+        title,
+        byte_len: content.len() as u64,
+        token_estimate: (content.len() / 4) as u32,
+        preview: make_preview(&content),
+        retrieval_hint: format!("read_context_reference(\"{id}\")"),
+    };
+    let entry = ContextStoreEntry {
+        reference: reference.clone(),
+        content,
+        source_message_ids: vec![],
+        created_turn_index: turn_index,
+        expires_after_turn: None,
+    };
+    store.insert_entry(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, kind: ContextReferenceKind, content: &str) -> ContextStoreEntry {
+        ContextStoreEntry {
+            reference: ContextReference {
+                id: id.into(),
+                kind,
+                title: id.into(),
+                byte_len: content.len() as u64,
+                token_estimate: (content.len() / 4) as u32,
+                preview: make_preview(content),
+                retrieval_hint: format!("read({id})"),
+            },
+            content: content.into(),
+            source_message_ids: vec![],
+            created_turn_index: 0,
+            expires_after_turn: None,
+        }
+    }
+
+    #[test]
+    fn insert_get_round_trip() {
+        let mut store = ContextStore::default();
+        let r = store.insert_entry(entry("a", ContextReferenceKind::ToolOutput, "hi"));
+        assert_eq!(r.id, "a");
+        assert_eq!(store.get("a").unwrap().content, "hi");
+    }
+
+    #[test]
+    fn search_returns_matching_kind() {
+        let mut store = ContextStore::default();
+        store.insert_entry(entry(
+            "a",
+            ContextReferenceKind::ToolOutput,
+            "alpha rare_token",
+        ));
+        store.insert_entry(entry("b", ContextReferenceKind::FileChunk, "beta only"));
+        let hits = store.search("rare_token", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "a");
+    }
+
+    #[test]
+    fn expire_after_turn_drops_old_entries() {
+        let mut store = ContextStore::default();
+        let mut e1 = entry("a", ContextReferenceKind::HistorySnapshot, "x");
+        e1.expires_after_turn = Some(2);
+        store.insert_entry(e1);
+        let mut e2 = entry("b", ContextReferenceKind::HistorySnapshot, "y");
+        e2.expires_after_turn = Some(10);
+        store.insert_entry(e2);
+        let removed = store.expire_after_turn(5);
+        assert_eq!(removed, vec!["a".to_string()]);
+        assert!(store.get("a").is_none());
+        assert!(store.get("b").is_some());
+    }
+}

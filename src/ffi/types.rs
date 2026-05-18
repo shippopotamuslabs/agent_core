@@ -1,8 +1,13 @@
 //! UniFFI-friendly DTOs (no `serde_json::Value` in the FFI boundary).
 
+use crate::context_store::{ContextReference, ContextReferenceKind};
+use crate::manual_compact::{ManualCompactRequest, ManualCompactResult};
 use crate::message::{AgentMessage, AgentRole, RepairRecord, ToolCallRecord};
+use crate::policy::ContextPolicyTier;
 use crate::session::{AgentConfig, SessionCapabilities};
-use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
+use crate::turn_io::{
+    FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryRequest, SummaryResult,
+};
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiAgentRole {
@@ -69,12 +74,98 @@ impl From<AgentMessage> for FfiAgentMessage {
     }
 }
 
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiContextReferenceKind {
+    ToolOutput,
+    TerminalOutput,
+    HistorySnapshot,
+    ArtifactSnapshot,
+    FileOutline,
+    FileChunk,
+    ToolSchema,
+    ToolCatalogIndex,
+}
+
+impl From<ContextReferenceKind> for FfiContextReferenceKind {
+    fn from(kind: ContextReferenceKind) -> Self {
+        match kind {
+            ContextReferenceKind::ToolOutput => FfiContextReferenceKind::ToolOutput,
+            ContextReferenceKind::TerminalOutput => FfiContextReferenceKind::TerminalOutput,
+            ContextReferenceKind::HistorySnapshot => FfiContextReferenceKind::HistorySnapshot,
+            ContextReferenceKind::ArtifactSnapshot => FfiContextReferenceKind::ArtifactSnapshot,
+            ContextReferenceKind::FileOutline => FfiContextReferenceKind::FileOutline,
+            ContextReferenceKind::FileChunk => FfiContextReferenceKind::FileChunk,
+            ContextReferenceKind::ToolSchema => FfiContextReferenceKind::ToolSchema,
+            ContextReferenceKind::ToolCatalogIndex => FfiContextReferenceKind::ToolCatalogIndex,
+        }
+    }
+}
+
+impl From<FfiContextReferenceKind> for ContextReferenceKind {
+    fn from(kind: FfiContextReferenceKind) -> Self {
+        match kind {
+            FfiContextReferenceKind::ToolOutput => ContextReferenceKind::ToolOutput,
+            FfiContextReferenceKind::TerminalOutput => ContextReferenceKind::TerminalOutput,
+            FfiContextReferenceKind::HistorySnapshot => ContextReferenceKind::HistorySnapshot,
+            FfiContextReferenceKind::ArtifactSnapshot => ContextReferenceKind::ArtifactSnapshot,
+            FfiContextReferenceKind::FileOutline => ContextReferenceKind::FileOutline,
+            FfiContextReferenceKind::FileChunk => ContextReferenceKind::FileChunk,
+            FfiContextReferenceKind::ToolSchema => ContextReferenceKind::ToolSchema,
+            FfiContextReferenceKind::ToolCatalogIndex => ContextReferenceKind::ToolCatalogIndex,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiContextReference {
+    pub id: String,
+    pub kind: FfiContextReferenceKind,
+    pub title: String,
+    pub byte_len: u64,
+    pub token_estimate: u32,
+    pub preview: String,
+    pub retrieval_hint: String,
+}
+
+impl From<ContextReference> for FfiContextReference {
+    fn from(reference: ContextReference) -> Self {
+        Self {
+            id: reference.id,
+            kind: reference.kind.into(),
+            title: reference.title,
+            byte_len: reference.byte_len,
+            token_estimate: reference.token_estimate,
+            preview: reference.preview,
+            retrieval_hint: reference.retrieval_hint,
+        }
+    }
+}
+
+impl From<FfiContextReference> for ContextReference {
+    fn from(reference: FfiContextReference) -> Self {
+        Self {
+            id: reference.id,
+            kind: reference.kind.into(),
+            title: reference.title,
+            byte_len: reference.byte_len,
+            token_estimate: reference.token_estimate,
+            preview: reference.preview,
+            retrieval_hint: reference.retrieval_hint,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiModelRequest {
     pub session_messages: Vec<FfiAgentMessage>,
     pub system_prompt: String,
     pub tools_schema_json: String,
     pub allow_tool_call: bool,
+    pub context_references: Vec<FfiContextReference>,
+    pub state_ledger_json: Option<String>,
+    pub tool_context_index_json: Option<String>,
+    pub file_context_index_json: Option<String>,
+    pub cache_hints: Vec<String>,
 }
 
 impl From<FfiModelRequest> for ModelRequest {
@@ -84,6 +175,17 @@ impl From<FfiModelRequest> for ModelRequest {
             system_prompt: m.system_prompt,
             tools_schema_json: m.tools_schema_json,
             allow_tool_call: m.allow_tool_call,
+            context_references: m.context_references.into_iter().map(Into::into).collect(),
+            state_ledger: m
+                .state_ledger_json
+                .and_then(|json| serde_json::from_str(&json).ok()),
+            tool_context_index: m
+                .tool_context_index_json
+                .and_then(|json| serde_json::from_str(&json).ok()),
+            file_context_index: m
+                .file_context_index_json
+                .and_then(|json| serde_json::from_str(&json).ok()),
+            cache_hints: m.cache_hints,
         }
     }
 }
@@ -95,6 +197,17 @@ impl From<ModelRequest> for FfiModelRequest {
             system_prompt: m.system_prompt,
             tools_schema_json: m.tools_schema_json,
             allow_tool_call: m.allow_tool_call,
+            context_references: m.context_references.into_iter().map(Into::into).collect(),
+            state_ledger_json: m
+                .state_ledger
+                .and_then(|ledger| serde_json::to_string(&ledger).ok()),
+            tool_context_index_json: m
+                .tool_context_index
+                .and_then(|index| serde_json::to_string(&index).ok()),
+            file_context_index_json: m
+                .file_context_index
+                .and_then(|index| serde_json::to_string(&index).ok()),
+            cache_hints: m.cache_hints,
         }
     }
 }
@@ -275,14 +388,28 @@ pub struct FfiSummaryRequest {
     pub messages_to_summarize: Vec<FfiAgentMessage>,
     pub instruction: String,
     pub last_message_id: String,
+    pub trigger: FfiCompactionTrigger,
+    pub focus_instruction: Option<String>,
+    pub history_ref: Option<String>,
+    pub state_ledger_snapshot_json: Option<String>,
 }
 
 impl From<FfiSummaryRequest> for SummaryRequest {
     fn from(s: FfiSummaryRequest) -> Self {
         Self {
-            messages_to_summarize: s.messages_to_summarize.into_iter().map(Into::into).collect(),
+            messages_to_summarize: s
+                .messages_to_summarize
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction: s.instruction,
             last_message_id: s.last_message_id,
+            trigger: s.trigger.into(),
+            focus_instruction: s.focus_instruction,
+            history_ref: s.history_ref,
+            state_ledger_snapshot: s
+                .state_ledger_snapshot_json
+                .and_then(|json| serde_json::from_str(&json).ok()),
         }
     }
 }
@@ -290,9 +417,19 @@ impl From<FfiSummaryRequest> for SummaryRequest {
 impl From<SummaryRequest> for FfiSummaryRequest {
     fn from(s: SummaryRequest) -> Self {
         Self {
-            messages_to_summarize: s.messages_to_summarize.into_iter().map(Into::into).collect(),
+            messages_to_summarize: s
+                .messages_to_summarize
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction: s.instruction,
             last_message_id: s.last_message_id,
+            trigger: s.trigger.into(),
+            focus_instruction: s.focus_instruction,
+            history_ref: s.history_ref,
+            state_ledger_snapshot_json: s
+                .state_ledger_snapshot
+                .and_then(|ledger| serde_json::to_string(&ledger).ok()),
         }
     }
 }
@@ -348,6 +485,23 @@ pub struct FfiAgentConfig {
     pub tool_retry_limit: u32,
     pub greedy_append_blocks: bool,
     pub tool_result_budget_cloud_bytes: u64,
+    pub mid_turn_threshold_ratio: f32,
+    pub post_tool_result_threshold_ratio: f32,
+    pub manual_compact_threshold_ratio: f32,
+    pub allow_fifo_on_preflight: bool,
+    pub allow_fifo_on_mid_turn: bool,
+    pub allow_fifo_on_post_tool_result: bool,
+    pub require_snapshot_before_fifo: bool,
+    pub enable_context_store: bool,
+    pub enable_state_ledger: bool,
+    pub enable_tool_schema_deferral: bool,
+    pub enable_file_condensation: bool,
+    pub enable_manual_compact: bool,
+    pub tool_spill_threshold_bytes: u64,
+    pub terminal_spill_threshold_bytes: u64,
+    pub history_snapshot_threshold_tokens: u32,
+    pub file_outline_threshold_tokens: u32,
+    pub prompt_cache_anchor_threshold_tokens: u32,
 }
 
 impl Default for FfiAgentConfig {
@@ -360,6 +514,23 @@ impl Default for FfiAgentConfig {
             tool_retry_limit: c.tool_retry_limit,
             greedy_append_blocks: c.greedy_append_blocks,
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
+            mid_turn_threshold_ratio: c.mid_turn_threshold_ratio,
+            post_tool_result_threshold_ratio: c.post_tool_result_threshold_ratio,
+            manual_compact_threshold_ratio: c.manual_compact_threshold_ratio,
+            allow_fifo_on_preflight: c.allow_fifo_on_preflight,
+            allow_fifo_on_mid_turn: c.allow_fifo_on_mid_turn,
+            allow_fifo_on_post_tool_result: c.allow_fifo_on_post_tool_result,
+            require_snapshot_before_fifo: c.require_snapshot_before_fifo,
+            enable_context_store: c.enable_context_store,
+            enable_state_ledger: c.enable_state_ledger,
+            enable_tool_schema_deferral: c.enable_tool_schema_deferral,
+            enable_file_condensation: c.enable_file_condensation,
+            enable_manual_compact: c.enable_manual_compact,
+            tool_spill_threshold_bytes: c.tool_spill_threshold_bytes as u64,
+            terminal_spill_threshold_bytes: c.terminal_spill_threshold_bytes as u64,
+            history_snapshot_threshold_tokens: c.history_snapshot_threshold_tokens,
+            file_outline_threshold_tokens: c.file_outline_threshold_tokens,
+            prompt_cache_anchor_threshold_tokens: c.prompt_cache_anchor_threshold_tokens,
         }
     }
 }
@@ -373,6 +544,23 @@ impl From<FfiAgentConfig> for AgentConfig {
             tool_retry_limit: f.tool_retry_limit,
             greedy_append_blocks: f.greedy_append_blocks,
             tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
+            mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
+            post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
+            manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
+            allow_fifo_on_preflight: f.allow_fifo_on_preflight,
+            allow_fifo_on_mid_turn: f.allow_fifo_on_mid_turn,
+            allow_fifo_on_post_tool_result: f.allow_fifo_on_post_tool_result,
+            require_snapshot_before_fifo: f.require_snapshot_before_fifo,
+            enable_context_store: f.enable_context_store,
+            enable_state_ledger: f.enable_state_ledger,
+            enable_tool_schema_deferral: f.enable_tool_schema_deferral,
+            enable_file_condensation: f.enable_file_condensation,
+            enable_manual_compact: f.enable_manual_compact,
+            tool_spill_threshold_bytes: f.tool_spill_threshold_bytes as usize,
+            terminal_spill_threshold_bytes: f.terminal_spill_threshold_bytes as usize,
+            history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
+            file_outline_threshold_tokens: f.file_outline_threshold_tokens,
+            prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
             token_correction: std::collections::HashMap::new(),
         }
     }
@@ -383,6 +571,63 @@ pub struct FfiSessionCapabilities {
     pub summarization_allowed: bool,
     pub kv_fixed: bool,
     pub tool_result_budget_tokens: Option<u32>,
+    pub context_policy_tier: FfiContextPolicyTier,
+    pub tool_schema_deferral_supported: bool,
+    pub file_backed_context_supported: bool,
+    pub prompt_cache_supported: bool,
+    pub history_rewrite_supported: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiContextPolicyTier {
+    HostedMutable,
+    HostedProxy,
+    LocalMutable,
+    FixedKv,
+    HighContext,
+    SmallContext,
+}
+
+impl From<ContextPolicyTier> for FfiContextPolicyTier {
+    fn from(tier: ContextPolicyTier) -> Self {
+        match tier {
+            ContextPolicyTier::HostedMutable => FfiContextPolicyTier::HostedMutable,
+            ContextPolicyTier::HostedProxy => FfiContextPolicyTier::HostedProxy,
+            ContextPolicyTier::LocalMutable => FfiContextPolicyTier::LocalMutable,
+            ContextPolicyTier::FixedKv => FfiContextPolicyTier::FixedKv,
+            ContextPolicyTier::HighContext => FfiContextPolicyTier::HighContext,
+            ContextPolicyTier::SmallContext => FfiContextPolicyTier::SmallContext,
+        }
+    }
+}
+
+impl From<FfiContextPolicyTier> for ContextPolicyTier {
+    fn from(tier: FfiContextPolicyTier) -> Self {
+        match tier {
+            FfiContextPolicyTier::HostedMutable => ContextPolicyTier::HostedMutable,
+            FfiContextPolicyTier::HostedProxy => ContextPolicyTier::HostedProxy,
+            FfiContextPolicyTier::LocalMutable => ContextPolicyTier::LocalMutable,
+            FfiContextPolicyTier::FixedKv => ContextPolicyTier::FixedKv,
+            FfiContextPolicyTier::HighContext => ContextPolicyTier::HighContext,
+            FfiContextPolicyTier::SmallContext => ContextPolicyTier::SmallContext,
+        }
+    }
+}
+
+impl Default for FfiSessionCapabilities {
+    fn default() -> Self {
+        let caps = SessionCapabilities::default();
+        Self {
+            summarization_allowed: caps.summarization_allowed,
+            kv_fixed: caps.kv_fixed,
+            tool_result_budget_tokens: caps.tool_result_budget_tokens,
+            context_policy_tier: caps.context_policy_tier.into(),
+            tool_schema_deferral_supported: caps.tool_schema_deferral_supported,
+            file_backed_context_supported: caps.file_backed_context_supported,
+            prompt_cache_supported: caps.prompt_cache_supported,
+            history_rewrite_supported: caps.history_rewrite_supported,
+        }
+    }
 }
 
 impl From<FfiSessionCapabilities> for SessionCapabilities {
@@ -391,6 +636,11 @@ impl From<FfiSessionCapabilities> for SessionCapabilities {
             summarization_allowed: f.summarization_allowed,
             kv_fixed: f.kv_fixed,
             tool_result_budget_tokens: f.tool_result_budget_tokens,
+            context_policy_tier: f.context_policy_tier.into(),
+            tool_schema_deferral_supported: f.tool_schema_deferral_supported,
+            file_backed_context_supported: f.file_backed_context_supported,
+            prompt_cache_supported: f.prompt_cache_supported,
+            history_rewrite_supported: f.history_rewrite_supported,
         }
     }
 }
@@ -405,6 +655,7 @@ pub enum FfiCompactionTrigger {
     Preflight,
     MidTurn,
     PostToolResult,
+    Manual,
 }
 
 impl From<CompactionTrigger> for FfiCompactionTrigger {
@@ -413,6 +664,18 @@ impl From<CompactionTrigger> for FfiCompactionTrigger {
             CompactionTrigger::Preflight => FfiCompactionTrigger::Preflight,
             CompactionTrigger::MidTurn => FfiCompactionTrigger::MidTurn,
             CompactionTrigger::PostToolResult => FfiCompactionTrigger::PostToolResult,
+            CompactionTrigger::Manual => FfiCompactionTrigger::Manual,
+        }
+    }
+}
+
+impl From<FfiCompactionTrigger> for CompactionTrigger {
+    fn from(t: FfiCompactionTrigger) -> Self {
+        match t {
+            FfiCompactionTrigger::Preflight => CompactionTrigger::Preflight,
+            FfiCompactionTrigger::MidTurn => CompactionTrigger::MidTurn,
+            FfiCompactionTrigger::PostToolResult => CompactionTrigger::PostToolResult,
+            FfiCompactionTrigger::Manual => CompactionTrigger::Manual,
         }
     }
 }
@@ -423,6 +686,8 @@ pub enum FfiCompactionTier {
     Fifo,
     ArtifactSquash,
     Summary,
+    ToolSpill,
+    HistorySnapshot,
 }
 
 impl From<CompactionTier> for FfiCompactionTier {
@@ -432,6 +697,8 @@ impl From<CompactionTier> for FfiCompactionTier {
             CompactionTier::Fifo => FfiCompactionTier::Fifo,
             CompactionTier::ArtifactSquash => FfiCompactionTier::ArtifactSquash,
             CompactionTier::Summary => FfiCompactionTier::Summary,
+            CompactionTier::ToolSpill => FfiCompactionTier::ToolSpill,
+            CompactionTier::HistorySnapshot => FfiCompactionTier::HistorySnapshot,
         }
     }
 }
@@ -484,6 +751,14 @@ pub enum FfiAgentEvent {
     KvCacheInvalidated {
         reason: String,
     },
+    PreCompact {
+        trigger: FfiCompactionTrigger,
+    },
+    PostCompact {
+        trigger: FfiCompactionTrigger,
+        summary_ref: Option<String>,
+        history_ref: Option<String>,
+    },
 }
 
 impl From<AgentEvent> for FfiAgentEvent {
@@ -505,9 +780,9 @@ impl From<AgentEvent> for FfiAgentEvent {
                 tool_call_count,
                 terminal,
             },
-            AgentEvent::CompactionApplied(e) => FfiAgentEvent::CompactionApplied {
-                event: e.into(),
-            },
+            AgentEvent::CompactionApplied(e) => {
+                FfiAgentEvent::CompactionApplied { event: e.into() }
+            }
             AgentEvent::ContextPressure { ratio } => FfiAgentEvent::ContextPressure { ratio },
             AgentEvent::ToolRepaired {
                 original_name,
@@ -525,7 +800,21 @@ impl From<AgentEvent> for FfiAgentEvent {
                 tool_name,
                 turn_index,
             },
-            AgentEvent::KvCacheInvalidated { reason } => FfiAgentEvent::KvCacheInvalidated { reason },
+            AgentEvent::KvCacheInvalidated { reason } => {
+                FfiAgentEvent::KvCacheInvalidated { reason }
+            }
+            AgentEvent::PreCompact { trigger } => FfiAgentEvent::PreCompact {
+                trigger: trigger.into(),
+            },
+            AgentEvent::PostCompact {
+                trigger,
+                summary_ref,
+                history_ref,
+            } => FfiAgentEvent::PostCompact {
+                trigger: trigger.into(),
+                summary_ref,
+                history_ref,
+            },
         }
     }
 }
@@ -542,6 +831,8 @@ pub enum AgentException {
     InvalidTransition { from: String, to: String },
     #[error("internal")]
     Internal { detail: String },
+    #[error("context reference not found")]
+    ContextReferenceNotFound { reference_id: String },
 }
 
 impl From<AgentError> for AgentException {
@@ -550,11 +841,80 @@ impl From<AgentError> for AgentException {
             AgentError::UnsupportedTool { name } => AgentException::Internal {
                 detail: format!("Unsupported tool: {name}"),
             },
-            AgentError::RepairFailed { name, reason } => AgentException::RepairFailed { name, reason },
+            AgentError::RepairFailed { name, reason } => {
+                AgentException::RepairFailed { name, reason }
+            }
             AgentError::GuardrailExceeded { kind } => AgentException::GuardrailExceeded { kind },
-            AgentError::CompactionFailed { tier, reason } => AgentException::CompactionFailed { tier, reason },
-            AgentError::InvalidTransition { from, to } => AgentException::InvalidTransition { from, to },
+            AgentError::CompactionFailed { tier, reason } => {
+                AgentException::CompactionFailed { tier, reason }
+            }
+            AgentError::InvalidTransition { from, to } => {
+                AgentException::InvalidTransition { from, to }
+            }
             AgentError::Internal(m) => AgentException::Internal { detail: m },
+            AgentError::ContextReferenceNotFound { reference_id } => {
+                AgentException::ContextReferenceNotFound { reference_id }
+            }
+            AgentError::ContextStoreUnavailable { reason } => AgentException::Internal {
+                detail: format!("Context store unavailable: {reason}"),
+            },
+            AgentError::PolicyRejected { reason } => AgentException::Internal {
+                detail: format!("Policy rejected: {reason}"),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiManualCompactRequest {
+    pub focus_instruction: Option<String>,
+    pub force_summary: bool,
+}
+
+impl From<FfiManualCompactRequest> for ManualCompactRequest {
+    fn from(request: FfiManualCompactRequest) -> Self {
+        Self {
+            focus_instruction: request.focus_instruction,
+            force_summary: request.force_summary,
+        }
+    }
+}
+
+impl From<ManualCompactRequest> for FfiManualCompactRequest {
+    fn from(request: ManualCompactRequest) -> Self {
+        Self {
+            focus_instruction: request.focus_instruction,
+            force_summary: request.force_summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiManualCompactResult {
+    pub summary_ref: Option<String>,
+    pub history_ref: Option<String>,
+    pub tokens_before: u32,
+    pub tokens_after: u32,
+}
+
+impl From<ManualCompactResult> for FfiManualCompactResult {
+    fn from(result: ManualCompactResult) -> Self {
+        Self {
+            summary_ref: result.summary_ref,
+            history_ref: result.history_ref,
+            tokens_before: result.tokens_before,
+            tokens_after: result.tokens_after,
+        }
+    }
+}
+
+impl From<FfiManualCompactResult> for ManualCompactResult {
+    fn from(result: FfiManualCompactResult) -> Self {
+        Self {
+            summary_ref: result.summary_ref,
+            history_ref: result.history_ref,
+            tokens_before: result.tokens_before,
+            tokens_after: result.tokens_after,
         }
     }
 }
@@ -566,14 +926,13 @@ pub enum FfiAgentAction {
     RequestSummary { request: FfiSummaryRequest },
     Finished,
     Failed { error: AgentException },
+    ManualCompactCompleted { result: FfiManualCompactResult },
 }
 
 impl From<AgentAction> for FfiAgentAction {
     fn from(a: AgentAction) -> Self {
         match a {
-            AgentAction::CallModel(r) => FfiAgentAction::CallModel {
-                request: r.into(),
-            },
+            AgentAction::CallModel(r) => FfiAgentAction::CallModel { request: r.into() },
             AgentAction::ExecuteTools(calls) => FfiAgentAction::ExecuteTools {
                 calls: calls.into_iter().map(Into::into).collect(),
             },
@@ -582,6 +941,42 @@ impl From<AgentAction> for FfiAgentAction {
             },
             AgentAction::Finished => FfiAgentAction::Finished,
             AgentAction::Failed(e) => FfiAgentAction::Failed { error: e.into() },
+            AgentAction::ManualCompactCompleted(result) => FfiAgentAction::ManualCompactCompleted {
+                result: result.into(),
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_store::ContextReferenceKind;
+    use crate::manual_compact::ManualCompactResult;
+
+    #[test]
+    fn ffi_agent_action_manual_compact_completed_not_finished() {
+        let action = AgentAction::ManualCompactCompleted(ManualCompactResult {
+            summary_ref: None,
+            history_ref: Some("history-u0-a0".into()),
+            tokens_before: 100,
+            tokens_after: 60,
+        });
+
+        match FfiAgentAction::from(action) {
+            FfiAgentAction::ManualCompactCompleted { result } => {
+                assert_eq!(result.history_ref.as_deref(), Some("history-u0-a0"));
+                assert_eq!(result.tokens_before, 100);
+                assert_eq!(result.tokens_after, 60);
+            }
+            other => panic!("expected ManualCompactCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ffi_context_reference_kind_round_trip() {
+        let ffi = FfiContextReferenceKind::from(ContextReferenceKind::ArtifactSnapshot);
+        let core = ContextReferenceKind::from(ffi);
+        assert_eq!(core, ContextReferenceKind::ArtifactSnapshot);
     }
 }

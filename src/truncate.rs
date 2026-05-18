@@ -27,9 +27,9 @@ pub fn truncate_tool_result_json(json: &str, budget_bytes: usize) -> (String, bo
 mod tests {
     use super::*;
     use crate::budget::truncate_budget_per_result;
+    use crate::budget::TokenLedger;
     use crate::message::{AgentMessage, AgentRole};
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
-    use crate::budget::TokenLedger;
 
     #[test]
     fn under_budget_unchanged() {
@@ -66,6 +66,7 @@ mod tests {
             summarization_allowed: true,
             kv_fixed: false,
             tool_result_budget_tokens: Some(8),
+            ..Default::default()
         };
         let config = AgentConfig::default();
         let budget = truncate_budget_per_result(&caps, &config);
@@ -101,6 +102,7 @@ mod tests {
             summarization_allowed: true,
             kv_fixed: false,
             tool_result_budget_tokens: None,
+            ..Default::default()
         };
         let config = AgentConfig::default();
         assert_eq!(truncate_budget_per_result(&caps, &config), 4096);

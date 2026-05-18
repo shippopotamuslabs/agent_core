@@ -1,6 +1,6 @@
 [package]
 name = "agent_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.78"
 
@@ -32,6 +32,38 @@ path = "tests/fixtures.rs"
 [[test]]
 name = "kv_fixed_test"
 path = "tests/kv_fixed_test.rs"
+
+[[test]]
+name = "policy_tiers_test"
+path = "tests/policy_tiers_test.rs"
+
+[[test]]
+name = "context_store_test"
+path = "tests/context_store_test.rs"
+
+[[test]]
+name = "state_ledger_test"
+path = "tests/state_ledger_test.rs"
+
+[[test]]
+name = "tool_context_test"
+path = "tests/tool_context_test.rs"
+
+[[test]]
+name = "file_context_test"
+path = "tests/file_context_test.rs"
+
+[[test]]
+name = "manual_compact_test"
+path = "tests/manual_compact_test.rs"
+
+[[test]]
+name = "compaction_triggers_test"
+path = "tests/compaction_triggers_test.rs"
+
+[[test]]
+name = "context_management_end_to_end_test"
+path = "tests/context_management_end_to_end_test.rs"
 
 [[example]]
 name = "mock_desktop_loop"

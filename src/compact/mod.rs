@@ -1,16 +1,24 @@
+pub mod artifact_snapshot;
 pub mod artifact_squash;
 pub mod fifo;
+pub mod history_snapshot;
 pub mod micro;
 pub mod pipeline;
+pub mod policy;
 pub mod summary;
+pub mod tool_spill;
 
 pub use artifact_squash::ArtifactSquashCompactionTier;
 pub use fifo::FifoCompactionTier;
+pub use history_snapshot::HistorySnapshotCompactionTier;
 pub use micro::MicroCompactionTier;
 pub use pipeline::CompactionPipeline;
 pub use summary::{apply_summary_result, SummaryCompactionTier, SUMMARY_INSTRUCTION};
+pub use tool_spill::ToolSpillCompactionTier;
 
-use crate::events::{CompactionEvent, CompactionTrigger};
+use crate::events::{
+    AgentError, CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger,
+};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::turn_io::SummaryRequest;
 
@@ -42,6 +50,11 @@ pub enum CompactionOutcome {
 
     /// Tier cannot help (e.g. no reproducible results to drop, nothing to squash).
     NotApplicable,
+
+    /// Tier attempted to run but encountered a precondition violation or
+    /// internal error. The pipeline surfaces this as a typed error to the
+    /// engine so the host sees a structured failure rather than a panic.
+    Failed(AgentError),
 }
 
 /// Implemented by each compaction strategy.
@@ -61,14 +74,42 @@ pub trait CompactionTier: Send + Sync {
     ) -> CompactionOutcome;
 }
 
-/// Locked tier order: Micro → FIFO → ArtifactSquash → Summary.
+/// Locked tier order: Micro → ArtifactSquash → Summary → FIFO.
 pub fn default_compaction_pipeline() -> CompactionPipeline {
     CompactionPipeline::new(vec![
         Box::new(MicroCompactionTier::default()),
-        Box::new(FifoCompactionTier::default()),
         Box::new(ArtifactSquashCompactionTier::default()),
         Box::new(SummaryCompactionTier::default()),
+        Box::new(FifoCompactionTier::default()),
     ])
+}
+
+pub fn compaction_pipeline_for_plan(plan: &policy::CompactionPlan) -> CompactionPipeline {
+    let tiers = plan
+        .ordered_tiers
+        .iter()
+        .filter_map(|tier| match tier {
+            CompactionTierKind::Micro => {
+                Some(Box::new(MicroCompactionTier::default()) as Box<dyn CompactionTier>)
+            }
+            CompactionTierKind::ArtifactSquash => {
+                Some(Box::new(ArtifactSquashCompactionTier::default()) as Box<dyn CompactionTier>)
+            }
+            CompactionTierKind::Summary => {
+                Some(Box::new(SummaryCompactionTier::default()) as Box<dyn CompactionTier>)
+            }
+            CompactionTierKind::Fifo => {
+                Some(Box::new(FifoCompactionTier::default()) as Box<dyn CompactionTier>)
+            }
+            CompactionTierKind::ToolSpill => {
+                Some(Box::new(ToolSpillCompactionTier) as Box<dyn CompactionTier>)
+            }
+            CompactionTierKind::HistorySnapshot => {
+                Some(Box::new(HistorySnapshotCompactionTier) as Box<dyn CompactionTier>)
+            }
+        })
+        .collect();
+    CompactionPipeline::new(tiers)
 }
 
 #[cfg(test)]
@@ -85,6 +126,7 @@ mod tests {
                 summarization_allowed: true,
                 kv_fixed: false,
                 tool_result_budget_tokens: None,
+                ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
         };

@@ -1,7 +1,7 @@
-use std::collections::{HashMap, VecDeque};
-use serde::{Deserialize, Serialize};
 use crate::events::CompactionEvent;
 use crate::message::{AgentMessage, ToolCallRecord};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 
 const COMPACTION_LOG_CAPACITY: usize = 32;
 
@@ -29,13 +29,91 @@ pub struct AgentConfig {
     /// Key: provider name (e.g. "anthropic", "google"). Value: multiplier (e.g. 1.1).
     #[serde(default)]
     pub token_correction: HashMap<String, f32>,
+    // ── Context management (AGENT-context-mgmt) ───────────────────────────
+    #[serde(default = "default_mid_turn_threshold_ratio")]
+    pub mid_turn_threshold_ratio: f32,
+    #[serde(default = "default_post_tool_result_threshold_ratio")]
+    pub post_tool_result_threshold_ratio: f32,
+    #[serde(default = "default_manual_compact_threshold_ratio")]
+    pub manual_compact_threshold_ratio: f32,
+    #[serde(default = "default_allow_fifo_on_preflight")]
+    pub allow_fifo_on_preflight: bool,
+    #[serde(default = "default_allow_fifo_on_mid_turn")]
+    pub allow_fifo_on_mid_turn: bool,
+    #[serde(default = "default_allow_fifo_on_post_tool_result")]
+    pub allow_fifo_on_post_tool_result: bool,
+    #[serde(default = "default_true")]
+    pub require_snapshot_before_fifo: bool,
+    #[serde(default = "default_true")]
+    pub enable_context_store: bool,
+    #[serde(default = "default_true")]
+    pub enable_state_ledger: bool,
+    #[serde(default = "default_true")]
+    pub enable_tool_schema_deferral: bool,
+    #[serde(default = "default_true")]
+    pub enable_file_condensation: bool,
+    #[serde(default = "default_true")]
+    pub enable_manual_compact: bool,
+    #[serde(default = "default_tool_spill_threshold_bytes")]
+    pub tool_spill_threshold_bytes: usize,
+    #[serde(default = "default_terminal_spill_threshold_bytes")]
+    pub terminal_spill_threshold_bytes: usize,
+    #[serde(default = "default_history_snapshot_threshold_tokens")]
+    pub history_snapshot_threshold_tokens: u32,
+    #[serde(default = "default_file_outline_threshold_tokens")]
+    pub file_outline_threshold_tokens: u32,
+    #[serde(default = "default_prompt_cache_anchor_threshold_tokens")]
+    pub prompt_cache_anchor_threshold_tokens: u32,
 }
 
-fn default_threshold_ratio() -> f32 { 0.80 }
-fn default_micro_keep_recent() -> u32 { 2 }
-fn default_tool_retry_limit() -> u32 { 3 }
-fn default_true() -> bool { true }
-fn default_tool_result_budget_cloud_bytes() -> usize { 4096 }
+fn default_threshold_ratio() -> f32 {
+    0.80
+}
+fn default_micro_keep_recent() -> u32 {
+    2
+}
+fn default_tool_retry_limit() -> u32 {
+    3
+}
+fn default_true() -> bool {
+    true
+}
+fn default_tool_result_budget_cloud_bytes() -> usize {
+    4096
+}
+fn default_mid_turn_threshold_ratio() -> f32 {
+    0.90
+}
+fn default_post_tool_result_threshold_ratio() -> f32 {
+    0.85
+}
+fn default_manual_compact_threshold_ratio() -> f32 {
+    0.80
+}
+fn default_allow_fifo_on_preflight() -> bool {
+    true
+}
+fn default_allow_fifo_on_mid_turn() -> bool {
+    false
+}
+fn default_allow_fifo_on_post_tool_result() -> bool {
+    false
+}
+fn default_tool_spill_threshold_bytes() -> usize {
+    8192
+}
+fn default_terminal_spill_threshold_bytes() -> usize {
+    8192
+}
+fn default_history_snapshot_threshold_tokens() -> u32 {
+    1024
+}
+fn default_file_outline_threshold_tokens() -> u32 {
+    2048
+}
+fn default_prompt_cache_anchor_threshold_tokens() -> u32 {
+    4096
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -47,6 +125,23 @@ impl Default for AgentConfig {
             greedy_append_blocks: default_true(),
             tool_result_budget_cloud_bytes: default_tool_result_budget_cloud_bytes(),
             token_correction: HashMap::new(),
+            mid_turn_threshold_ratio: default_mid_turn_threshold_ratio(),
+            post_tool_result_threshold_ratio: default_post_tool_result_threshold_ratio(),
+            manual_compact_threshold_ratio: default_manual_compact_threshold_ratio(),
+            allow_fifo_on_preflight: default_allow_fifo_on_preflight(),
+            allow_fifo_on_mid_turn: default_allow_fifo_on_mid_turn(),
+            allow_fifo_on_post_tool_result: default_allow_fifo_on_post_tool_result(),
+            require_snapshot_before_fifo: default_true(),
+            enable_context_store: default_true(),
+            enable_state_ledger: default_true(),
+            enable_tool_schema_deferral: default_true(),
+            enable_file_condensation: default_true(),
+            enable_manual_compact: default_true(),
+            tool_spill_threshold_bytes: default_tool_spill_threshold_bytes(),
+            terminal_spill_threshold_bytes: default_terminal_spill_threshold_bytes(),
+            history_snapshot_threshold_tokens: default_history_snapshot_threshold_tokens(),
+            file_outline_threshold_tokens: default_file_outline_threshold_tokens(),
+            prompt_cache_anchor_threshold_tokens: default_prompt_cache_anchor_threshold_tokens(),
         }
     }
 }
@@ -63,6 +158,31 @@ pub struct SessionCapabilities {
     /// When Some(n), overrides `AgentConfig.tool_result_budget_cloud_bytes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_budget_tokens: Option<u32>,
+    #[serde(default)]
+    pub context_policy_tier: crate::policy::ContextPolicyTier,
+    #[serde(default)]
+    pub tool_schema_deferral_supported: bool,
+    #[serde(default)]
+    pub file_backed_context_supported: bool,
+    #[serde(default)]
+    pub prompt_cache_supported: bool,
+    #[serde(default = "default_true")]
+    pub history_rewrite_supported: bool,
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        Self {
+            summarization_allowed: false,
+            kv_fixed: false,
+            tool_result_budget_tokens: None,
+            context_policy_tier: crate::policy::ContextPolicyTier::HostedMutable,
+            tool_schema_deferral_supported: false,
+            file_backed_context_supported: false,
+            prompt_cache_supported: false,
+            history_rewrite_supported: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,10 +207,7 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    pub fn new(
-        initial_messages: Vec<AgentMessage>,
-        session_context: serde_json::Value,
-    ) -> Self {
+    pub fn new(initial_messages: Vec<AgentMessage>, session_context: serde_json::Value) -> Self {
         Self {
             messages: initial_messages,
             tool_trace: Vec::new(),
@@ -158,6 +275,7 @@ mod tests {
             summarization_allowed: false,
             kv_fixed: true,
             tool_result_budget_tokens: Some(512),
+            ..Default::default()
         };
         let json = serde_json::to_string(&caps).unwrap();
         let back: SessionCapabilities = serde_json::from_str(&json).unwrap();
@@ -172,6 +290,7 @@ mod tests {
             summarization_allowed: true,
             kv_fixed: false,
             tool_result_budget_tokens: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&caps).unwrap();
         assert!(!json.contains("tool_result_budget_tokens"));
@@ -212,7 +331,10 @@ mod tests {
         }
         // oldest (Micro) should be gone
         assert_eq!(session.compaction_log.len(), 32);
-        assert!(matches!(session.compaction_log[0].tier, CompactionTier::Fifo));
+        assert!(matches!(
+            session.compaction_log[0].tier,
+            CompactionTier::Fifo
+        ));
     }
 
     #[test]

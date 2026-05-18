@@ -30,15 +30,17 @@ pub struct ToolRepairPipeline;
 impl ToolRepairPipeline {
     pub fn repair(raw: &RawToolCall, catalog: &ToolCatalog) -> (RepairOutcome, Vec<AgentEvent>) {
         let mut events = Vec::new();
-        let (resolved_name, repair_meta) = match Self::repair_name(&raw.name, catalog, &mut events) {
+        let (resolved_name, repair_meta) = match Self::repair_name(&raw.name, catalog, &mut events)
+        {
             Ok(x) => x,
             Err(rej) => return (rej, events),
         };
 
-        let arguments_json = match Self::repair_arguments(&resolved_name, &raw.arguments_json, catalog) {
-            Ok(s) => s,
-            Err(rej) => return (rej, events),
-        };
+        let arguments_json =
+            match Self::repair_arguments(&resolved_name, &raw.arguments_json, catalog) {
+                Ok(s) => s,
+                Err(rej) => return (rej, events),
+            };
 
         let record = ToolCallRecord {
             call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
@@ -131,11 +133,20 @@ impl ToolRepairPipeline {
 
         if let Some(hint) = &spec.schema_hint {
             if let Some(obj) = value.as_object_mut() {
+                normalize_append_blocks_completion_alias(obj, resolved_tool);
                 self::apply_schema_hint(obj, hint, resolved_tool, catalog)?;
             }
         }
 
         Ok(serde_json::to_string(&value).unwrap_or_else(|_| trimmed))
+    }
+}
+
+fn normalize_append_blocks_completion_alias(obj: &mut Map<String, Value>, tool_name: &str) {
+    if tool_name == "append_blocks" && !obj.contains_key("isComplete") {
+        if let Some(v) = obj.get("complete").cloned() {
+            obj.insert("isComplete".into(), v);
+        }
     }
 }
 
@@ -314,7 +325,9 @@ mod tests {
             arguments_json: "{}".into(),
         };
         match ToolRepairPipeline::repair(&raw, ToolCatalog::global()).0 {
-            RepairOutcome::Reject { error_json_for_model } => {
+            RepairOutcome::Reject {
+                error_json_for_model,
+            } => {
                 let v: Value = serde_json::from_str(&error_json_for_model).unwrap();
                 assert!(v.get("error").is_some());
                 let tools = v.get("available_tools").and_then(|t| t.as_array()).unwrap();
@@ -353,6 +366,23 @@ mod tests {
             RepairOutcome::Repaired(rec) => {
                 let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
                 assert_eq!(v["isComplete"], false);
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn append_blocks_complete_alias_sets_is_complete() {
+        let raw = RawToolCall {
+            id: None,
+            name: "append_blocks".into(),
+            arguments_json: r#"{"artifactId":"a","blocks":[],"complete":true}"#.into(),
+        };
+        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        match out {
+            RepairOutcome::Repaired(rec) => {
+                let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
+                assert_eq!(v["isComplete"], true);
             }
             o => panic!("{o:?}"),
         }

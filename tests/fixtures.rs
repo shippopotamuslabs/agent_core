@@ -84,7 +84,10 @@ enum ExecMode {
 struct FixtureExecutor(ExecMode);
 
 impl AgentToolExecutor for FixtureExecutor {
-    fn execute_tools(&self, calls: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+    fn execute_tools(
+        &self,
+        calls: Vec<ToolCallRecord>,
+    ) -> Result<Vec<ToolResultRecord>, AgentError> {
         match self.0 {
             ExecMode::Ok => Ok(calls
                 .into_iter()
@@ -115,6 +118,7 @@ fn action_name(a: &AgentAction) -> String {
         AgentAction::RequestSummary(_) => "RequestSummary".into(),
         AgentAction::Finished => "Finished".into(),
         AgentAction::Failed(_) => "Failed".into(),
+        AgentAction::ManualCompactCompleted(_) => "ManualCompactCompleted".into(),
     }
 }
 
@@ -166,6 +170,9 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
             AgentAction::RequestSummary(_) => panic!("RequestSummary in fixture {}", f.name),
             AgentAction::Finished => break,
             AgentAction::Failed(e) => panic!("fixture {} failed: {e:?}", f.name),
+            AgentAction::ManualCompactCompleted(_) => {
+                panic!("ManualCompactCompleted in fixture {}", f.name)
+            }
         }
         if matches!(act, AgentAction::Finished) {
             break;
@@ -197,7 +204,12 @@ fn run_all_fixtures() {
         let f: FixtureFile = serde_json::from_str(&raw).unwrap();
         let expected = f.expected_actions.clone();
         let (name, actions, events) = run_fixture(&path, exec_mode);
-        assert_eq!(actions, expected, "action mismatch for {name} ({})", path.display());
+        assert_eq!(
+            actions,
+            expected,
+            "action mismatch for {name} ({})",
+            path.display()
+        );
         insta::assert_json_snapshot!(format!("events_{}", name.replace(' ', "_")), events);
     }
 }

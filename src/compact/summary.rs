@@ -5,18 +5,16 @@
 //! The engine forwards that to the host; the host later calls [`apply_summary_result`] (or equivalent)
 //! with a [`crate::turn_io::SummaryResult`].
 
+use super::{CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::TokenLedger;
-use crate::events::{
-    CompactionEvent,
-    CompactionTier as CompactionTierKind,
-};
+use crate::events::{CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger};
 use crate::message::{AgentMessage, AgentRole};
 use crate::session::{AgentConfig, AgentSession};
 use crate::turn_io::{SummaryRequest, SummaryResult};
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
 
 /// Instruction string forwarded to the host summarizer. Must remain **verbatim** across versions.
-pub const SUMMARY_INSTRUCTION: &str = "Summarize preserving: tool decisions made, artifact state, key facts. Omit raw tool output.";
+pub const SUMMARY_INSTRUCTION: &str =
+    "Summarize preserving: objective, constraints, decisions, tool decisions, touched files, open questions, artifact state, and key facts. Omit raw tool output.";
 
 pub struct SummaryCompactionTier;
 
@@ -56,6 +54,28 @@ fn messages_to_summarize(messages: &[AgentMessage]) -> Option<(Vec<AgentMessage>
     Some((picked, last_id))
 }
 
+fn messages_to_summarize_for_trigger(
+    messages: &[AgentMessage],
+    trigger: CompactionTrigger,
+) -> Option<(Vec<AgentMessage>, String)> {
+    if trigger != CompactionTrigger::MidTurn {
+        return messages_to_summarize(messages);
+    }
+
+    let mut picked = Vec::new();
+    for msg in messages {
+        if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
+            continue;
+        }
+        picked.push(msg.clone());
+    }
+    if picked.is_empty() {
+        return None;
+    }
+    let last_id = picked.last()?.id.clone();
+    Some((picked, last_id))
+}
+
 impl CompactionTier for SummaryCompactionTier {
     fn apply(
         &self,
@@ -72,7 +92,9 @@ impl CompactionTier for SummaryCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
-        let Some((msgs, last_message_id)) = messages_to_summarize(&session.messages) else {
+        let Some((msgs, last_message_id)) =
+            messages_to_summarize_for_trigger(&session.messages, ctx.trigger)
+        else {
             return CompactionOutcome::NotApplicable;
         };
 
@@ -80,6 +102,10 @@ impl CompactionTier for SummaryCompactionTier {
             messages_to_summarize: msgs,
             instruction: SUMMARY_INSTRUCTION.to_string(),
             last_message_id,
+            trigger: ctx.trigger,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         };
 
         // If the selected range is empty of content (shouldn't happen), bail
@@ -182,6 +208,7 @@ mod tests {
                 summarization_allowed: allowed,
                 kv_fixed,
                 tool_result_budget_tokens: None,
+                ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
         }
@@ -207,10 +234,8 @@ mod tests {
 
     #[test]
     fn not_applicable_when_summarization_disallowed() {
-        let session = AgentSession::new(
-            vec![um("u1", "hi"), am("a1", "yo"), um("u2", "tail")],
-            Null,
-        );
+        let session =
+            AgentSession::new(vec![um("u1", "hi"), am("a1", "yo"), um("u2", "tail")], Null);
         let cfg = AgentConfig::default();
         let out = SummaryCompactionTier.apply(session, &cfg, &ctx(false));
         assert!(matches!(out, CompactionOutcome::NotApplicable));
@@ -218,10 +243,8 @@ mod tests {
 
     #[test]
     fn not_applicable_when_kv_fixed_even_if_summarization_allowed() {
-        let session = AgentSession::new(
-            vec![um("u1", "hi"), am("a1", "yo"), um("u2", "tail")],
-            Null,
-        );
+        let session =
+            AgentSession::new(vec![um("u1", "hi"), am("a1", "yo"), um("u2", "tail")], Null);
         let cfg = AgentConfig::default();
         let out = SummaryCompactionTier.apply(session, &cfg, &ctx_kv(true, true));
         assert!(matches!(out, CompactionOutcome::NotApplicable));
@@ -230,7 +253,11 @@ mod tests {
     #[test]
     fn needs_host_call_preserves_instruction_verbatim() {
         let session = AgentSession::new(
-            vec![um("u1", &"hello world ".repeat(50)), am("a1", &"reply ".repeat(50)), um("u2", "tail")],
+            vec![
+                um("u1", &"hello world ".repeat(50)),
+                am("a1", &"reply ".repeat(50)),
+                um("u2", "tail"),
+            ],
             Null,
         );
         let cfg = AgentConfig::default();
@@ -238,7 +265,10 @@ mod tests {
             CompactionOutcome::NeedsHostCall(req, _) => {
                 assert_eq!(req.instruction, SUMMARY_INSTRUCTION);
                 assert!(!req.messages_to_summarize.is_empty());
-                assert_eq!(req.last_message_id, req.messages_to_summarize.last().unwrap().id);
+                assert_eq!(
+                    req.last_message_id,
+                    req.messages_to_summarize.last().unwrap().id
+                );
             }
             o => panic!("expected NeedsHostCall, got {o:?}"),
         }
@@ -259,6 +289,10 @@ mod tests {
             messages_to_summarize: vec![um("u1", "old user"), am("a1", "old assistant")],
             instruction: SUMMARY_INSTRUCTION.into(),
             last_message_id: "a1".into(),
+            trigger: CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         };
 
         let res = SummaryResult {
@@ -266,7 +300,14 @@ mod tests {
             last_message_id: "a1".into(),
         };
 
-        apply_summary_result(&mut session, &req, &res, &AgentConfig::default(), &ctx(true)).unwrap();
+        apply_summary_result(
+            &mut session,
+            &req,
+            &res,
+            &AgentConfig::default(),
+            &ctx(true),
+        )
+        .unwrap();
 
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].role, AgentRole::CompactSummary);
@@ -283,11 +324,22 @@ mod tests {
             messages_to_summarize: vec![um("u1", "a")],
             instruction: "x".into(),
             last_message_id: "u1".into(),
+            trigger: CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         };
         let bad = SummaryResult {
             summary_text: "y".into(),
             last_message_id: "other".into(),
         };
-        assert!(apply_summary_result(&mut session, &req, &bad, &AgentConfig::default(), &ctx(true)).is_err());
+        assert!(apply_summary_result(
+            &mut session,
+            &req,
+            &bad,
+            &AgentConfig::default(),
+            &ctx(true)
+        )
+        .is_err());
     }
 }

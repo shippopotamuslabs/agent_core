@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::message::AgentMessage;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -9,6 +9,16 @@ pub struct ModelRequest {
     /// Engine passes through opaquely; transport assembles it.
     pub tools_schema_json: String,
     pub allow_tool_call: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_references: Vec<crate::context_store::ContextReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_ledger: Option<crate::state_ledger::StateLedger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context_index: Option<crate::tool_context::ToolContextIndex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_context_index: Option<crate::file_context::FileContextIndex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +69,18 @@ pub struct SummaryRequest {
     pub instruction: String,
     /// ID of the last message in the range to summarize. Echoed back in `SummaryResult`.
     pub last_message_id: String,
+    #[serde(default = "default_summary_trigger")]
+    pub trigger: crate::events::CompactionTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_ledger_snapshot: Option<crate::state_ledger::StateLedger>,
+}
+
+fn default_summary_trigger() -> crate::events::CompactionTrigger {
+    crate::events::CompactionTrigger::Preflight
 }
 
 /// Host returns this after performing the summarization.
@@ -100,8 +122,16 @@ mod tests {
         let r = ModelResponse {
             assistant_text: None,
             tool_calls: vec![
-                RawToolCall { id: Some("c1".into()), name: "web_search".into(), arguments_json: "{}".into() },
-                RawToolCall { id: Some("c2".into()), name: "web_extract".into(), arguments_json: "{}".into() },
+                RawToolCall {
+                    id: Some("c1".into()),
+                    name: "web_search".into(),
+                    arguments_json: "{}".into(),
+                },
+                RawToolCall {
+                    id: Some("c2".into()),
+                    name: "web_extract".into(),
+                    arguments_json: "{}".into(),
+                },
             ],
             finish_reason: FinishReason::ToolUse,
         };
@@ -123,7 +153,11 @@ mod tests {
 
     #[test]
     fn raw_tool_call_no_id_omits_field() {
-        let tc = RawToolCall { id: None, name: "web_search".into(), arguments_json: "{}".into() };
+        let tc = RawToolCall {
+            id: None,
+            name: "web_search".into(),
+            arguments_json: "{}".into(),
+        };
         let json = serde_json::to_string(&tc).unwrap();
         assert!(!json.contains("\"id\""));
     }
@@ -135,6 +169,11 @@ mod tests {
             system_prompt: "You are helpful.".into(),
             tools_schema_json: "[]".into(),
             allow_tool_call: true,
+            context_references: vec![],
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ModelRequest = serde_json::from_str(&json).unwrap();
@@ -148,6 +187,10 @@ mod tests {
             messages_to_summarize: vec![make_message("m1"), make_message("m2")],
             instruction: "Summarize preserving tool decisions.".into(),
             last_message_id: "m2".into(),
+            trigger: crate::events::CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: SummaryRequest = serde_json::from_str(&json).unwrap();

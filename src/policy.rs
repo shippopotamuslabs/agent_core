@@ -1,0 +1,132 @@
+//! Context policy resolution.
+//!
+//! Normalises [`crate::session::AgentConfig`] and [`crate::session::SessionCapabilities`]
+//! into a single [`ContextPolicy`] used by compaction planning, summary tiers,
+//! tool-schema deferral, file-context condensation, and prompt-cache hints.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPolicyTier {
+    HostedMutable,
+    HostedProxy,
+    LocalMutable,
+    FixedKv,
+    HighContext,
+    SmallContext,
+}
+
+impl Default for ContextPolicyTier {
+    fn default() -> Self {
+        ContextPolicyTier::HostedMutable
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextPolicy {
+    pub tier: ContextPolicyTier,
+    pub summarization_allowed: bool,
+    pub history_rewrite_allowed: bool,
+    pub kv_rebuild_required_on_rewrite: bool,
+    pub tool_schema_deferral_allowed: bool,
+    pub file_backed_context_allowed: bool,
+    pub manual_compact_allowed: bool,
+    pub prompt_cache_hinting_allowed: bool,
+    pub fifo_allowed_by_default: bool,
+}
+
+/// Effective preflight threshold for the high-context tier; raises the default
+/// `threshold_ratio` so very large context windows don't compact prematurely.
+pub const HIGH_CONTEXT_PREFLIGHT_THRESHOLD: f32 = 0.90;
+
+pub fn resolve_context_policy(
+    config: &crate::session::AgentConfig,
+    capabilities: &crate::session::SessionCapabilities,
+    _provider: &str,
+    _context_window_tokens: u32,
+) -> ContextPolicy {
+    let tier = capabilities.context_policy_tier;
+
+    match tier {
+        ContextPolicyTier::FixedKv => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed
+                && capabilities.history_rewrite_supported,
+            history_rewrite_allowed: capabilities.history_rewrite_supported,
+            kv_rebuild_required_on_rewrite: true,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: false,
+        },
+        ContextPolicyTier::HostedMutable => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed,
+            history_rewrite_allowed: true,
+            kv_rebuild_required_on_rewrite: false,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: false,
+        },
+        ContextPolicyTier::HostedProxy => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed,
+            history_rewrite_allowed: capabilities.history_rewrite_supported,
+            kv_rebuild_required_on_rewrite: !capabilities.history_rewrite_supported,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: false,
+        },
+        ContextPolicyTier::LocalMutable => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed,
+            history_rewrite_allowed: capabilities.history_rewrite_supported,
+            kv_rebuild_required_on_rewrite: capabilities.kv_fixed,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: true,
+        },
+        ContextPolicyTier::HighContext => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed,
+            history_rewrite_allowed: capabilities.history_rewrite_supported,
+            kv_rebuild_required_on_rewrite: capabilities.kv_fixed,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: false,
+        },
+        ContextPolicyTier::SmallContext => ContextPolicy {
+            tier,
+            summarization_allowed: capabilities.summarization_allowed,
+            history_rewrite_allowed: capabilities.history_rewrite_supported,
+            kv_rebuild_required_on_rewrite: capabilities.kv_fixed,
+            tool_schema_deferral_allowed: config.enable_tool_schema_deferral
+                && capabilities.tool_schema_deferral_supported,
+            file_backed_context_allowed: config.enable_file_condensation
+                && capabilities.file_backed_context_supported,
+            manual_compact_allowed: config.enable_manual_compact,
+            prompt_cache_hinting_allowed: capabilities.prompt_cache_supported,
+            fifo_allowed_by_default: true,
+        },
+    }
+}
