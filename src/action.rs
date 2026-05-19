@@ -51,6 +51,7 @@ mod tests {
             session_messages: vec![],
             system_prompt: "test".into(),
             tools_schema_json: "[]".into(),
+            rendered_tool_catalog_json: "[]".into(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,

@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_budget_path_uses_four_k_default() {
+    fn cloud_budget_path_uses_strict_default() {
         let caps = SessionCapabilities {
             summarization_allowed: true,
             kv_fixed: false,
@@ -105,6 +105,9 @@ mod tests {
             ..Default::default()
         };
         let config = AgentConfig::default();
-        assert_eq!(truncate_budget_per_result(&caps, &config), 4096);
+        assert_eq!(
+            truncate_budget_per_result(&caps, &config),
+            config.tool_result_budget_cloud_bytes
+        );
     }
 }

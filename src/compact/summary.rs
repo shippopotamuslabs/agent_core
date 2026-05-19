@@ -12,9 +12,10 @@ use crate::message::{AgentMessage, AgentRole};
 use crate::session::{AgentConfig, AgentSession};
 use crate::turn_io::{SummaryRequest, SummaryResult};
 
-/// Instruction string forwarded to the host summarizer. Must remain **verbatim** across versions.
-pub const SUMMARY_INSTRUCTION: &str =
-    "Summarize preserving: objective, constraints, decisions, tool decisions, touched files, open questions, artifact state, and key facts. Omit raw tool output.";
+/// Instruction string forwarded to the host summarizer.
+pub const SUMMARY_INSTRUCTION: &str = "Summarize preserving: objective, constraints, decisions, tool decisions, touched files, open questions, artifact state, and key facts. \
+Preserve concrete findings from completed web_search/web_extract/search_x_recent calls (queries, URLs, titles, and short factual excerpts). \
+Do not suggest repeating searches that already returned useful results. Omit bulky raw JSON.";
 
 pub struct SummaryCompactionTier;
 
@@ -33,19 +34,35 @@ fn last_user_index(messages: &[AgentMessage]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// Chooses messages to summarize: everything **before** the last user turn, excluding system and
-/// prior compact summaries (they stay in the session as anchors).
+/// Chooses messages to summarize while keeping the latest user prompt intact.
+///
+/// - Default: history **before** the last user message.
+/// - Active turn: assistant/tool traffic **after** the last user when there is no
+///   prior history (common for post-tool compaction).
+/// - Lone oversized user turn: the user message itself when it is the only content.
 fn messages_to_summarize(messages: &[AgentMessage]) -> Option<(Vec<AgentMessage>, String)> {
     let last_u = last_user_index(messages)?;
-    if last_u == 0 {
-        return None;
-    }
     let mut picked = Vec::new();
     for msg in messages.iter().take(last_u) {
         if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
             continue;
         }
         picked.push(msg.clone());
+    }
+    if picked.is_empty() && last_u + 1 < messages.len() {
+        for msg in messages.iter().skip(last_u + 1) {
+            if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
+                continue;
+            }
+            picked.push(msg.clone());
+        }
+    }
+    if picked.is_empty()
+        && last_u == 0
+        && messages.len() == 1
+        && messages[0].role == AgentRole::User
+    {
+        picked.push(messages[0].clone());
     }
     if picked.is_empty() {
         return None;
@@ -56,24 +73,12 @@ fn messages_to_summarize(messages: &[AgentMessage]) -> Option<(Vec<AgentMessage>
 
 fn messages_to_summarize_for_trigger(
     messages: &[AgentMessage],
-    trigger: CompactionTrigger,
+    _trigger: CompactionTrigger,
 ) -> Option<(Vec<AgentMessage>, String)> {
-    if trigger != CompactionTrigger::MidTurn {
-        return messages_to_summarize(messages);
-    }
-
-    let mut picked = Vec::new();
-    for msg in messages {
-        if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
-            continue;
-        }
-        picked.push(msg.clone());
-    }
-    if picked.is_empty() {
-        return None;
-    }
-    let last_id = picked.last()?.id.clone();
-    Some((picked, last_id))
+    // Always keep the latest user turn and everything after it (including the
+    // pending assistant tool-call message). Prior compact summaries are merged
+    // in `apply_summary_result` instead of accumulating as separate messages.
+    messages_to_summarize(messages)
 }
 
 impl CompactionTier for SummaryCompactionTier {
@@ -135,6 +140,14 @@ pub fn apply_summary_result(
         return Err("empty summarize set");
     }
 
+    let prior_summaries: Vec<String> = session
+        .messages
+        .iter()
+        .filter(|m| m.role == AgentRole::CompactSummary)
+        .map(|m| m.content.clone())
+        .collect();
+    session.messages.retain(|m| m.role != AgentRole::CompactSummary);
+
     let first_id = &req.messages_to_summarize[0].id;
     let Some(start) = session.messages.iter().position(|m| m.id == *first_id) else {
         return Err("start id not in session");
@@ -162,10 +175,25 @@ pub fn apply_summary_result(
 
     session.messages.drain(start..start + n);
 
+    let merged_content = if prior_summaries.is_empty() {
+        result.summary_text.clone()
+    } else {
+        let mut body = String::from("[Conversation summary]\n");
+        for (index, prior) in prior_summaries.iter().enumerate() {
+            if index > 0 {
+                body.push_str("\n\n---\n\n");
+            }
+            body.push_str(prior.trim());
+        }
+        body.push_str("\n\n---\n\n");
+        body.push_str(result.summary_text.trim());
+        body
+    };
+
     let summary_msg = AgentMessage {
         id: format!("compact-summary-{}", result.last_message_id),
         role: AgentRole::CompactSummary,
-        content: result.summary_text.clone(),
+        content: merged_content,
         metadata: serde_json::Value::Null,
     };
     session.messages.insert(start, summary_msg);
@@ -315,6 +343,70 @@ mod tests {
         assert_eq!(session.messages[1].id, "u2");
         let ev = session.compaction_log.iter().next_back().unwrap();
         assert!(matches!(ev.tier, CompactionTierKind::Summary));
+    }
+
+    #[test]
+    fn messages_to_summarize_includes_post_user_turn_traffic() {
+        let messages = vec![
+            um("u1", "task"),
+            am("a1", "calling tools"),
+            AgentMessage {
+                id: "t1".into(),
+                role: AgentRole::Tool,
+                content: "result".into(),
+                metadata: Null,
+            },
+        ];
+        let (picked, last_id) =
+            messages_to_summarize(&messages).expect("post-user assistant/tool range");
+        assert_eq!(picked.len(), 2);
+        assert_eq!(last_id, "t1");
+    }
+
+    #[test]
+    fn apply_summary_merges_prior_compact_summaries() {
+        let mut session = AgentSession::new(
+            vec![
+                AgentMessage {
+                    id: "cs0".into(),
+                    role: AgentRole::CompactSummary,
+                    content: "Earlier summary.".into(),
+                    metadata: Null,
+                },
+                um("u1", "old user"),
+                am("a1", "old assistant"),
+                um("u2", "new user"),
+            ],
+            Null,
+        );
+
+        let req = SummaryRequest {
+            messages_to_summarize: vec![um("u1", "old user"), am("a1", "old assistant")],
+            instruction: SUMMARY_INSTRUCTION.into(),
+            last_message_id: "a1".into(),
+            trigger: CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
+        };
+
+        apply_summary_result(
+            &mut session,
+            &req,
+            &SummaryResult {
+                summary_text: "Latest summary.".into(),
+                last_message_id: "a1".into(),
+            },
+            &AgentConfig::default(),
+            &ctx(true),
+        )
+        .unwrap();
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, AgentRole::CompactSummary);
+        assert!(session.messages[0].content.contains("Earlier summary."));
+        assert!(session.messages[0].content.contains("Latest summary."));
+        assert_eq!(session.messages[1].id, "u2");
     }
 
     #[test]
