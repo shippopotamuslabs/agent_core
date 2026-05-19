@@ -65,6 +65,7 @@ mod tests {
                     result_json: r#"{"result":"ok"}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    result_metadata: None,
                 })
                 .collect())
         }
@@ -79,6 +80,7 @@ mod tests {
             session_messages: vec![],
             system_prompt: "".into(),
             tools_schema_json: "[]".into(),
+            rendered_tool_catalog_json: "[]".into(),
             allow_tool_call: false,
             context_references: vec![],
             state_ledger: None,
@@ -97,6 +99,7 @@ mod tests {
             call_id: "c1".into(),
             name: "web_search".into(),
             arguments_json: "{}".into(),
+            attempt_metadata: None,
             repair_metadata: None,
         }];
         let results = executor.execute_tools(calls).unwrap();

@@ -4,10 +4,12 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::action::AgentAction;
+use crate::message::AgentMessage;
 use crate::compact::CompactionContext;
 use crate::context_store::ContextStore;
 use crate::events::AgentEvent;
 use crate::guardrails::GuardrailState;
+use crate::loop_metrics::LoopMetrics;
 use crate::message::ToolCallRecord;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::state_ledger::StateLedger;
@@ -41,6 +43,7 @@ pub(super) struct InnerSession {
     pub(super) capabilities: SessionCapabilities,
     pub(super) io: SessionIoParams,
     pub(super) guardrails: GuardrailState,
+    pub(super) loop_metrics: LoopMetrics,
     pub(super) phase: EnginePhase,
     pub(super) pending_call_model: Option<ModelRequest>,
     pub(super) pending_execute: Option<Vec<ToolCallRecord>>,
@@ -53,6 +56,7 @@ pub(super) struct InnerSession {
     pub(super) state_ledger: StateLedger,
     pub(super) pending_tool_turn_parallel: usize,
     pub(super) pending_reject_count_this_turn: usize,
+    pub(super) model_requests_this_turn: u32,
     pub(super) events: Vec<AgentEvent>,
     pub(super) turn_index: u32,
     pub(super) cancelled: bool,
@@ -61,8 +65,26 @@ pub(super) struct InnerSession {
     pub(super) pending_artifact_ids: HashSet<String>,
 }
 
+/// Integration-test snapshot (TOOL-PARSE-002).
+#[derive(Debug, Clone)]
+pub struct SessionTestSnapshot {
+    pub messages: Vec<AgentMessage>,
+    pub consecutive_envelope_parse_failures: u32,
+    pub terminal_action: Option<AgentAction>,
+}
+
 impl SessionHandle {
     pub(super) fn lock_inner(&self) -> MutexGuard<'_, InnerSession> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Exposes session state for `tests/engine_envelope_retry_test.rs`.
+    pub fn integration_test_snapshot(&self) -> SessionTestSnapshot {
+        let inner = self.lock_inner();
+        SessionTestSnapshot {
+            messages: inner.session.messages.clone(),
+            consecutive_envelope_parse_failures: inner.guardrails.consecutive_envelope_parse_failures,
+            terminal_action: inner.terminal_action.clone(),
+        }
     }
 }

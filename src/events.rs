@@ -58,6 +58,9 @@ pub enum AgentError {
     #[error("Guardrail exceeded: {kind}")]
     GuardrailExceeded { kind: String },
 
+    #[error("Model stopped before completion: {reason}")]
+    ModelStopped { reason: String },
+
     #[error("Compaction failed (tier={tier}): {reason}")]
     CompactionFailed { tier: String, reason: String },
 
@@ -85,6 +88,9 @@ pub enum AgentError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    HookInvoked {
+        checkpoint: String,
+    },
     TurnStarted {
         turn_index: u32,
         allow_tool_call: bool,
@@ -122,11 +128,21 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         history_ref: Option<String>,
     },
+    ToolPolicyDenied {
+        tool_name: String,
+    },
+    ToolTimedOut {
+        tool_name: String,
+        timeout_ms: u64,
+    },
 }
 
 impl std::fmt::Display for AgentEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AgentEvent::HookInvoked { checkpoint } => {
+                write!(f, "HookInvoked({checkpoint})")
+            }
             AgentEvent::TurnStarted { turn_index, .. } => {
                 write!(f, "TurnStarted(turn={turn_index})")
             }
@@ -161,6 +177,13 @@ impl std::fmt::Display for AgentEvent {
             AgentEvent::KvCacheInvalidated { reason } => write!(f, "KvCacheInvalidated({reason})"),
             AgentEvent::PreCompact { trigger } => write!(f, "PreCompact({trigger:?})"),
             AgentEvent::PostCompact { trigger, .. } => write!(f, "PostCompact({trigger:?})"),
+            AgentEvent::ToolPolicyDenied { tool_name } => {
+                write!(f, "ToolPolicyDenied({tool_name})")
+            }
+            AgentEvent::ToolTimedOut {
+                tool_name,
+                timeout_ms,
+            } => write!(f, "ToolTimedOut({tool_name}, timeout_ms={timeout_ms})"),
         }
     }
 }

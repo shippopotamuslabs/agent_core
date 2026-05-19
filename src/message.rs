@@ -33,8 +33,29 @@ pub struct ToolCallRecord {
     pub call_id: String,
     pub name: String,
     pub arguments_json: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_metadata: Option<ToolAttemptMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair_metadata: Option<RepairRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAttemptMetadata {
+    pub attempt_index: u32,
+    pub attempts_remaining: Option<u32>,
+    pub timeout_ms: Option<u64>,
+    pub policy_denied: bool,
+    pub requires_prior_read: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultMetadata {
+    pub duration_ms: Option<u64>,
+    pub timed_out: bool,
+    pub timeout_ms: Option<u64>,
+    pub policy_denied: bool,
+    pub prior_read_satisfied: bool,
+    pub delegated_agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +64,8 @@ pub struct ToolResultRecord {
     pub result_json: String,
     pub truncated: bool,
     pub soft_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_metadata: Option<ToolResultMetadata>,
 }
 
 #[cfg(test)]
@@ -78,6 +101,7 @@ mod tests {
             call_id: "c1".into(),
             name: "web_search".into(),
             arguments_json: r#"{"query":"rust"}"#.into(),
+            attempt_metadata: None,
             repair_metadata: Some(RepairRecord {
                 original_name: "web_seach".into(),
                 applied_aliases: vec![],
@@ -96,6 +120,7 @@ mod tests {
             call_id: "c2".into(),
             name: "web_search".into(),
             arguments_json: "{}".into(),
+            attempt_metadata: None,
             repair_metadata: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
@@ -109,6 +134,7 @@ mod tests {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: ToolResultRecord = serde_json::from_str(&json).unwrap();
