@@ -111,6 +111,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
 

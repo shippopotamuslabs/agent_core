@@ -40,6 +40,45 @@ pub struct ContextPolicy {
 /// `threshold_ratio` so very large context windows don't compact prematurely.
 pub const HIGH_CONTEXT_PREFLIGHT_THRESHOLD: f32 = 0.90;
 
+/// Large hosted windows (e.g. 128k) should not enter destructive compaction at the
+/// same ratios as small local sessions.
+pub const LARGE_CONTEXT_WINDOW_TOKENS: u32 = 100_000;
+pub const LARGE_CONTEXT_POST_TOOL_THRESHOLD: f32 = 0.94;
+pub const LARGE_CONTEXT_MID_TURN_THRESHOLD: f32 = 0.94;
+
+/// Pressure ratio at or above which compaction tiers may run for `trigger`.
+pub fn effective_compaction_threshold_ratio(
+    config: &crate::session::AgentConfig,
+    policy: &ContextPolicy,
+    trigger: crate::events::CompactionTrigger,
+    context_window_tokens: u32,
+) -> f32 {
+    use crate::compact::policy::threshold_ratio_for_trigger;
+    use crate::events::CompactionTrigger;
+
+    let base = match (trigger, policy.tier) {
+        (CompactionTrigger::Preflight, ContextPolicyTier::HighContext) => {
+            HIGH_CONTEXT_PREFLIGHT_THRESHOLD
+        }
+        _ => threshold_ratio_for_trigger(config, trigger),
+    };
+
+    match (policy.tier, trigger) {
+        (ContextPolicyTier::HighContext, CompactionTrigger::PostToolResult) => {
+            base.max(LARGE_CONTEXT_POST_TOOL_THRESHOLD)
+        }
+        (ContextPolicyTier::HighContext, CompactionTrigger::MidTurn) => {
+            base.max(LARGE_CONTEXT_MID_TURN_THRESHOLD)
+        }
+        _ if context_window_tokens >= LARGE_CONTEXT_WINDOW_TOKENS => match trigger {
+            CompactionTrigger::PostToolResult => base.max(LARGE_CONTEXT_POST_TOOL_THRESHOLD),
+            CompactionTrigger::MidTurn => base.max(LARGE_CONTEXT_MID_TURN_THRESHOLD),
+            _ => base,
+        },
+        _ => base,
+    }
+}
+
 pub fn resolve_context_policy(
     config: &crate::session::AgentConfig,
     capabilities: &crate::session::SessionCapabilities,

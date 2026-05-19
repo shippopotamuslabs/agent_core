@@ -90,13 +90,35 @@ pub fn should_compact_at(pressure: &Pressure, threshold_ratio: f32) -> bool {
     pressure.ratio >= threshold_ratio
 }
 
-/// Per-tool-result byte budget:
+/// Strict per-tool-result byte budget used when context pressure is high.
+///
 /// - Local model with `tool_result_budget_tokens`: `tokens × AVG_BYTES_PER_TOKEN`.
-/// - Cloud (or no override): `config.tool_result_budget_cloud_bytes` (default 4096).
+/// - Cloud (or no override): `config.tool_result_budget_cloud_bytes`.
 pub fn truncate_budget_per_result(caps: &SessionCapabilities, config: &AgentConfig) -> usize {
     caps.tool_result_budget_tokens
         .map(|t| t as usize * AVG_BYTES_PER_TOKEN)
         .unwrap_or(config.tool_result_budget_cloud_bytes)
+}
+
+/// Byte budget for an incoming tool result given current session pressure.
+///
+/// While pressure is below [`AgentConfig::tool_result_truncation_pressure_ratio`], search
+/// and other tool payloads are kept intact (up to the relaxed cap) so the model can
+/// use them on the next turn. Strict truncation applies only when the window is
+/// actually filling up.
+pub fn effective_tool_result_budget(
+    pressure: &Pressure,
+    caps: &SessionCapabilities,
+    config: &AgentConfig,
+) -> usize {
+    if caps.tool_result_budget_tokens.is_some() {
+        return truncate_budget_per_result(caps, config);
+    }
+    if should_compact_at(pressure, config.tool_result_truncation_pressure_ratio) {
+        truncate_budget_per_result(caps, config)
+    } else {
+        config.tool_result_budget_relaxed_bytes
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +267,26 @@ mod tests {
         assert_eq!(p.ratio, 0.0);
     }
 
+    // ── effective_tool_result_budget ───────────────────────────────────────
+
+    #[test]
+    fn relaxed_budget_when_pressure_low() {
+        let config = AgentConfig::default();
+        let caps = SessionCapabilities::default();
+        let pressure = make_pressure(0.50);
+        let budget = effective_tool_result_budget(&pressure, &caps, &config);
+        assert_eq!(budget, config.tool_result_budget_relaxed_bytes);
+    }
+
+    #[test]
+    fn strict_budget_when_pressure_high() {
+        let config = AgentConfig::default();
+        let caps = SessionCapabilities::default();
+        let pressure = make_pressure(0.90);
+        let budget = effective_tool_result_budget(&pressure, &caps, &config);
+        assert_eq!(budget, config.tool_result_budget_cloud_bytes);
+    }
+
     // ── truncate_budget_per_result ─────────────────────────────────────────
 
     #[test]
@@ -256,7 +298,10 @@ mod tests {
             ..Default::default()
         };
         let config = AgentConfig::default();
-        assert_eq!(truncate_budget_per_result(&caps, &config), 4096);
+        assert_eq!(
+            truncate_budget_per_result(&caps, &config),
+            config.tool_result_budget_cloud_bytes
+        );
     }
 
     #[test]
