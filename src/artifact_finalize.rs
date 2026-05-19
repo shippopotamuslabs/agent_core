@@ -84,6 +84,7 @@ pub fn synthetic_finalize_calls(pending: &HashSet<String>) -> Vec<ToolCallRecord
             call_id: format!("auto-finalize-{id}"),
             name: "append_blocks".into(),
             arguments_json: format!(r#"{{"artifactId":"{id}","blocks":[],"isComplete":true}}"#),
+            attempt_metadata: None,
             repair_metadata: None,
         })
         .collect()

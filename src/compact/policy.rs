@@ -3,7 +3,7 @@
 //! See `plans/PLAN-agent-core-context-management/spec.md` — task 3.
 
 use crate::events::{CompactionTier, CompactionTrigger};
-use crate::policy::{ContextPolicy, ContextPolicyTier, HIGH_CONTEXT_PREFLIGHT_THRESHOLD};
+use crate::policy::{effective_compaction_threshold_ratio, ContextPolicy};
 use crate::session::{AgentConfig, SessionCapabilities};
 
 #[derive(Debug, Clone)]
@@ -31,15 +31,14 @@ pub fn build_compaction_plan(
     _capabilities: &SessionCapabilities,
     policy: &ContextPolicy,
     trigger: CompactionTrigger,
+    context_window_tokens: u32,
 ) -> CompactionPlan {
-    // High-context tier raises preflight threshold so very-large windows don't
-    // compact prematurely. Other triggers use their configured ratio.
-    let threshold_ratio = match (trigger, policy.tier) {
-        (CompactionTrigger::Preflight, ContextPolicyTier::HighContext) => {
-            HIGH_CONTEXT_PREFLIGHT_THRESHOLD
-        }
-        _ => threshold_ratio_for_trigger(config, trigger),
-    };
+    let threshold_ratio = effective_compaction_threshold_ratio(
+        config,
+        policy,
+        trigger,
+        context_window_tokens,
+    );
 
     let summary_allowed = policy.summarization_allowed && policy.history_rewrite_allowed;
     let history_rewrite_allowed = policy.history_rewrite_allowed;

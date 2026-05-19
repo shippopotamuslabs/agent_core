@@ -32,6 +32,7 @@ impl AgentToolExecutor for MockExec {
                 result_json: r#"{"results":[]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                result_metadata: None,
             })
             .collect())
     }
@@ -86,6 +87,7 @@ fn main() {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
