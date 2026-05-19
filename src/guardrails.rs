@@ -40,6 +40,8 @@ pub struct GuardrailState {
     pub tool_calls_executed: u32,
     /// Consecutive tool turns where every completed result was soft failure (no hard failure, no non-soft outcome).
     pub consecutive_soft_failure_turns: u32,
+    /// Consecutive envelope parse failures (TOOL-PARSE-002).
+    pub consecutive_envelope_parse_failures: u32,
 }
 
 impl GuardrailState {
@@ -65,6 +67,16 @@ impl GuardrailState {
         self.tool_calls_executed
             < self.effective_max_tool_calls(config, last_model_response_had_append_blocks)
             && self.consecutive_soft_failure_turns < config.tool_retry_limit
+            && self.consecutive_envelope_parse_failures < config.tool_retry_limit
+    }
+
+    pub fn reset_envelope_parse_failures(&mut self) {
+        self.consecutive_envelope_parse_failures = 0;
+    }
+
+    pub fn record_envelope_parse_failure(&mut self) {
+        self.consecutive_envelope_parse_failures =
+            self.consecutive_envelope_parse_failures.saturating_add(1);
     }
 
     /// Increment after each tool execution attempt (success, soft error payload, or synthetic limit error).
@@ -215,5 +227,18 @@ mod tests {
         assert!(!is_soft_failure_result_json(
             r#"{"data":null,"results":[]}"#
         ));
+    }
+
+    /// TOOL-PARSE-002 E-06 — envelope streak must disable `allow_tool_call` at retry limit.
+    #[test]
+    fn envelope_parse_streak_disables_allow_tool_call_at_limit() {
+        let mut g = GuardrailState::default();
+        let c = cfg();
+        assert!(g.allow_tool_call(&c, false));
+        g.consecutive_envelope_parse_failures = c.tool_retry_limit;
+        assert!(
+            !g.allow_tool_call(&c, false),
+            "E-06: third envelope failure must set allow_tool_call false"
+        );
     }
 }
