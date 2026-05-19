@@ -880,3 +880,24 @@ fn r_47_dsml_string_false_parses_json_directly_without_coercion() {
         batch.successes[0].repairs
     );
 }
+
+#[test]
+fn r_48_string_is_complete_coerced_to_boolean_on_parse() {
+    let args = r#"{"artifactId":"art-1","blocks":[],"isComplete":"false"}"#;
+    let raw = format!(r#"<tool_call>{{"name":"append_blocks","arguments":{args}}}</tool_call>"#);
+    let batch = parse_tool_calls(&raw);
+    assert_eq!(batch.successes.len(), 1, "failures: {:?}", batch.failures);
+    let value: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(value["isComplete"], Value::Bool(false));
+}
+
+#[test]
+fn r_49_string_x_search_boolean_filters_coerced_on_parse() {
+    let args = r#"{"keywords":["android"],"has_geo":"true","has_media":"false"}"#;
+    let raw = format!(r#"<tool_call>{{"name":"search_x_recent","arguments":{args}}}</tool_call>"#);
+    let batch = parse_tool_calls(&raw);
+    assert_eq!(batch.successes.len(), 1, "failures: {:?}", batch.failures);
+    let value: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(value["has_geo"], Value::Bool(true));
+    assert_eq!(value["has_media"], Value::Bool(false));
+}

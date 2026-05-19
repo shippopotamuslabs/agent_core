@@ -181,6 +181,23 @@ mod tests {
     }
 
     #[test]
+    fn append_blocks_string_is_complete_coerced_on_repair() {
+        let raw = RawToolCall {
+            id: None,
+            name: "append_blocks".into(),
+            arguments_json: r#"{"artifactId":"a","blocks":[],"isComplete":"true"}"#.into(),
+        };
+        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        match out {
+            RepairOutcome::Repaired(rec) => {
+                let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
+                assert_eq!(v["isComplete"], true);
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
     fn fuzzy_score_below_cutoff_rejects() {
         let cat = ToolCatalog::global();
         let needle = "zzzzz_no_real_match_yyyyy";

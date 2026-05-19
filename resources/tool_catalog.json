@@ -46,7 +46,18 @@
       "name": "search_x_recent",
       "aliases": ["x_search"],
       "reproducible": true,
-      "schema_hint": null
+      "schema_hint": {
+        "required_fields": [],
+        "defaults": {
+          "has_geo": false,
+          "has_media": false,
+          "has_images": false,
+          "has_videos": false,
+          "has_links": false,
+          "language": "en",
+          "sort_order": "relevancy"
+        }
+      }
     },
     {
       "name": "start_artifact",

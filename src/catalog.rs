@@ -165,6 +165,15 @@ mod tests {
     }
 
     #[test]
+    fn search_x_recent_schema_hint_covers_boolean_defaults() {
+        let cat = ToolCatalog::global();
+        let spec = cat.resolve("search_x_recent").unwrap();
+        let hint = spec.schema_hint.as_ref().unwrap();
+        assert_eq!(hint.defaults.get("has_geo"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(hint.defaults.get("has_media"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
     fn normalize_is_case_and_separator_insensitive() {
         let cat = ToolCatalog::global();
         assert!(cat.resolve("Web_Search").is_some());
