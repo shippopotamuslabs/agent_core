@@ -5,12 +5,16 @@
 
 mod callbacks;
 mod policy_bridge;
+mod stream_gate;
 mod types;
 
 pub use callbacks::{UniFfiExecutor, UniFfiSummarizer, UniFfiTransport};
 pub use policy_bridge::{
     coerce_provider_arguments, has_local_tool_contract, parse_tool_calls, repair_tool,
     result_json_looks_soft_failure, should_allow_tool, truncate_result, RepairResult,
+};
+pub use stream_gate::{
+    create_tool_stream_gate, FfiStreamGateFinish, FfiStreamGatePushResult, FfiToolStreamGate,
 };
 pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,

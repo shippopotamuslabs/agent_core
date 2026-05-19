@@ -1,12 +1,12 @@
 //! LiteRT / Kotlin policy helpers (AGENT-034) — small UniFFI surface separate from the session engine.
 
+use super::types::{FfiToolParseBatch, FfiToolParseField};
 use crate::catalog::ToolCatalog;
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
 use crate::tool_parse;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
-use super::types::{FfiToolParseBatch, FfiToolParseField};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RepairResult {

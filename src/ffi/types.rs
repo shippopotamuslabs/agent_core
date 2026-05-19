@@ -5,11 +5,11 @@ use crate::manual_compact::{ManualCompactRequest, ManualCompactResult};
 use crate::message::{AgentMessage, AgentRole, RepairRecord, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
 use crate::session::{AgentConfig, SessionCapabilities};
-use crate::turn_io::{
-    FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryRequest, SummaryResult,
-};
 use crate::tool_parse::result::{
     ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField,
+};
+use crate::turn_io::{
+    FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryRequest, SummaryResult,
 };
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -177,6 +177,7 @@ impl From<FfiModelRequest> for ModelRequest {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
             system_prompt: m.system_prompt,
             tools_schema_json: m.tools_schema_json,
+            rendered_tool_catalog_json: String::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
             state_ledger: m
@@ -340,6 +341,7 @@ impl From<FfiToolCallRecord> for ToolCallRecord {
             call_id: t.call_id,
             name: t.name,
             arguments_json: t.arguments_json,
+            attempt_metadata: None,
             repair_metadata: t.repair_metadata.map(Into::into),
         }
     }
@@ -371,6 +373,7 @@ impl From<FfiToolResultRecord> for crate::message::ToolResultRecord {
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
+            result_metadata: None,
         }
     }
 }
@@ -507,18 +510,24 @@ impl From<ToolParseFailureReason> for FfiToolParseFailureReason {
             ToolParseFailureReason::MalformedEnvelope => Self::MalformedEnvelope,
             ToolParseFailureReason::InvalidJson { detail } => Self::InvalidJson { detail },
             ToolParseFailureReason::UnknownTool { name } => Self::UnknownTool { name },
-            ToolParseFailureReason::UnknownParameter { tool, param } => Self::UnknownParameter { tool, param },
-            ToolParseFailureReason::DuplicateParameter { tool, param } => Self::DuplicateParameter { tool, param },
+            ToolParseFailureReason::UnknownParameter { tool, param } => {
+                Self::UnknownParameter { tool, param }
+            }
+            ToolParseFailureReason::DuplicateParameter { tool, param } => {
+                Self::DuplicateParameter { tool, param }
+            }
             ToolParseFailureReason::MissingRequiredParameter { tool, param } => {
                 Self::MissingRequiredParameter { tool, param }
             }
-            ToolParseFailureReason::SchemaCoercionFailed { tool, param, expected } => {
-                Self::SchemaCoercionFailed {
-                    tool,
-                    param,
-                    expected,
-                }
-            }
+            ToolParseFailureReason::SchemaCoercionFailed {
+                tool,
+                param,
+                expected,
+            } => Self::SchemaCoercionFailed {
+                tool,
+                param,
+                expected,
+            },
         }
     }
 }
@@ -529,18 +538,24 @@ impl From<FfiToolParseFailureReason> for ToolParseFailureReason {
             FfiToolParseFailureReason::MalformedEnvelope => Self::MalformedEnvelope,
             FfiToolParseFailureReason::InvalidJson { detail } => Self::InvalidJson { detail },
             FfiToolParseFailureReason::UnknownTool { name } => Self::UnknownTool { name },
-            FfiToolParseFailureReason::UnknownParameter { tool, param } => Self::UnknownParameter { tool, param },
-            FfiToolParseFailureReason::DuplicateParameter { tool, param } => Self::DuplicateParameter { tool, param },
+            FfiToolParseFailureReason::UnknownParameter { tool, param } => {
+                Self::UnknownParameter { tool, param }
+            }
+            FfiToolParseFailureReason::DuplicateParameter { tool, param } => {
+                Self::DuplicateParameter { tool, param }
+            }
             FfiToolParseFailureReason::MissingRequiredParameter { tool, param } => {
                 Self::MissingRequiredParameter { tool, param }
             }
-            FfiToolParseFailureReason::SchemaCoercionFailed { tool, param, expected } => {
-                Self::SchemaCoercionFailed {
-                    tool,
-                    param,
-                    expected,
-                }
-            }
+            FfiToolParseFailureReason::SchemaCoercionFailed {
+                tool,
+                param,
+                expected,
+            } => Self::SchemaCoercionFailed {
+                tool,
+                param,
+                expected,
+            },
         }
     }
 }
@@ -664,6 +679,9 @@ pub struct FfiAgentConfig {
     pub history_snapshot_threshold_tokens: u32,
     pub file_outline_threshold_tokens: u32,
     pub prompt_cache_anchor_threshold_tokens: u32,
+    pub max_model_requests_per_turn: u32,
+    pub enable_loop_hooks: bool,
+    pub enable_pending_work_guard: bool,
 }
 
 impl Default for FfiAgentConfig {
@@ -693,6 +711,9 @@ impl Default for FfiAgentConfig {
             history_snapshot_threshold_tokens: c.history_snapshot_threshold_tokens,
             file_outline_threshold_tokens: c.file_outline_threshold_tokens,
             prompt_cache_anchor_threshold_tokens: c.prompt_cache_anchor_threshold_tokens,
+            max_model_requests_per_turn: c.max_model_requests_per_turn,
+            enable_loop_hooks: c.enable_loop_hooks,
+            enable_pending_work_guard: c.enable_pending_work_guard,
         }
     }
 }
@@ -723,7 +744,24 @@ impl From<FfiAgentConfig> for AgentConfig {
             history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
             file_outline_threshold_tokens: f.file_outline_threshold_tokens,
             prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
+            max_model_requests_per_turn: f.max_model_requests_per_turn,
             token_correction: std::collections::HashMap::new(),
+            preflight_token_threshold: None,
+            mid_turn_token_threshold: None,
+            post_tool_result_token_threshold: None,
+            turn_threshold: None,
+            message_threshold: None,
+            compact_on_turn_end: false,
+            retention_window_messages: 0,
+            eviction_window_ratio: 0.0,
+            enable_loop_hooks: f.enable_loop_hooks,
+            enable_doom_loop_guard: false,
+            enable_pending_work_guard: f.enable_pending_work_guard,
+            require_read_before_edit: false,
+            default_tool_timeout_ms: None,
+            tool_result_budget_relaxed_bytes: AgentConfig::default().tool_result_budget_relaxed_bytes,
+            tool_result_truncation_pressure_ratio: AgentConfig::default()
+                .tool_result_truncation_pressure_ratio,
         }
     }
 }
@@ -738,6 +776,7 @@ pub struct FfiSessionCapabilities {
     pub file_backed_context_supported: bool,
     pub prompt_cache_supported: bool,
     pub history_rewrite_supported: bool,
+    pub lifecycle_hooks_supported: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -788,6 +827,7 @@ impl Default for FfiSessionCapabilities {
             file_backed_context_supported: caps.file_backed_context_supported,
             prompt_cache_supported: caps.prompt_cache_supported,
             history_rewrite_supported: caps.history_rewrite_supported,
+            lifecycle_hooks_supported: caps.lifecycle_hooks_supported,
         }
     }
 }
@@ -803,6 +843,10 @@ impl From<FfiSessionCapabilities> for SessionCapabilities {
             file_backed_context_supported: f.file_backed_context_supported,
             prompt_cache_supported: f.prompt_cache_supported,
             history_rewrite_supported: f.history_rewrite_supported,
+            request_transform_pipeline_supported: false,
+            lifecycle_hooks_supported: f.lifecycle_hooks_supported,
+            delegation_tools_supported: false,
+            host_policy_callbacks_supported: false,
         }
     }
 }
@@ -886,6 +930,9 @@ impl From<CompactionEvent> for FfiCompactionEvent {
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiAgentEvent {
+    HookInvoked {
+        checkpoint: String,
+    },
     TurnStarted {
         turn_index: u32,
         allow_tool_call: bool,
@@ -921,11 +968,19 @@ pub enum FfiAgentEvent {
         summary_ref: Option<String>,
         history_ref: Option<String>,
     },
+    ToolPolicyDenied {
+        tool_name: String,
+    },
+    ToolTimedOut {
+        tool_name: String,
+        timeout_ms: u64,
+    },
 }
 
 impl From<AgentEvent> for FfiAgentEvent {
     fn from(ev: AgentEvent) -> Self {
         match ev {
+            AgentEvent::HookInvoked { checkpoint } => FfiAgentEvent::HookInvoked { checkpoint },
             AgentEvent::TurnStarted {
                 turn_index,
                 allow_tool_call,
@@ -977,6 +1032,16 @@ impl From<AgentEvent> for FfiAgentEvent {
                 summary_ref,
                 history_ref,
             },
+            AgentEvent::ToolPolicyDenied { tool_name } => {
+                FfiAgentEvent::ToolPolicyDenied { tool_name }
+            }
+            AgentEvent::ToolTimedOut {
+                tool_name,
+                timeout_ms,
+            } => FfiAgentEvent::ToolTimedOut {
+                tool_name,
+                timeout_ms,
+            },
         }
     }
 }
@@ -987,6 +1052,8 @@ pub enum AgentException {
     RepairFailed { name: String, reason: String },
     #[error("guardrail")]
     GuardrailExceeded { kind: String },
+    #[error("model stopped")]
+    ModelStopped { reason: String },
     #[error("compaction")]
     CompactionFailed { tier: String, reason: String },
     #[error("invalid transition")]
@@ -1007,6 +1074,7 @@ impl From<AgentError> for AgentException {
                 AgentException::RepairFailed { name, reason }
             }
             AgentError::GuardrailExceeded { kind } => AgentException::GuardrailExceeded { kind },
+            AgentError::ModelStopped { reason } => AgentException::ModelStopped { reason },
             AgentError::CompactionFailed { tier, reason } => {
                 AgentException::CompactionFailed { tier, reason }
             }
