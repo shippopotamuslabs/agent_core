@@ -1,4 +1,5 @@
 //! TOOL-PARSE-002 engine envelope scenarios E-01 … E-07, MD-02.
+//! centralized-leaked-tool-call-recovery engine scenarios CL-E-*, CL-MD-01.
 
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +10,7 @@ use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRec
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse};
 
-const MALFORMED_DSML: &str =
-    r#"<|DSML|tool_calls><|DSML|invoke name="web_search"></|DSML|invoke>"#;
+const MALFORMED_DSML: &str = r#"<|DSML|tool_calls><|DSML|invoke name="web_search"></|DSML|invoke>"#;
 
 const VALID_DSML_WEB_SEARCH: &str = concat!(
     "<|DSML|tool_calls><|DSML|invoke name=\"web_search\">",
@@ -20,7 +20,10 @@ const VALID_DSML_WEB_SEARCH: &str = concat!(
 
 struct PanicTransport;
 impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, agent_core::events::AgentError> {
+    fn complete_model_turn(
+        &self,
+        _: ModelRequest,
+    ) -> Result<ModelResponse, agent_core::events::AgentError> {
         panic!("transport unused")
     }
 }
@@ -66,7 +69,9 @@ fn user_msg() -> AgentMessage {
     }
 }
 
-fn new_session(eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>) -> agent_core::engine::SessionHandle {
+fn new_session(
+    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
         AgentConfig::default(),
@@ -124,7 +129,10 @@ fn e_01_malformed_dsml_retries_model() {
         matches!(next, AgentAction::CallModel(_)),
         "E-01 expected CallModel, got {next:?}"
     );
-    assert!(!matches!(next, AgentAction::Finished), "E-01 must not finish");
+    assert!(
+        !matches!(next, AgentAction::Finished),
+        "E-01 must not finish"
+    );
     let snapshot = h.integration_test_snapshot();
     assert_eq!(tool_role_messages(&snapshot).len(), 1, "E-01 tool messages");
 }
@@ -147,7 +155,10 @@ fn e_02_envelope_failure_json_shape() {
     assert!(tool_msg.content.contains("\"error\""), "E-02 error key");
     assert!(tool_msg.content.contains("Malformed"), "E-02 Malformed");
     assert!(tool_msg.content.contains("DSML"), "E-02 DSML");
-    assert!(tool_msg.content.contains("web_search"), "E-02 available_tools");
+    assert!(
+        tool_msg.content.contains("web_search"),
+        "E-02 available_tools"
+    );
 }
 
 #[test]
@@ -323,4 +334,218 @@ fn md_02_recovery_only_in_engine() {
         1,
         "MD-02 envelope streak"
     );
+}
+
+// ---------------------------------------------------------------------------
+// centralized-leaked-tool-call-recovery — CL-TR-05 (engine ingest), CL-E-*, CL-MD-01
+// ---------------------------------------------------------------------------
+
+const CL_TR_05_LEAKED_TOOL_CALL: &str = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
+
+#[test]
+fn cl_tr_05_engine_allow_false_skips_leaked_tool_execution() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    for _ in 0..3 {
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(&h, malformed_response());
+        let _ = eng.next_action(&h);
+    }
+    let _ = eng.next_action(&h);
+    let AgentAction::CallModel(pending) = eng.next_action(&h) else {
+        panic!("CL-TR-05 expected CallModel before submit");
+    };
+    assert!(
+        !pending.allow_tool_call,
+        "CL-TR-05 pending allow_tool_call must be false"
+    );
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(CL_TR_05_LEAKED_TOOL_CALL.into()),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+        },
+    );
+    let next = eng.next_action(&h);
+    assert!(
+        !matches!(next, AgentAction::ExecuteTools(_)),
+        "CL-TR-05 must not ExecuteTools when allow_tool_call false, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        CL_TR_05_LEAKED_TOOL_CALL,
+        "CL-TR-05 assistant content verbatim"
+    );
+}
+
+const APPEND_BLOCKS_LEAK: &str = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-1","blocks":[],"isComplete":false}}</tool_call>"#;
+
+#[test]
+fn cl_e_01_engine_executes_recovered_append_blocks() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(APPEND_BLOCKS_LEAK.into()),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+        },
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1, "CL-E-01 tool count");
+            assert_eq!(calls[0].name, "append_blocks", "CL-E-01 tool name");
+        }
+        other => panic!("CL-E-01 expected ExecuteTools, got {other:?}"),
+    }
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        "",
+        "CL-E-01 assistant content"
+    );
+}
+
+#[test]
+fn cl_e_02_native_only_when_native_and_leak_present() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(r#"x<|DSML|invoke name="append_blocks"></|DSML|invoke>"#.into()),
+            tool_calls: vec![agent_core::turn_io::RawToolCall {
+                id: Some("call_native_1".into()),
+                name: "web_search".into(),
+                arguments_json: r#"{"query":"kotlin"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+        },
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1, "CL-E-02 tool count");
+            assert_eq!(calls[0].name, "web_search", "CL-E-02 tool name");
+        }
+        other => panic!("CL-E-02 expected ExecuteTools, got {other:?}"),
+    }
+}
+
+#[test]
+fn cl_e_03_malformed_dsml_retries_model() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(&h, malformed_response());
+    let next = eng.next_action(&h);
+    assert!(
+        matches!(next, AgentAction::CallModel(_)),
+        "CL-E-03 expected CallModel, got {next:?}"
+    );
+    assert!(
+        !matches!(next, AgentAction::Finished),
+        "CL-E-03 must not finish"
+    );
+    let snapshot = h.integration_test_snapshot();
+    let tool_msgs = tool_role_messages(&snapshot);
+    let tool_msg = tool_msgs.first().expect("CL-E-03 tool message");
+    assert!(
+        tool_msg.content.contains("Malformed"),
+        "CL-E-03 Malformed in tool message"
+    );
+}
+
+#[test]
+fn cl_e_04_preamble_preserved_marker_stripped() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(
+                r#"Done.<tool_call>{"name":"web_search","arguments":{"query":"x"}}</tool_call>"#
+                    .into(),
+            ),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+        },
+    );
+    let _ = eng.next_action(&h);
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        "Done.",
+        "CL-E-04 assistant content"
+    );
+}
+
+#[test]
+fn cl_md_01_native_only_execution() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(
+                r#"prefix<|DSML|invoke name="append_blocks"></|DSML|invoke>"#.into(),
+            ),
+            tool_calls: vec![agent_core::turn_io::RawToolCall {
+                id: Some("call_native_1".into()),
+                name: "web_search".into(),
+                arguments_json: r#"{"query":"kotlin"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+        },
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1, "CL-MD-01 tool count");
+            assert_eq!(calls[0].name, "web_search", "CL-MD-01 tool name");
+            assert_eq!(calls[0].call_id, "call_native_1", "CL-MD-01 call_id");
+        }
+        other => panic!("CL-MD-01 expected ExecuteTools, got {other:?}"),
+    }
 }

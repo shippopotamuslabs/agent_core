@@ -1,0 +1,139 @@
+//! centralized-leaked-tool-call-recovery — turn resolver scenarios CL-TR-*.
+
+use agent_core::engine::resolve_model_turn_text;
+use agent_core::turn_io::RawToolCall;
+
+const APPEND_BLOCKS_TOOL_CALL: &str = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-99","blocks":[],"isComplete":false}}</tool_call>"#;
+
+const SPACED_DSML_WEB_SEARCH: &str = r#"< | DSML | tool_calls>< | DSML | invoke name="web_search">
+< | DSML | parameter name="query" string="true">kotlin</ | DSML | parameter>
+</ | DSML | invoke></ | DSML | tool_calls>"#;
+
+#[test]
+fn cl_tr_01_recover_append_blocks_without_native_tools() {
+    let resolution = resolve_model_turn_text(APPEND_BLOCKS_TOOL_CALL, &[], true);
+    assert_eq!(
+        resolution.recovered_tool_calls.len(),
+        1,
+        "CL-TR-01 recovered count"
+    );
+    assert_eq!(
+        resolution.recovered_tool_calls[0].name, "append_blocks",
+        "CL-TR-01 tool name"
+    );
+    assert!(
+        resolution.recovered_tool_calls[0]
+            .arguments_json
+            .contains(r#""artifactId":"art-99""#),
+        "CL-TR-01 args {}",
+        resolution.recovered_tool_calls[0].arguments_json
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, "",
+        "CL-TR-01 visible text"
+    );
+}
+
+#[test]
+fn cl_tr_02_native_preferred_over_leaked_dsml() {
+    let buffered = format!(
+        "preamble.<|DSML|tool_calls><|DSML|invoke name=\"append_blocks\"></|DSML|invoke></|DSML|tool_calls>"
+    );
+    let native = vec![RawToolCall {
+        id: Some("call_native".into()),
+        name: "web_search".into(),
+        arguments_json: r#"{"query":"kotlin"}"#.into(),
+    }];
+    let resolution = resolve_model_turn_text(&buffered, &native, true);
+    assert!(
+        resolution.recovered_tool_calls.is_empty(),
+        "CL-TR-02 recovered must be empty"
+    );
+    assert_eq!(
+        resolution.native_tool_calls.len(),
+        1,
+        "CL-TR-02 native count"
+    );
+    assert_eq!(
+        resolution.native_tool_calls[0].name, "web_search",
+        "CL-TR-02 native name"
+    );
+}
+
+#[test]
+fn cl_tr_03_spaced_dsml_recovers_web_search() {
+    let resolution = resolve_model_turn_text(SPACED_DSML_WEB_SEARCH, &[], true);
+    assert_eq!(
+        resolution.recovered_tool_calls.len(),
+        1,
+        "CL-TR-03 recovered count"
+    );
+    assert_eq!(
+        resolution.recovered_tool_calls[0].name, "web_search",
+        "CL-TR-03 tool name"
+    );
+    assert!(
+        resolution.recovered_tool_calls[0]
+            .arguments_json
+            .contains(r#""query":"kotlin""#),
+        "CL-TR-03 args {}",
+        resolution.recovered_tool_calls[0].arguments_json
+    );
+}
+
+#[test]
+fn cl_tr_04_prose_json_flushes_verbatim() {
+    let buffered = r#"Configure {"name":"value","enabled":true} carefully."#;
+    let resolution = resolve_model_turn_text(buffered, &[], true);
+    assert!(
+        resolution.recovered_tool_calls.is_empty(),
+        "CL-TR-04 recovered must be empty"
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, buffered,
+        "CL-TR-04 visible text"
+    );
+}
+
+#[test]
+fn cl_tr_05_allow_false_bypass() {
+    let buffered = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
+    let resolution = resolve_model_turn_text(buffered, &[], false);
+    assert_eq!(
+        resolution.visible_assistant_text, buffered,
+        "CL-TR-05 visible text"
+    );
+    assert!(
+        resolution.recovered_tool_calls.is_empty(),
+        "CL-TR-05 recovered must be empty"
+    );
+}
+
+#[test]
+fn cl_tr_06_normalize_spaced_dsml() {
+    use agent_core::tool_stream_gate::normalize_spaced_dsml;
+    let input = "< | DSML | tool_calls>";
+    let normalized = normalize_spaced_dsml(input);
+    assert_eq!(normalized, "<|DSML|tool_calls>", "CL-TR-06 normalized");
+}
+
+#[test]
+fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
+    use agent_core::tool_stream_gate::first_strong_tool_marker_start;
+    use std::fs;
+
+    let markers_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/tool_stream_gate/markers.rs"
+    );
+    let content = fs::read_to_string(markers_path).expect("CL-MD-03 read markers.rs");
+    assert!(
+        !content.contains(r#"\{\s*["']name["']\s*:"#),
+        "CL-MD-03 weak JSON regex must not be in stream gate markers"
+    );
+    assert_eq!(
+        first_strong_tool_marker_start(r#"Tips: {"name":"x"}"#),
+        None,
+        "CL-MD-03 weak JSON prose must not match strong marker"
+    );
+}

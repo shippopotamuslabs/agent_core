@@ -72,13 +72,7 @@ fn s22_high_context_raises_thresholds() {
     let cfg = AgentConfig::default();
     let policy = resolve_context_policy(&cfg, &caps, "anthropic", 200_000);
     // High context relaxes preflight threshold to ~0.90 per spec S22.
-    let plan = build_compaction_plan(
-        &cfg,
-        &caps,
-        &policy,
-        CompactionTrigger::Preflight,
-        200_000,
-    );
+    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 200_000);
     assert!(
         (plan.threshold_ratio - 0.90).abs() < f32::EPSILON,
         "expected preflight threshold ratio 0.90 for high context, got {}",
@@ -133,13 +127,7 @@ fn e8_fixed_kv_rejects_history_rewrite_plan() {
     };
     let cfg = AgentConfig::default();
     let policy = resolve_context_policy(&cfg, &caps, "local", 4096);
-    let plan = build_compaction_plan(
-        &cfg,
-        &caps,
-        &policy,
-        CompactionTrigger::Preflight,
-        4096,
-    );
+    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096);
     assert!(
         !plan.ordered_tiers.contains(&CompactionTier::Summary),
         "fixed_kv must not include Summary tier"

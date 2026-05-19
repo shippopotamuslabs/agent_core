@@ -759,7 +759,8 @@ impl From<FfiAgentConfig> for AgentConfig {
             enable_pending_work_guard: f.enable_pending_work_guard,
             require_read_before_edit: false,
             default_tool_timeout_ms: None,
-            tool_result_budget_relaxed_bytes: AgentConfig::default().tool_result_budget_relaxed_bytes,
+            tool_result_budget_relaxed_bytes: AgentConfig::default()
+                .tool_result_budget_relaxed_bytes,
             tool_result_truncation_pressure_ratio: AgentConfig::default()
                 .tool_result_truncation_pressure_ratio,
         }

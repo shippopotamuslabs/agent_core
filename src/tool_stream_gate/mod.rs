@@ -4,7 +4,8 @@ mod markers;
 mod result;
 
 pub use markers::{
-    first_tool_marker_start, might_be_tool_marker_prefix, safe_emit_end, TOOL_MARKER_HOLDBACK_CHARS,
+    first_strong_tool_marker_start, first_tool_marker_start, might_be_tool_marker_prefix,
+    normalize_spaced_dsml, safe_emit_end, TOOL_MARKER_HOLDBACK_CHARS,
 };
 pub use result::{PushResult, StreamGateFinish};
 
@@ -58,37 +59,37 @@ impl ToolStreamGate {
             };
         }
 
-        let marker_start = first_tool_marker_start(&self.buffer);
-        if has_native_tool_calls {
-            let trailing_flush = if marker_start.is_none() {
-                self.buffer[self.emitted_length..].to_string()
-            } else {
-                String::new()
-            };
-            if marker_start.is_none() {
-                self.emitted_length = self.buffer.len();
-            }
-            return StreamGateFinish {
-                trailing_flush,
-                has_tool_marker: marker_start.is_some(),
-            };
-        }
-
-        let trailing_flush = if marker_start.is_some() {
+        let marker_start = first_strong_tool_marker_start(&self.buffer);
+        let has_tool_marker = marker_start.is_some();
+        let trailing_flush = if has_native_tool_calls {
+            self.flush_emitted_prefix(marker_start)
+        } else if has_tool_marker {
             String::new()
         } else {
-            self.buffer[self.emitted_length..].to_string()
+            self.flush_emitted_prefix(None)
         };
-        if marker_start.is_none() {
-            self.emitted_length = self.buffer.len();
-        }
         StreamGateFinish {
             trailing_flush,
-            has_tool_marker: marker_start.is_some(),
+            has_tool_marker,
         }
+    }
+
+    /// Emits `buffer[emitted_length..end)` and advances `emitted_length` to `end`.
+    fn flush_emitted_prefix(&mut self, end_exclusive: Option<usize>) -> String {
+        let end = end_exclusive
+            .unwrap_or(self.buffer.len())
+            .min(self.buffer.len());
+        let flush = if end > self.emitted_length {
+            self.buffer[self.emitted_length..end].to_string()
+        } else {
+            String::new()
+        };
+        self.emitted_length = end;
+        flush
     }
 
     pub fn buffered_text(&self) -> &str {
         &self.buffer
     }
 }
+
