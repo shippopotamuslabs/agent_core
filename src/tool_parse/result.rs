@@ -57,10 +57,27 @@ impl ToolParseBatch {
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ToolParseFailureReason {
     MalformedEnvelope,
-    InvalidJson { detail: String },
-    UnknownTool { name: String },
-    UnknownParameter { tool: String, param: String },
-    DuplicateParameter { tool: String, param: String },
-    MissingRequiredParameter { tool: String, param: String },
-    SchemaCoercionFailed { tool: String, param: String, expected: String },
+    InvalidJson {
+        detail: String,
+    },
+    UnknownTool {
+        name: String,
+    },
+    UnknownParameter {
+        tool: String,
+        param: String,
+    },
+    DuplicateParameter {
+        tool: String,
+        param: String,
+    },
+    MissingRequiredParameter {
+        tool: String,
+        param: String,
+    },
+    SchemaCoercionFailed {
+        tool: String,
+        param: String,
+        expected: String,
+    },
 }

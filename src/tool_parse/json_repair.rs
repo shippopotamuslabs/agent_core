@@ -94,7 +94,11 @@ fn parse_newline_delimited_json(input: &str) -> Option<Value> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    if lines.len() < 2 || !lines.iter().all(|line| line.starts_with('{') || line.starts_with('[')) {
+    if lines.len() < 2
+        || !lines
+            .iter()
+            .all(|line| line.starts_with('{') || line.starts_with('['))
+    {
         return None;
     }
 
@@ -131,14 +135,9 @@ impl<'a> Parser<'a> {
         match char {
             '{' => self.parse_object(),
             '[' => self.parse_array(),
-            '"'
-            | '\''
-            | '`'
-            | '\u{2018}'
-            | '\u{2019}'
-            | '\u{201C}'
-            | '\u{201D}'
-            | '\u{00B4}' => self.parse_string_with_concat().map(Value::String),
+            '"' | '\'' | '`' | '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}' | '\u{00B4}' => {
+                self.parse_string_with_concat().map(Value::String)
+            }
             '/' if self.peek_next() != Some('/') && self.peek_next() != Some('*') => {
                 Ok(Value::String(self.parse_bare_token()))
             }
@@ -405,7 +404,8 @@ impl<'a> Parser<'a> {
                 repair_json(inner).unwrap_or_else(|_| Value::String(trimmed.to_string()))
             }
             _ if is_invalid_leading_zero_number(trimmed) => Value::String(trimmed.to_string()),
-            _ => serde_json::from_str::<Value>(trimmed).unwrap_or_else(|_| Value::String(trimmed.to_string())),
+            _ => serde_json::from_str::<Value>(trimmed)
+                .unwrap_or_else(|_| Value::String(trimmed.to_string())),
         }
     }
 
@@ -456,7 +456,13 @@ impl<'a> Parser<'a> {
         }
         !matches!(
             self.chars.get(lookahead),
-            None | Some(',') | Some('}') | Some(']') | Some(':') | Some('+') | Some('"') | Some('\'')
+            None | Some(',')
+                | Some('}')
+                | Some(']')
+                | Some(':')
+                | Some('+')
+                | Some('"')
+                | Some('\'')
         )
     }
 

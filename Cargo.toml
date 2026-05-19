@@ -69,6 +69,18 @@ path = "tests/context_management_end_to_end_test.rs"
 name = "tool_parse_integration"
 path = "tests/tool_parse_integration.rs"
 
+[[test]]
+name = "finish_boundary_test"
+path = "tests/finish_boundary_test.rs"
+
+[[test]]
+name = "tool_stream_gate_test"
+path = "tests/tool_stream_gate_test.rs"
+
+[[test]]
+name = "engine_envelope_retry_test"
+path = "tests/engine_envelope_retry_test.rs"
+
 [[example]]
 name = "mock_desktop_loop"
 path = "examples/mock_desktop_loop.rs"

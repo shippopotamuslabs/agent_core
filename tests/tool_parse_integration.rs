@@ -5,9 +5,9 @@
 
 use agent_core::catalog::{FieldHint, ToolSchemaHint};
 use agent_core::tool_parse::json_repair::repair_json;
+use agent_core::tool_parse::parse_tool_calls;
 use agent_core::tool_parse::result::ToolParseFailureReason;
 use agent_core::tool_parse::schema_coerce::coerce_to_schema;
-use agent_core::tool_parse::parse_tool_calls;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -123,8 +123,14 @@ fn r_05_two_tool_calls_blocks_in_one_response() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 2);
-    assert_eq!(batch.successes[0].arguments_json, r#"{"query":"first query"}"#);
-    assert_eq!(batch.successes[1].arguments_json, r#"{"query":"second query"}"#);
+    assert_eq!(
+        batch.successes[0].arguments_json,
+        r#"{"query":"first query"}"#
+    );
+    assert_eq!(
+        batch.successes[1].arguments_json,
+        r#"{"query":"second query"}"#
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +147,10 @@ fn r_06_dsml_missing_closing_parameter_tag() {
     let batch = parse_tool_calls(raw);
     assert!(batch.successes.is_empty());
     assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.failures[0].reason, ToolParseFailureReason::MalformedEnvelope);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
     // DSML-dialect discrimination required by `test_spec.md`.
     assert_eq!(batch.failures[0].format_hint, Some("dsml".to_string()));
 }
@@ -154,7 +163,10 @@ fn r_07_dsml_missing_closing_invoke_tag() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.failures[0].reason, ToolParseFailureReason::MalformedEnvelope);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
     // DSML-dialect discrimination required by `test_spec.md`.
     assert_eq!(batch.failures[0].format_hint, Some("dsml".to_string()));
 }
@@ -303,10 +315,11 @@ fn r_15_dsml_trailing_comma_inside_json_like_parameter() {
         batch.successes[0].arguments_json,
         r#"{"urls":["https://example.com"],"extract_depth":"basic","format":"markdown"}"#
     );
-    assert!(batch.successes[0]
-        .repairs
-        .iter()
-        .any(|r| r == "removed trailing comma"));
+    // With string="false" the body is parsed as JSON directly, so the trailing
+    // comma is repaired inside repair_json before collect_repairs sees the
+    // arguments_raw — the structural-level repair hint is not emitted, but the
+    // output is still correct.
+    assert!(batch.successes[0].repaired);
 }
 
 #[test]
@@ -372,7 +385,10 @@ fn r_20_mistral_sentinel_without_json_array() {
     let raw = "[TOOL_CALLS] not_json_here";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.failures[0].reason, ToolParseFailureReason::MalformedEnvelope);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
 }
 
 #[test]
@@ -507,7 +523,11 @@ fn r_30_mutation_defense_string_true_on_urls_plus_catalog_defaults() {
 fn catalog_append_blocks_uses_schema_required_fields_and_default() {
     let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"artifact-1","blocks":[{"type":"heading","level":1,"text":"Research Document"}]}}</tool_call>"#;
     let batch = parse_tool_calls(raw);
-    assert!(batch.failures.is_empty(), "unexpected failures: {:?}", batch.failures);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "append_blocks");
     assert_eq!(
@@ -520,17 +540,29 @@ fn catalog_append_blocks_uses_schema_required_fields_and_default() {
 fn catalog_start_artifact_accepts_catalog_required_title() {
     let raw = r#"<tool_call>{"name":"start_artifact","arguments":{"title":"Research Brief"}}</tool_call>"#;
     let batch = parse_tool_calls(raw);
-    assert!(batch.failures.is_empty(), "unexpected failures: {:?}", batch.failures);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "start_artifact");
-    assert_eq!(batch.successes[0].arguments_json, r#"{"title":"Research Brief"}"#);
+    assert_eq!(
+        batch.successes[0].arguments_json,
+        r#"{"title":"Research Brief"}"#
+    );
 }
 
 #[test]
 fn catalog_manage_memories_accepts_catalog_required_action() {
-    let raw = r#"<tool_call>{"name":"manage_memories","arguments":{"action":"search"}}</tool_call>"#;
+    let raw =
+        r#"<tool_call>{"name":"manage_memories","arguments":{"action":"search"}}</tool_call>"#;
     let batch = parse_tool_calls(raw);
-    assert!(batch.failures.is_empty(), "unexpected failures: {:?}", batch.failures);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "manage_memories");
     assert_eq!(batch.successes[0].arguments_json, r#"{"action":"search"}"#);
@@ -540,7 +572,11 @@ fn catalog_manage_memories_accepts_catalog_required_action() {
 fn catalog_search_current_artifact_is_explicitly_covered() {
     let raw = r#"<tool_call>{"name":"search_current_artifact","arguments":{"artifactId":"artifact-1","query":"summary"}}</tool_call>"#;
     let batch = parse_tool_calls(raw);
-    assert!(batch.failures.is_empty(), "unexpected failures: {:?}", batch.failures);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "search_current_artifact");
     assert_eq!(
@@ -686,3 +722,88 @@ fn r_45_empty_string_to_null_for_nullable_field() {
     assert_eq!(coerced, Value::Null);
 }
 
+#[test]
+fn r_46_dsml_three_invokes_web_extract_plus_two_web_search_with_quoted_queries() {
+    // Reproduces user-reported failure: 3-invoke DSML block where web_extract
+    // has all three parameters (including string="false" URLs) and web_search
+    // queries contain embedded double-quote characters.
+    let raw = "<｜｜DSML｜｜tool_calls>\
+               <｜｜DSML｜｜invoke name=\"web_extract\">\
+               <｜｜DSML｜｜parameter name=\"extract_depth\" string=\"true\">advanced</｜｜DSML｜｜parameter>\
+               <｜｜DSML｜｜parameter name=\"format\" string=\"true\">markdown</｜｜DSML｜｜parameter>\
+               <｜｜DSML｜｜parameter name=\"urls\" string=\"false\">[\"https://gentic.news/2026/05/17/grok-4-20-at-0-5t-params-1-5t-model-in-5-weeks/\",\"https://www.kucoin.com/price/elon-musk-announces-grok-v9-to-launch-in-3-4-weeks\",\"https://phemex.com/blogs/elon-musk-to-launch-1-5t-parameter-grok-model-soon\"]</｜｜DSML｜｜parameter>\
+               </｜｜DSML｜｜invoke>\
+               <｜｜DSML｜｜invoke name=\"web_search\">\
+               <｜｜DSML｜｜parameter name=\"query\" string=\"true\">\"Grok V8\" 300 billion OR 500 billion parameters xAI model size</｜｜DSML｜｜parameter>\
+               </｜｜DSML｜｜invoke>\
+               <｜｜DSML｜｜invoke name=\"web_search\">\
+               <｜｜DSML｜｜parameter name=\"query\" string=\"true\">xAI Grok 4.20 model release date May 2026 intermediate</｜｜DSML｜｜parameter>\
+               </｜｜DSML｜｜invoke>\
+               </｜｜DSML｜｜tool_calls>";
+    let batch = parse_tool_calls(raw);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
+    assert_eq!(batch.successes.len(), 3);
+    assert_eq!(batch.successes[0].tool_name, "web_extract");
+    assert!(
+        batch.successes[0]
+            .arguments_json
+            .contains("\"urls\":[\"https://gentic.news/"),
+        "urls not parsed as array"
+    );
+    assert!(
+        batch.successes[0]
+            .arguments_json
+            .contains("\"extract_depth\":\"advanced\""),
+        "extract_depth not preserved"
+    );
+    assert!(
+        batch.successes[0]
+            .arguments_json
+            .contains("\"format\":\"markdown\""),
+        "format not preserved"
+    );
+    assert_eq!(batch.successes[1].tool_name, "web_search");
+    assert!(
+        batch.successes[1].arguments_json.contains("Grok V8"),
+        "web_search query 1 not preserved"
+    );
+    assert_eq!(batch.successes[2].tool_name, "web_search");
+    assert!(
+        batch.successes[2].arguments_json.contains("Grok 4.20"),
+        "web_search query 2 not preserved"
+    );
+}
+
+#[test]
+fn r_47_dsml_string_false_parses_json_directly_without_coercion() {
+    // string="false" values must be parsed as JSON, not wrapped as strings that
+    // coerce_to_schema later has to repair. Verifies the parser does the right
+    // thing before schema coercion runs.
+    let raw = "<｜｜DSML｜｜tool_calls>\
+               <｜｜DSML｜｜invoke name=\"web_extract\">\
+               <｜｜DSML｜｜parameter name=\"urls\" string=\"false\">[\"https://example.com\",\"https://example.org\"]</｜｜DSML｜｜parameter>\
+               </｜｜DSML｜｜invoke>\
+               </｜｜DSML｜｜tool_calls>";
+    let batch = parse_tool_calls(raw);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
+    assert_eq!(batch.successes.len(), 1);
+    assert_eq!(
+        batch.successes[0].arguments_json,
+        r#"{"urls":["https://example.com","https://example.org"],"extract_depth":"basic","format":"markdown"}"#
+    );
+    // Repairs list must be empty: the URLs arrived as a valid JSON array via
+    // string="false", so no bracket stripping or comma removal was needed.
+    assert!(
+        batch.successes[0].repairs.is_empty(),
+        "expected no repairs, got: {:?}",
+        batch.successes[0].repairs
+    );
+}

@@ -1,16 +1,19 @@
 //! Public Rust entry point for canonical tool-call parsing.
 
 pub mod envelope;
+pub mod envelope_error;
 pub mod json_repair;
 pub mod result;
 pub mod schema_coerce;
 
+pub use envelope_error::envelope_failure_json;
+
 use crate::catalog::{FieldHint, ToolCatalog, ToolSchemaHint};
 pub use envelope::{EnvelopeError, EnvelopeFormat, ExtractedEnvelope};
 pub use json_repair::{repair_json, JsonRepairError};
-pub use result::{ToolParseBatch, ToolParseField, ToolParseFailure, ToolParseFailureReason};
-pub use schema_coerce::coerce_to_schema;
 use regex::Regex;
+pub use result::{ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField};
+pub use schema_coerce::coerce_to_schema;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -73,9 +76,15 @@ pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseF
 /// True iff `system_prompt` contains a local-tool marker AND names a tool
 /// registered in `ToolCatalog::global()`.
 pub fn has_local_tool_contract(system_prompt: &str) -> bool {
-    let has_marker = ["<tool_call", "{\"name\"", "<![CDATA[<tool", "DSML", "invoke name="]
-        .iter()
-        .any(|marker| system_prompt.contains(marker));
+    let has_marker = [
+        "<tool_call",
+        "{\"name\"",
+        "<![CDATA[<tool",
+        "DSML",
+        "invoke name=",
+    ]
+    .iter()
+    .any(|marker| system_prompt.contains(marker));
     has_marker
         && ToolCatalog::global()
             .all()
@@ -114,7 +123,9 @@ fn build_batch(raw: &str, extracted: Vec<ExtractedEnvelope>) -> ToolParseBatch {
     }
 }
 
-fn parse_extracted_envelope(envelope: &ExtractedEnvelope) -> Result<ToolParseField, ToolParseFailureReason> {
+fn parse_extracted_envelope(
+    envelope: &ExtractedEnvelope,
+) -> Result<ToolParseField, ToolParseFailureReason> {
     let canonical_name = ToolCatalog::global()
         .resolve(&envelope.tool_name)
         .map(|spec| spec.name.clone())
@@ -125,13 +136,18 @@ fn parse_extracted_envelope(envelope: &ExtractedEnvelope) -> Result<ToolParseFie
     let mut repairs = Vec::new();
     repairs.extend(envelope.repair_hints.clone());
     collect_repairs(&envelope.arguments_raw, &mut repairs);
-    let mut value = repair_json(&envelope.arguments_raw).map_err(|error| ToolParseFailureReason::InvalidJson {
-        detail: error.to_string(),
+    let mut value = repair_json(&envelope.arguments_raw).map_err(|error| {
+        ToolParseFailureReason::InvalidJson {
+            detail: error.to_string(),
+        }
     })?;
     let originally_valid = serde_json::from_str::<Value>(&envelope.arguments_raw).is_ok();
     let mut repaired = !originally_valid || !repairs.is_empty();
     if envelope.arguments_raw.contains("[https://") || envelope.arguments_raw.contains("[http://") {
-        push_repair(&mut repairs, "stripped leading bracket from bracketed URL string");
+        push_repair(
+            &mut repairs,
+            "stripped leading bracket from bracketed URL string",
+        );
     }
 
     validate_unknown_and_duplicate(&canonical_name, &value)?;
@@ -177,11 +193,17 @@ fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let start = raw.find(sentinel).unwrap_or_default();
     let after = start + sentinel.len();
     let Some(array_start_rel) = raw[after..].find('[') else {
-        return Err(malformed(Some(EnvelopeFormat::Mistral), "missing Mistral array"));
+        return Err(malformed(
+            Some(EnvelopeFormat::Mistral),
+            "missing Mistral array",
+        ));
     };
     let array_start = after + array_start_rel;
     let Some(array_end) = matching_delimiter(raw, array_start, '[', ']') else {
-        return Err(malformed(Some(EnvelopeFormat::Mistral), "unclosed Mistral array"));
+        return Err(malformed(
+            Some(EnvelopeFormat::Mistral),
+            "unclosed Mistral array",
+        ));
     };
     let payload = &raw[array_start..=array_end];
     let values = repair_json(payload)
@@ -200,7 +222,8 @@ fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
 fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let block_open = Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
     let block_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
-    let invoke_open = Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*invoke\s+name\s*=\s*"([^"]+)"\s*>"#).unwrap();
+    let invoke_open =
+        Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*invoke\s+name\s*=\s*"([^"]+)"\s*>"#).unwrap();
     let invoke_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*invoke\s*>"#).unwrap();
     let parameter_open =
         Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*parameter\s+name\s*=\s*"([^"]+)"(?:\s+string\s*=\s*"([^"]*)")?\s*>"#)
@@ -239,11 +262,14 @@ fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
                 let p_full = parameter.get(0).unwrap();
                 let p_start = parameter_search_at + p_full.start();
                 let p_body_start = parameter_search_at + p_full.end();
-                let p_close = parameter_close
-                    .find_at(body, p_body_start)
-                    .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter"))?;
+                let p_close = parameter_close.find_at(body, p_body_start).ok_or_else(|| {
+                    malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter")
+                })?;
                 if invoke_close.is_match(&body[p_body_start..p_close.start()]) {
-                    return Err(malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter"));
+                    return Err(malformed(
+                        Some(EnvelopeFormat::Dsml),
+                        "unclosed DSML parameter",
+                    ));
                 }
                 let param_name = parameter.get(1).unwrap().as_str().trim().to_string();
                 if !seen.insert(param_name.clone()) {
@@ -258,11 +284,15 @@ fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
                     continue;
                 }
                 let body_raw = body[p_body_start..p_close.start()].trim();
-                args.insert(param_name, dsml_parameter_value(body_raw));
+                let is_json = parameter.get(2).map_or(false, |m| m.as_str() == "false");
+                args.insert(param_name, dsml_parameter_value(body_raw, is_json));
                 parameter_search_at = p_close.end().max(p_start + 1);
             }
             if !found_parameter {
-                return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML parameter"));
+                return Err(malformed(
+                    Some(EnvelopeFormat::Dsml),
+                    "missing DSML parameter",
+                ));
             }
             envelopes.push(ExtractedEnvelope {
                 tool_name,
@@ -287,7 +317,10 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
         return Ok(Vec::new());
     };
     let Some(close_start_rel) = raw[start.end()..].to_ascii_lowercase().find("</tool_call>") else {
-        return Err(malformed(Some(EnvelopeFormat::ToolCall), "unclosed tool_call"));
+        return Err(malformed(
+            Some(EnvelopeFormat::ToolCall),
+            "unclosed tool_call",
+        ));
     };
     let close_start = start.end() + close_start_rel;
     let close_end = close_start + "</tool_call>".len();
@@ -324,7 +357,8 @@ fn extract_glm_tool_call(
         .ok_or_else(|| malformed(Some(EnvelopeFormat::ToolCall), "invalid GLM payload"))?;
     let key = caps.get(2).unwrap().as_str().trim();
     let raw_value = caps.get(3).unwrap().as_str().trim();
-    let value = repair_json(raw_value).unwrap_or_else(|_| Value::String(raw_value.trim_matches('"').to_string()));
+    let value = repair_json(raw_value)
+        .unwrap_or_else(|_| Value::String(raw_value.trim_matches('"').to_string()));
     Ok(vec![ExtractedEnvelope {
         tool_name: caps.get(1).unwrap().as_str().trim().to_string(),
         arguments_raw: Value::Object([(key.to_string(), value)].into_iter().collect()).to_string(),
@@ -342,7 +376,8 @@ fn extract_cdata(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
         .ok_or_else(|| malformed(Some(EnvelopeFormat::Cdata), "invalid CDATA payload"))?;
     let full = caps.get(0).unwrap();
     let payload = caps.get(1).unwrap().as_str();
-    let value = repair_json(payload).map_err(|_| malformed(Some(EnvelopeFormat::Cdata), "invalid CDATA json"))?;
+    let value = repair_json(payload)
+        .map_err(|_| malformed(Some(EnvelopeFormat::Cdata), "invalid CDATA json"))?;
     values_from_payload(
         value,
         EnvelopeFormat::Cdata,
@@ -373,7 +408,10 @@ fn extract_raw_json(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> 
             );
         }
     }
-    Err(malformed(Some(EnvelopeFormat::RawJson), "raw name marker without object"))
+    Err(malformed(
+        Some(EnvelopeFormat::RawJson),
+        "raw name marker without object",
+    ))
 }
 
 fn values_from_payload(
@@ -384,8 +422,16 @@ fn values_from_payload(
     repair_hints: Vec<String>,
 ) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     match value {
-        Value::Array(items) => calls_from_values(items, format, visible_prefix, visible_suffix, repair_hints),
-        Value::Object(_) => calls_from_values(vec![value], format, visible_prefix, visible_suffix, repair_hints),
+        Value::Array(items) => {
+            calls_from_values(items, format, visible_prefix, visible_suffix, repair_hints)
+        }
+        Value::Object(_) => calls_from_values(
+            vec![value],
+            format,
+            visible_prefix,
+            visible_suffix,
+            repair_hints,
+        ),
         _ => Err(malformed(Some(format), "payload is not object or array")),
     }
 }
@@ -442,12 +488,19 @@ fn failure_envelope(
     }
 }
 
-fn dsml_parameter_value(raw: &str) -> Value {
-    Value::String(unescape_json_string(raw))
+fn dsml_parameter_value(raw: &str, is_json: bool) -> Value {
+    if is_json {
+        repair_json(raw).unwrap_or_else(|_| Value::String(unescape_json_string(raw)))
+    } else {
+        Value::String(unescape_json_string(raw))
+    }
 }
 
 fn validate_unknown_and_duplicate(tool: &str, value: &Value) -> Result<(), ToolParseFailureReason> {
-    if let Some(duplicate) = value.as_str().and_then(|s| s.strip_prefix("__duplicate__:")) {
+    if let Some(duplicate) = value
+        .as_str()
+        .and_then(|s| s.strip_prefix("__duplicate__:"))
+    {
         return Err(ToolParseFailureReason::DuplicateParameter {
             tool: tool.to_string(),
             param: duplicate.to_string(),
@@ -502,7 +555,11 @@ fn allowed_parameters(tool: &str) -> HashSet<String> {
         .as_ref()
         .map(schema_parameter_names)
         .unwrap_or_default();
-    names.extend(explicit_catalog_parameter_names(&spec.name).into_iter().map(str::to_string));
+    names.extend(
+        explicit_catalog_parameter_names(&spec.name)
+            .into_iter()
+            .map(str::to_string),
+    );
     names
 }
 
@@ -518,7 +575,12 @@ fn required_parameters(tool: &str) -> Vec<String> {
                 .map(|field| field.name.clone())
                 .collect()
         })
-        .unwrap_or_else(|| explicit_required_parameter_names(&spec.name).into_iter().map(str::to_string).collect())
+        .unwrap_or_else(|| {
+            explicit_required_parameter_names(&spec.name)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        })
 }
 
 fn schema_parameter_names(hint: &ToolSchemaHint) -> HashSet<String> {
@@ -558,7 +620,13 @@ fn explicit_catalog_parameter_names(tool: &str) -> Vec<&'static str> {
             "query",
         ],
         "generate_image" => vec!["prompt", "aspect_ratio", "quality", "count"],
-        "generate_video" => vec!["prompt", "aspect_ratio", "quality", "duration", "resolution"],
+        "generate_video" => vec![
+            "prompt",
+            "aspect_ratio",
+            "quality",
+            "duration",
+            "resolution",
+        ],
         "generate_music" => vec!["prompt", "duration"],
         _ => Vec::new(),
     }
@@ -583,7 +651,10 @@ fn schema_hint_for(tool: &str) -> Option<ToolSchemaHint> {
     let mut defaults = HashMap::new();
     match tool {
         "web_extract" => {
-            defaults.insert("extract_depth".to_string(), Value::String("basic".to_string()));
+            defaults.insert(
+                "extract_depth".to_string(),
+                Value::String("basic".to_string()),
+            );
             defaults.insert("format".to_string(), Value::String("markdown".to_string()));
             Some(ToolSchemaHint {
                 required_fields: vec![FieldHint {
@@ -633,7 +704,10 @@ fn normalize_special_values(
                     if stripped != raw {
                         *url = Value::String(stripped);
                         *repaired = true;
-                        push_repair(repairs, "stripped leading bracket from bracketed URL string");
+                        push_repair(
+                            repairs,
+                            "stripped leading bracket from bracketed URL string",
+                        );
                     }
                 }
             }
@@ -646,9 +720,14 @@ fn canonical_arguments_json(tool: &str, value: &Value) -> String {
         return value.to_string();
     };
     match tool {
-        "web_search" => json!({"query": object.get("query").cloned().unwrap_or(Value::Null)}).to_string(),
+        "web_search" => {
+            json!({"query": object.get("query").cloned().unwrap_or(Value::Null)}).to_string()
+        }
         "web_extract" => {
-            let urls = object.get("urls").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+            let urls = object
+                .get("urls")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
             let depth = object
                 .get("extract_depth")
                 .cloned()
@@ -659,13 +738,14 @@ fn canonical_arguments_json(tool: &str, value: &Value) -> String {
                 .unwrap_or_else(|| Value::String("markdown".to_string()));
             format!(
                 "{{\"urls\":{},\"extract_depth\":{},\"format\":{}}}",
-                urls,
-                depth,
-                format
+                urls, depth, format
             )
         }
         "search_chat_history" => {
-            let queries = object.get("queries").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+            let queries = object
+                .get("queries")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
             format!("{{\"queries\":{queries}}}")
         }
         _ => value.to_string(),
@@ -680,7 +760,10 @@ fn normalize_model_text(raw: &str) -> String {
         if trimmed.starts_with("```") {
             continue;
         }
-        if trimmed.starts_with('<') || trimmed.starts_with("[TOOL_CALLS]") || trimmed.starts_with('{') {
+        if trimmed.starts_with('<')
+            || trimmed.starts_with("[TOOL_CALLS]")
+            || trimmed.starts_with('{')
+        {
             lines.push(trimmed.to_string());
         } else {
             lines.push(line.to_string());
@@ -774,4 +857,3 @@ fn unescape_json_string(value: &str) -> String {
     }
     result
 }
-
