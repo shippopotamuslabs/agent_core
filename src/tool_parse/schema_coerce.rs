@@ -16,7 +16,8 @@ pub fn coerce_to_schema(value: &mut Value, hint: &ToolSchemaHint) -> Value {
                 }
             }
             for (name, default_value) in &hint.defaults {
-                map.entry(name.clone()).or_insert_with(|| default_value.clone());
+                map.entry(name.clone())
+                    .or_insert_with(|| default_value.clone());
             }
             value.clone()
         }
@@ -107,9 +108,13 @@ fn coerce_string(s: String, ty: &str) -> Value {
 
 fn coerce_string_to_array(s: &str) -> Option<Value> {
     unwrap_stringified_json(s).and_then(|value| match value {
-        Value::Array(items) => Some(Value::Array(items.into_iter().map(coerce_array_item).collect())),
+        Value::Array(items) => Some(Value::Array(
+            items.into_iter().map(coerce_array_item).collect(),
+        )),
         Value::String(inner) if inner.starts_with("http://") || inner.starts_with("https://") => {
-            Some(Value::Array(vec![Value::String(inner.trim_start_matches('[').to_string())]))
+            Some(Value::Array(vec![Value::String(
+                inner.trim_start_matches('[').to_string(),
+            )]))
         }
         Value::String(inner) => extract_array_from_string(&inner),
         other => extract_array_from_string(&other.to_string()),

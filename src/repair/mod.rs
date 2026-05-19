@@ -46,6 +46,7 @@ impl ToolRepairPipeline {
             call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
             name: resolved_name,
             arguments_json,
+            attempt_metadata: None,
             repair_metadata: repair_meta,
         };
 
