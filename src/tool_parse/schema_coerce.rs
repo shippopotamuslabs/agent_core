@@ -16,6 +16,13 @@ pub fn coerce_to_schema(value: &mut Value, hint: &ToolSchemaHint) -> Value {
                 }
             }
             for (name, default_value) in &hint.defaults {
+                if let Some(field_value) = map.get_mut(name) {
+                    let ty = default_value_type(default_value);
+                    let coerced = coerce_field(field_value.clone(), ty);
+                    *field_value = coerced;
+                }
+            }
+            for (name, default_value) in &hint.defaults {
                 map.entry(name.clone())
                     .or_insert_with(|| default_value.clone());
             }
@@ -141,6 +148,17 @@ fn unwrap_stringified_json(s: &str) -> Option<Value> {
         current = next;
     }
     Some(current)
+}
+
+fn default_value_type(default: &Value) -> &'static str {
+    match default {
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() => "integer",
+        Value::Number(_) => "number",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        Value::String(_) | Value::Null => "string",
+    }
 }
 
 fn coerce_array_item(value: Value) -> Value {
