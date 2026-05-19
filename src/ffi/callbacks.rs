@@ -137,6 +137,7 @@ mod tests {
                 result_json: "{}".into(),
                 truncated: false,
                 soft_failure: false,
+                result_metadata: None,
             }],
         );
         assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
