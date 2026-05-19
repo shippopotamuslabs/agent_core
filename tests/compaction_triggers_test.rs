@@ -188,12 +188,15 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
     );
     // engine should detect mid-turn pressure and request summary
     let next = eng.next_action(&handle);
-    assert!(matches!(next, AgentAction::RequestSummary(_)));
+    let summary_last_id = match next {
+        AgentAction::RequestSummary(req) => req.last_message_id.clone(),
+        other => panic!("expected RequestSummary before submit, got {other:?}"),
+    };
     eng.submit_summary(
         &handle,
         SummaryResult {
             summary_text: "Summary: tool choice retained.".into(),
-            last_message_id: "a1".into(),
+            last_message_id: summary_last_id,
         },
     );
     match eng.next_action(&handle) {
@@ -213,6 +216,62 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
         })
         .expect("mid_turn CompactionApplied expected");
     assert_eq!(mid.trigger, CompactionTrigger::MidTurn);
+}
+
+#[test]
+fn post_tool_small_result_on_large_window_skips_compaction() {
+    let mut cfg = AgentConfig::default();
+    cfg.post_tool_result_threshold_ratio = 0.92;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        kv_fixed: false,
+        ..Default::default()
+    };
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![user("u0", "research topic")],
+        cfg,
+        caps,
+        serde_json::Value::Null,
+        io_large(),
+    );
+    let _ = eng.next_action(&handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("c1".into()),
+                name: "web_search".into(),
+                arguments_json: r#"{"query":"example"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+        },
+    );
+    let _ = eng.next_action(&handle);
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "c1".into(),
+            result_json: r#"{"results":[{"title":"Example","url":"https://example.com"}]}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            result_metadata: None,
+        }],
+    );
+    let events = eng.drain_events(&handle);
+    let post_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::CompactionApplied(ev) if ev.trigger == CompactionTrigger::PostToolResult))
+        .count();
+    assert_eq!(
+        post_count, 0,
+        "small tool result on a large window should not trigger post-tool compaction"
+    );
 }
 
 #[test]
@@ -258,6 +317,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
     let events = eng.drain_events(&handle);
@@ -315,6 +375,7 @@ fn s5_artifact_squash_is_preferred_over_fifo() {
             result_json: big_payload,
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
     let events = eng.drain_events(&handle);
@@ -749,6 +810,7 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
     // Do NOT call next_action; drain immediately.
@@ -829,6 +891,7 @@ fn m3_tool_spillover_must_preserve_full_raw_output() {
         call_id: "call-9".into(),
         name: "web_search".into(),
         arguments_json: "{}".into(),
+        attempt_metadata: None,
         repair_metadata: None,
     };
     let full = "BEGIN_RAW_abcdefghijklmnopqrstuvwxyz_END_RAW".to_string();
@@ -837,6 +900,7 @@ fn m3_tool_spillover_must_preserve_full_raw_output() {
         result_json: full.clone(),
         truncated: false,
         soft_failure: false,
+        result_metadata: None,
     };
     let reference =
         spill_tool_result_if_needed(&mut store, &mut result, &call, 10, 0).expect("spill expected");

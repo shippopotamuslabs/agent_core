@@ -22,9 +22,17 @@ pub struct AgentConfig {
     /// When true: extend max_turns by +20 if last turn contained an `append_blocks` call.
     #[serde(default = "default_true")]
     pub greedy_append_blocks: bool,
-    /// Per-result byte budget for cloud providers.
+    /// Per-result byte budget for cloud providers when context pressure is high.
     #[serde(default = "default_tool_result_budget_cloud_bytes")]
     pub tool_result_budget_cloud_bytes: usize,
+    /// Per-result byte budget while context pressure is below
+    /// [`tool_result_truncation_pressure_ratio`].
+    #[serde(default = "default_tool_result_budget_relaxed_bytes")]
+    pub tool_result_budget_relaxed_bytes: usize,
+    /// Apply the strict [`tool_result_budget_cloud_bytes`] only when session
+    /// pressure ratio is at or above this value.
+    #[serde(default = "default_tool_result_truncation_pressure_ratio")]
+    pub tool_result_truncation_pressure_ratio: f32,
     /// Per-provider token-count correction multipliers applied on top of tiktoken estimate.
     /// Key: provider name (e.g. "anthropic", "google"). Value: multiplier (e.g. 1.1).
     #[serde(default)]
@@ -64,13 +72,41 @@ pub struct AgentConfig {
     pub file_outline_threshold_tokens: u32,
     #[serde(default = "default_prompt_cache_anchor_threshold_tokens")]
     pub prompt_cache_anchor_threshold_tokens: u32,
+    #[serde(default)]
+    pub preflight_token_threshold: Option<u32>,
+    #[serde(default)]
+    pub mid_turn_token_threshold: Option<u32>,
+    #[serde(default)]
+    pub post_tool_result_token_threshold: Option<u32>,
+    #[serde(default)]
+    pub turn_threshold: Option<u32>,
+    #[serde(default)]
+    pub message_threshold: Option<u32>,
+    #[serde(default)]
+    pub compact_on_turn_end: bool,
+    #[serde(default)]
+    pub retention_window_messages: usize,
+    #[serde(default)]
+    pub eviction_window_ratio: f32,
+    #[serde(default)]
+    pub enable_loop_hooks: bool,
+    #[serde(default)]
+    pub enable_doom_loop_guard: bool,
+    #[serde(default)]
+    pub enable_pending_work_guard: bool,
+    #[serde(default)]
+    pub require_read_before_edit: bool,
+    #[serde(default)]
+    pub default_tool_timeout_ms: Option<u64>,
+    #[serde(default = "default_max_model_requests_per_turn")]
+    pub max_model_requests_per_turn: u32,
 }
 
 fn default_threshold_ratio() -> f32 {
     0.80
 }
 fn default_micro_keep_recent() -> u32 {
-    2
+    4
 }
 fn default_tool_retry_limit() -> u32 {
     3
@@ -79,13 +115,19 @@ fn default_true() -> bool {
     true
 }
 fn default_tool_result_budget_cloud_bytes() -> usize {
-    4096
+    16_384
+}
+fn default_tool_result_budget_relaxed_bytes() -> usize {
+    131_072
+}
+fn default_tool_result_truncation_pressure_ratio() -> f32 {
+    0.85
 }
 fn default_mid_turn_threshold_ratio() -> f32 {
-    0.90
+    0.93
 }
 fn default_post_tool_result_threshold_ratio() -> f32 {
-    0.85
+    0.92
 }
 fn default_manual_compact_threshold_ratio() -> f32 {
     0.80
@@ -114,6 +156,9 @@ fn default_file_outline_threshold_tokens() -> u32 {
 fn default_prompt_cache_anchor_threshold_tokens() -> u32 {
     4096
 }
+fn default_max_model_requests_per_turn() -> u32 {
+    1
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -124,6 +169,8 @@ impl Default for AgentConfig {
             tool_retry_limit: default_tool_retry_limit(),
             greedy_append_blocks: default_true(),
             tool_result_budget_cloud_bytes: default_tool_result_budget_cloud_bytes(),
+            tool_result_budget_relaxed_bytes: default_tool_result_budget_relaxed_bytes(),
+            tool_result_truncation_pressure_ratio: default_tool_result_truncation_pressure_ratio(),
             token_correction: HashMap::new(),
             mid_turn_threshold_ratio: default_mid_turn_threshold_ratio(),
             post_tool_result_threshold_ratio: default_post_tool_result_threshold_ratio(),
@@ -142,6 +189,20 @@ impl Default for AgentConfig {
             history_snapshot_threshold_tokens: default_history_snapshot_threshold_tokens(),
             file_outline_threshold_tokens: default_file_outline_threshold_tokens(),
             prompt_cache_anchor_threshold_tokens: default_prompt_cache_anchor_threshold_tokens(),
+            preflight_token_threshold: None,
+            mid_turn_token_threshold: None,
+            post_tool_result_token_threshold: None,
+            turn_threshold: None,
+            message_threshold: None,
+            compact_on_turn_end: false,
+            retention_window_messages: 0,
+            eviction_window_ratio: 0.0,
+            enable_loop_hooks: false,
+            enable_doom_loop_guard: false,
+            enable_pending_work_guard: false,
+            require_read_before_edit: false,
+            default_tool_timeout_ms: None,
+            max_model_requests_per_turn: default_max_model_requests_per_turn(),
         }
     }
 }
@@ -168,6 +229,14 @@ pub struct SessionCapabilities {
     pub prompt_cache_supported: bool,
     #[serde(default = "default_true")]
     pub history_rewrite_supported: bool,
+    #[serde(default)]
+    pub request_transform_pipeline_supported: bool,
+    #[serde(default)]
+    pub lifecycle_hooks_supported: bool,
+    #[serde(default)]
+    pub delegation_tools_supported: bool,
+    #[serde(default)]
+    pub host_policy_callbacks_supported: bool,
 }
 
 impl Default for SessionCapabilities {
@@ -181,6 +250,10 @@ impl Default for SessionCapabilities {
             file_backed_context_supported: false,
             prompt_cache_supported: false,
             history_rewrite_supported: true,
+            request_transform_pipeline_supported: false,
+            lifecycle_hooks_supported: false,
+            delegation_tools_supported: false,
+            host_policy_callbacks_supported: false,
         }
     }
 }
@@ -254,10 +327,12 @@ mod tests {
     fn agent_config_defaults() {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.threshold_ratio, 0.80);
-        assert_eq!(cfg.micro_keep_recent, 2);
+        assert_eq!(cfg.micro_keep_recent, 4);
         assert_eq!(cfg.tool_retry_limit, 3);
         assert!(cfg.greedy_append_blocks);
-        assert_eq!(cfg.tool_result_budget_cloud_bytes, 4096);
+        assert_eq!(cfg.tool_result_budget_cloud_bytes, 16_384);
+        assert_eq!(cfg.tool_result_budget_relaxed_bytes, 131_072);
+        assert_eq!(cfg.tool_result_truncation_pressure_ratio, 0.85);
     }
 
     #[test]

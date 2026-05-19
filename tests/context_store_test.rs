@@ -37,6 +37,7 @@ fn s8_oversized_tool_output_spills_to_context_reference() {
         call_id: "call-1".into(),
         name: "web_search".into(),
         arguments_json: "{}".into(),
+        attempt_metadata: None,
         repair_metadata: None,
     };
     let mut result = ToolResultRecord {
@@ -44,6 +45,7 @@ fn s8_oversized_tool_output_spills_to_context_reference() {
         result_json: payload.clone(),
         truncated: false,
         soft_failure: false,
+        result_metadata: None,
     };
     let reference = spill_tool_result_if_needed(&mut store, &mut result, &call, 64, 0)
         .expect("spill expected for oversized output");
@@ -111,6 +113,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             result_json: payload.clone(),
             truncated: false,
             soft_failure: false,
+            result_metadata: None,
         }],
     );
 

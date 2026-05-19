@@ -96,6 +96,7 @@ impl AgentToolExecutor for FixtureExecutor {
                     result_json: r#"{"status":"success"}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    result_metadata: None,
                 })
                 .collect()),
             ExecMode::SoftFail => Ok(calls
@@ -105,6 +106,7 @@ impl AgentToolExecutor for FixtureExecutor {
                     result_json: r#"{"error":"soft"}"#.into(),
                     truncated: false,
                     soft_failure: true,
+                    result_metadata: None,
                 })
                 .collect()),
         }
