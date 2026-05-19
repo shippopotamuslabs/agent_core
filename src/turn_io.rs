@@ -8,6 +8,8 @@ pub struct ModelRequest {
     /// Raw JSON blob of the tool schemas in provider-specific format.
     /// Engine passes through opaquely; transport assembles it.
     pub tools_schema_json: String,
+    #[serde(default)]
+    pub rendered_tool_catalog_json: String,
     pub allow_tool_call: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_references: Vec<crate::context_store::ContextReference>,
@@ -168,6 +170,7 @@ mod tests {
             session_messages: vec![make_message("m1")],
             system_prompt: "You are helpful.".into(),
             tools_schema_json: "[]".into(),
+            rendered_tool_catalog_json: "[]".into(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,
