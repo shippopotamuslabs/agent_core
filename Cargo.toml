@@ -85,6 +85,10 @@ path = "tests/engine_envelope_retry_test.rs"
 name = "leaked_tool_recovery_test"
 path = "tests/leaked_tool_recovery_test.rs"
 
+[[test]]
+name = "executed_tool_call_replay_test"
+path = "tests/executed_tool_call_replay_test.rs"
+
 [[example]]
 name = "mock_desktop_loop"
 path = "examples/mock_desktop_loop.rs"
