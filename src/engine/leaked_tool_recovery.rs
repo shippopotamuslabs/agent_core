@@ -1,0 +1,82 @@
+//! Centralized turn-end leaked tool-call resolution (centralized-leaked-tool-call-recovery).
+
+use crate::tool_parse::parse_tool_calls;
+use crate::tool_stream_gate::{first_strong_tool_marker_start, normalize_spaced_dsml};
+use crate::turn_io::RawToolCall;
+
+/// Turn-end classification result for model text + native tools.
+#[derive(Debug, Clone)]
+pub struct ModelTurnTextResolution {
+    pub visible_assistant_text: String,
+    pub native_tool_calls: Vec<RawToolCall>,
+    pub recovered_tool_calls: Vec<RawToolCall>,
+    pub had_strong_tool_marker: bool,
+}
+
+/// Classify buffered assistant text vs native structured tool calls at model turn end.
+pub fn resolve_model_turn_text(
+    buffered_text: &str,
+    native_tool_calls: &[RawToolCall],
+    allow_tool_call: bool,
+) -> ModelTurnTextResolution {
+    if !allow_tool_call {
+        return ModelTurnTextResolution {
+            visible_assistant_text: buffered_text.to_string(),
+            native_tool_calls: native_tool_calls.to_vec(),
+            recovered_tool_calls: Vec::new(),
+            had_strong_tool_marker: false,
+        };
+    }
+
+    let normalized = normalize_spaced_dsml(buffered_text);
+    let had_strong_tool_marker = first_strong_tool_marker_start(&normalized).is_some();
+
+    if !had_strong_tool_marker {
+        return ModelTurnTextResolution {
+            visible_assistant_text: buffered_text.to_string(),
+            native_tool_calls: native_tool_calls.to_vec(),
+            recovered_tool_calls: Vec::new(),
+            had_strong_tool_marker: false,
+        };
+    }
+
+    let batch = parse_tool_calls(&normalized);
+    let visible_assistant_text = visible_text_from_batch(&batch, buffered_text);
+
+    if !native_tool_calls.is_empty() {
+        return ModelTurnTextResolution {
+            visible_assistant_text,
+            native_tool_calls: native_tool_calls.to_vec(),
+            recovered_tool_calls: Vec::new(),
+            had_strong_tool_marker: true,
+        };
+    }
+
+    let recovered_tool_calls = batch
+        .successes
+        .iter()
+        .enumerate()
+        .map(|(index, field)| RawToolCall {
+            id: Some(format!("text-tool-{}", index + 1)),
+            name: field.tool_name.clone(),
+            arguments_json: field.arguments_json.clone(),
+        })
+        .collect();
+
+    ModelTurnTextResolution {
+        visible_assistant_text,
+        native_tool_calls: Vec::new(),
+        recovered_tool_calls,
+        had_strong_tool_marker: true,
+    }
+}
+
+fn visible_text_from_batch(batch: &crate::tool_parse::ToolParseBatch, fallback: &str) -> String {
+    if !batch.successes.is_empty() {
+        return format!("{}{}", batch.visible_prefix, batch.visible_suffix);
+    }
+    if batch.visible_prefix.is_empty() && batch.visible_suffix.is_empty() {
+        return fallback.to_string();
+    }
+    format!("{}{}", batch.visible_prefix, batch.visible_suffix)
+}

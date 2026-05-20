@@ -4,12 +4,12 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::action::AgentAction;
-use crate::message::AgentMessage;
 use crate::compact::CompactionContext;
 use crate::context_store::ContextStore;
 use crate::events::AgentEvent;
 use crate::guardrails::GuardrailState;
 use crate::loop_metrics::LoopMetrics;
+use crate::message::AgentMessage;
 use crate::message::ToolCallRecord;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::state_ledger::StateLedger;
@@ -83,7 +83,9 @@ impl SessionHandle {
         let inner = self.lock_inner();
         SessionTestSnapshot {
             messages: inner.session.messages.clone(),
-            consecutive_envelope_parse_failures: inner.guardrails.consecutive_envelope_parse_failures,
+            consecutive_envelope_parse_failures: inner
+                .guardrails
+                .consecutive_envelope_parse_failures,
             terminal_action: inner.terminal_action.clone(),
         }
     }

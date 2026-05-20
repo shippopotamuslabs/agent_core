@@ -1,0 +1,212 @@
+//! fix-artifact-agent-loop — canonicalization and execution-gate red tests.
+
+use agent_core::canonicalize::{
+    canonicalize_arguments_value, canonicalize_raw_arguments, canonicalize_tool_call,
+    CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
+};
+use agent_core::catalog::ToolCatalog;
+use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
+use agent_core::tool_parse::{coerce_provider_arguments, parse_tool_calls};
+use agent_core::turn_io::RawToolCall;
+use serde_json::Value;
+
+fn append_blocks_raw(arguments_json: &str) -> RawToolCall {
+    RawToolCall {
+        id: Some("call-append-blocks".to_string()),
+        name: "append_blocks".to_string(),
+        arguments_json: arguments_json.to_string(),
+    }
+}
+
+fn assert_blocks_array(arguments_json: &str, expected_text: &str, scenario: &str) {
+    let value: Value = serde_json::from_str(arguments_json)
+        .unwrap_or_else(|err| panic!("{scenario} arguments_json must parse: {err}"));
+    let blocks = value["blocks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{scenario} blocks must be a JSON array"));
+    assert_eq!(blocks.len(), 1, "{scenario} blocks length");
+    assert_eq!(blocks[0]["text"], expected_text, "{scenario} block text");
+}
+
+#[test]
+fn faal_cp_01_stringified_blocks_become_array() {
+    let result = canonicalize_raw_arguments(
+        "append_blocks",
+        r#"{"artifactId":"art-cp-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hello\"}]","isComplete":false}"#,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ExecutionStrict,
+    )
+    .expect("FAAL-CP-01 canonicalize_raw_arguments succeeds");
+
+    assert_blocks_array(&result.arguments_json, "Hello", "FAAL-CP-01");
+    assert_eq!(
+        result.value["artifactId"], "art-cp-1",
+        "FAAL-CP-01 artifactId"
+    );
+}
+
+#[test]
+fn faal_cp_02_provider_ingress_allows_unknown_execution_rejects() {
+    let raw = RawToolCall {
+        id: Some("unknown-1".to_string()),
+        name: "totally_unknown_tool_xyz".to_string(),
+        arguments_json: "{}".to_string(),
+    };
+
+    let (ingress, _) = canonicalize_tool_call(
+        &raw,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ProviderIngress,
+    );
+    assert!(
+        matches!(ingress, CanonicalizeToolCallOutcome::Ok(_)),
+        "FAAL-CP-02 ingress"
+    );
+
+    let (strict, _) = canonicalize_tool_call(
+        &raw,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ExecutionStrict,
+    );
+    match strict {
+        CanonicalizeToolCallOutcome::Reject {
+            error_json_for_model,
+        } => assert!(
+            error_json_for_model.contains("Unknown tool"),
+            "FAAL-CP-02 strict reject message",
+        ),
+        other => panic!("FAAL-CP-02 expected Reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn faal_cp_03_provider_ingress_matches_execution_strict_arguments() {
+    let args = r#"{"artifactId":"art-parity-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hi\"}]","isComplete":true}"#;
+    let ingress = coerce_provider_arguments("append_blocks", args);
+    let (strict, _) = canonicalize_tool_call(
+        &append_blocks_raw(args),
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ExecutionStrict,
+    );
+    let strict = match strict {
+        CanonicalizeToolCallOutcome::Ok(call) => call,
+        other => panic!("FAAL-CP-03 expected Ok, got {other:?}"),
+    };
+
+    let ingress_json: Value =
+        serde_json::from_str(&ingress.arguments_json).expect("FAAL-CP-03 ingress JSON");
+    let strict_json: Value =
+        serde_json::from_str(&strict.arguments_json).expect("FAAL-CP-03 strict JSON");
+    assert_eq!(ingress_json, strict_json, "FAAL-CP-03 semantic parity");
+    assert!(ingress_json["blocks"].is_array(), "FAAL-CP-03 blocks array");
+    assert_eq!(ingress_json["isComplete"], true, "FAAL-CP-03 isComplete");
+}
+
+#[test]
+fn faal_cp_04_double_canonicalize_is_stable() {
+    let first = canonicalize_raw_arguments(
+        "append_blocks",
+        r#"{"artifactId":"art-cp-4","blocks":"[{\"type\":\"paragraph\",\"text\":\"Stable\"}]","isComplete":false}"#,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ExecutionStrict,
+    )
+    .expect("FAAL-CP-04 first canonicalize");
+    let snapshot = first.arguments_json.clone();
+    let mut value = first.value;
+
+    let second = canonicalize_arguments_value("append_blocks", &mut value, ToolCatalog::global())
+        .expect("FAAL-CP-04 second canonicalize");
+
+    assert_eq!(second.arguments_json, snapshot, "FAAL-CP-04 stable JSON");
+}
+
+#[test]
+fn faal_rc_01_repair_uses_canonicalize_for_stringified_blocks() {
+    let (outcome, _) = ToolRepairPipeline::repair(
+        &append_blocks_raw(
+            r#"{"artifactId":"art-coerce-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hello\"}]","isComplete":false}"#,
+        ),
+        ToolCatalog::global(),
+    );
+
+    match outcome {
+        RepairOutcome::Repaired(record) => {
+            assert_blocks_array(&record.arguments_json, "Hello", "FAAL-RC-01")
+        }
+        other => panic!("FAAL-RC-01 expected Repaired, got {other:?}"),
+    }
+}
+
+#[test]
+fn faal_rc_02_repair_rejects_malformed_blocks_string() {
+    let (outcome, _) = ToolRepairPipeline::repair(
+        &append_blocks_raw(
+            r#"{"artifactId":"art-bad-1","blocks":"[{not valid json","isComplete":false}"#,
+        ),
+        ToolCatalog::global(),
+    );
+
+    match outcome {
+        RepairOutcome::Reject {
+            error_json_for_model,
+        } => assert!(
+            error_json_for_model.contains("Invalid JSON")
+                || error_json_for_model.contains("blocks"),
+            "FAAL-RC-02 reject detail",
+        ),
+        other => panic!("FAAL-RC-02 expected Reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn faal_rc_03_bad_ingress_arguments_are_still_rejected_at_execution() {
+    let ingress = coerce_provider_arguments(
+        "append_blocks",
+        r#"{"artifactId":"art-bad-ingress","blocks":"[{not valid json","isComplete":false}"#,
+    );
+    assert_ne!(
+        ingress.arguments_json, "{}",
+        "FAAL-RC-03 must not silently mask bad args"
+    );
+    assert!(
+        !ingress.repairs.is_empty(),
+        "FAAL-RC-03 repairs record parse failure"
+    );
+
+    let (outcome, _) = ToolRepairPipeline::repair(
+        &RawToolCall {
+            id: Some("bad-ingress".to_string()),
+            name: ingress.tool_name,
+            arguments_json: ingress.arguments_json,
+        },
+        ToolCatalog::global(),
+    );
+    assert!(
+        matches!(outcome, RepairOutcome::Reject { .. }),
+        "FAAL-RC-03 execution reject"
+    );
+}
+
+#[test]
+fn faal_md_01_repair_provider_and_parse_paths_all_emit_array_blocks() {
+    let args = r#"{"artifactId":"art-md-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Parity\"}]","isComplete":false}"#;
+    let ingress = coerce_provider_arguments("append_blocks", args);
+    let (repair, _) = ToolRepairPipeline::repair(&append_blocks_raw(args), ToolCatalog::global());
+    let raw_text =
+        format!(r#"<tool_call>{{"name":"append_blocks","arguments":{args}}}</tool_call>"#,);
+    let parsed = parse_tool_calls(&raw_text);
+
+    assert_blocks_array(&ingress.arguments_json, "Parity", "FAAL-MD-01 ingress");
+    match repair {
+        RepairOutcome::Repaired(record) => {
+            assert_blocks_array(&record.arguments_json, "Parity", "FAAL-MD-01 repair")
+        }
+        other => panic!("FAAL-MD-01 expected Repaired, got {other:?}"),
+    }
+    assert_eq!(parsed.successes.len(), 1, "FAAL-MD-01 parsed successes");
+    assert_blocks_array(
+        &parsed.successes[0].arguments_json,
+        "Parity",
+        "FAAL-MD-01 parse_tool_calls",
+    );
+}

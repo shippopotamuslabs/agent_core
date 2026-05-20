@@ -11,6 +11,21 @@ use agent_core::tool_parse::schema_coerce::coerce_to_schema;
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[test]
+fn faal_cp_05_parse_tool_calls_coerces_stringified_blocks() {
+    let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-cp-5","blocks":"[{\"type\":\"paragraph\",\"text\":\"Envelope\"}]","isComplete":false}}</tool_call>"#;
+
+    let batch = parse_tool_calls(raw);
+
+    assert_eq!(batch.successes.len(), 1, "FAAL-CP-05 successes");
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json)
+        .expect("FAAL-CP-05 arguments_json");
+    let blocks = args["blocks"]
+        .as_array()
+        .expect("FAAL-CP-05 blocks must be array");
+    assert_eq!(blocks[0]["text"], "Envelope", "FAAL-CP-05 block text");
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -537,6 +552,46 @@ fn catalog_append_blocks_uses_schema_required_fields_and_default() {
 }
 
 #[test]
+fn cl_tr_07_artifact_id_alias_coerces_to_camel_case() {
+    let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifact_id":"id-7","blocks":[{"type":"paragraph","text":"x"}],"is_complete":false}}</tool_call>"#;
+    let batch = parse_tool_calls(raw);
+    assert_eq!(batch.successes.len(), 1, "CL-TR-07 successes");
+    assert!(
+        batch.successes[0]
+            .arguments_json
+            .contains(r#""artifactId":"id-7""#),
+        "CL-TR-07 artifactId {}",
+        batch.successes[0].arguments_json
+    );
+    assert!(
+        batch.successes[0]
+            .arguments_json
+            .contains(r#""isComplete":false"#),
+        "CL-TR-07 isComplete {}",
+        batch.successes[0].arguments_json
+    );
+    assert!(batch.successes[0].repaired, "CL-TR-07 repaired");
+}
+
+#[test]
+fn catalog_append_blocks_accepts_snake_case_artifact_aliases() {
+    let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifact_id":"artifact-1","blocks":[{"type":"paragraph","text":"Research Document"}],"is_complete":true}}</tool_call>"#;
+    let batch = parse_tool_calls(raw);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
+    assert_eq!(batch.successes.len(), 1);
+    assert_eq!(batch.successes[0].tool_name, "append_blocks");
+    assert_eq!(
+        batch.successes[0].arguments_json,
+        r#"{"artifactId":"artifact-1","blocks":[{"text":"Research Document","type":"paragraph"}],"isComplete":true}"#
+    );
+    assert!(batch.successes[0].repaired);
+}
+
+#[test]
 fn catalog_start_artifact_accepts_catalog_required_title() {
     let raw = r#"<tool_call>{"name":"start_artifact","arguments":{"title":"Research Brief"}}</tool_call>"#;
     let batch = parse_tool_calls(raw);
@@ -583,6 +638,24 @@ fn catalog_search_current_artifact_is_explicitly_covered() {
         batch.successes[0].arguments_json,
         r#"{"artifactId":"artifact-1","query":"summary"}"#
     );
+}
+
+#[test]
+fn catalog_search_current_artifact_accepts_snake_case_artifact_alias() {
+    let raw = r#"<tool_call>{"name":"search_current_artifact","arguments":{"artifact_id":"artifact-1","query":"summary"}}</tool_call>"#;
+    let batch = parse_tool_calls(raw);
+    assert!(
+        batch.failures.is_empty(),
+        "unexpected failures: {:?}",
+        batch.failures
+    );
+    assert_eq!(batch.successes.len(), 1);
+    assert_eq!(batch.successes[0].tool_name, "search_current_artifact");
+    assert_eq!(
+        batch.successes[0].arguments_json,
+        r#"{"artifactId":"artifact-1","query":"summary"}"#
+    );
+    assert!(batch.successes[0].repaired);
 }
 
 // ---------------------------------------------------------------------------

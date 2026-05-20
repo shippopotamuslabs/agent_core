@@ -1,8 +1,10 @@
 //! Session state machine (`AgentEngine`) — AGENT-017, AGENT-018 preflight via idle compaction.
 
 pub mod envelope_ingest;
+pub mod leaked_tool_recovery;
 mod state;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
+pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
 pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
 
 use std::collections::HashSet;
@@ -194,13 +196,18 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         g.phase = EnginePhase::Idle;
+        let allow_tool_call = g
+            .pending_call_model
+            .as_ref()
+            .map(|request| request.allow_tool_call)
+            .unwrap_or(true);
         g.pending_call_model = None;
 
-        let (ingest_outcome, merged_tool_calls) =
-            ingest_model_response_envelopes(
-                response.assistant_text.as_deref(),
-                &response.tool_calls,
-            );
+        let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
+            response.assistant_text.as_deref(),
+            &response.tool_calls,
+            allow_tool_call,
+        );
         let (assistant_content, ingest_metadata) = match &ingest_outcome {
             EnvelopeIngestOutcome::NoMarkers => {
                 g.guardrails.reset_envelope_parse_failures();
@@ -252,14 +259,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 });
                 let cfg = g.config.clone();
                 g.guardrails.count_tool_executed(1);
-                g.guardrails.on_tool_turn_finished(
-                    &cfg,
-                    1,
-                    true,
-                    false,
-                    false,
-                    "agent_engine",
-                );
+                g.guardrails
+                    .on_tool_turn_finished(&cfg, 1, true, false, false, "agent_engine");
                 return;
             }
         };
@@ -499,8 +500,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     g.io.context_window_tokens,
                     &g.io.tools_schema_json,
                 );
-                let budget =
-                    effective_tool_result_budget(&pressure, &g.capabilities, &g.config);
+                let budget = effective_tool_result_budget(&pressure, &g.capabilities, &g.config);
                 let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
                 res.result_json = payload;
                 res.truncated = res.truncated || truncated;

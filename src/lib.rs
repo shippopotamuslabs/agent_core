@@ -35,6 +35,7 @@ pub trait AgentSummarizerCallback: Send + Sync {
 pub mod action;
 pub mod artifact_finalize;
 pub mod budget;
+pub mod canonicalize;
 pub mod catalog;
 pub mod compact;
 pub mod context_store;
@@ -55,8 +56,8 @@ pub mod session;
 pub mod state_ledger;
 pub mod tool_context;
 pub mod tool_parse;
-pub mod tool_stream_gate;
 pub mod tool_policy;
+pub mod tool_stream_gate;
 pub mod truncate;
 pub mod turn_io;
 

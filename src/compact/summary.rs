@@ -146,7 +146,9 @@ pub fn apply_summary_result(
         .filter(|m| m.role == AgentRole::CompactSummary)
         .map(|m| m.content.clone())
         .collect();
-    session.messages.retain(|m| m.role != AgentRole::CompactSummary);
+    session
+        .messages
+        .retain(|m| m.role != AgentRole::CompactSummary);
 
     let first_id = &req.messages_to_summarize[0].id;
     let Some(start) = session.messages.iter().position(|m| m.id == *first_id) else {

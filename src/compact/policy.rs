@@ -33,12 +33,8 @@ pub fn build_compaction_plan(
     trigger: CompactionTrigger,
     context_window_tokens: u32,
 ) -> CompactionPlan {
-    let threshold_ratio = effective_compaction_threshold_ratio(
-        config,
-        policy,
-        trigger,
-        context_window_tokens,
-    );
+    let threshold_ratio =
+        effective_compaction_threshold_ratio(config, policy, trigger, context_window_tokens);
 
     let summary_allowed = policy.summarization_allowed && policy.history_rewrite_allowed;
     let history_rewrite_allowed = policy.history_rewrite_allowed;

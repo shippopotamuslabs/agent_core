@@ -8,14 +8,20 @@ pub mod schema_coerce;
 
 pub use envelope_error::envelope_failure_json;
 
-use crate::catalog::{FieldHint, ToolCatalog, ToolSchemaHint};
+use crate::canonicalize::{
+    canonicalize_raw_arguments, canonicalize_tool_call, CanonicalizeToolCallOutcome,
+    ToolCallCanonicalizeMode,
+};
+use crate::catalog::{ToolCatalog, ToolSchemaHint};
+use crate::tool_stream_gate::normalize_spaced_dsml;
+use crate::turn_io::RawToolCall;
 pub use envelope::{EnvelopeError, EnvelopeFormat, ExtractedEnvelope};
 pub use json_repair::{repair_json, JsonRepairError};
 use regex::Regex;
 pub use result::{ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField};
 pub use schema_coerce::coerce_to_schema;
-use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use serde_json::Value;
+use std::collections::HashSet;
 
 /// Run the full pipeline: normalize → envelope extract → json_repair →
 /// catalog resolve → schema_coerce → emit [`ToolParseBatch`].
@@ -40,36 +46,40 @@ pub fn parse_tool_calls(raw: &str) -> ToolParseBatch {
 /// Coerce already-extracted provider arguments through `repair_json` and
 /// `coerce_to_schema`.
 pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseField {
-    let mut repaired = false;
-    let mut repairs = Vec::new();
-    let mut value = match repair_json(args_json) {
-        Ok(value) => {
-            if serde_json::from_str::<Value>(args_json).is_err() {
-                repaired = true;
-                collect_repairs(args_json, &mut repairs);
-            }
-            value
-        }
-        Err(_) => serde_json::from_str(args_json).unwrap_or(Value::Object(Default::default())),
+    let raw = RawToolCall {
+        id: None,
+        name: tool_name.to_string(),
+        arguments_json: args_json.to_string(),
     };
-
-    let canonical_name = ToolCatalog::global()
-        .resolve(tool_name)
-        .map(|spec| spec.name.clone())
-        .unwrap_or_else(|| tool_name.to_string());
-    let hint = schema_hint_for(&canonical_name);
-    let coerced = hint
-        .as_ref()
-        .map(|hint| coerce_to_schema(&mut value, hint))
-        .unwrap_or(value);
-    let mut coerced = coerced;
-    normalize_special_values(&canonical_name, &mut coerced, &mut repaired, &mut repairs);
-
-    ToolParseField {
-        tool_name: canonical_name.clone(),
-        arguments_json: canonical_arguments_json(&canonical_name, &coerced),
-        repaired,
-        repairs,
+    match canonicalize_tool_call(
+        &raw,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .0
+    {
+        CanonicalizeToolCallOutcome::Ok(call) => ToolParseField {
+            tool_name: call.resolved_name,
+            arguments_json: call.arguments_json,
+            repaired: call.repair_metadata.is_some() || !call.argument_repairs.is_empty(),
+            repairs: call.argument_repairs,
+        },
+        CanonicalizeToolCallOutcome::Reject {
+            error_json_for_model,
+        } => ToolParseField {
+            tool_name: tool_name.to_string(),
+            arguments_json: args_json.to_string(),
+            repaired: true,
+            repairs: vec![format!(
+                "provider argument canonicalization failed: {error_json_for_model}"
+            )],
+        },
+        CanonicalizeToolCallOutcome::Suggest { .. } => ToolParseField {
+            tool_name: tool_name.to_string(),
+            arguments_json: args_json.to_string(),
+            repaired: false,
+            repairs: Vec::new(),
+        },
     }
 }
 
@@ -132,17 +142,9 @@ fn parse_extracted_envelope(
         .ok_or_else(|| ToolParseFailureReason::UnknownTool {
             name: envelope.tool_name.clone(),
         })?;
-    let hint = schema_hint_for(&canonical_name);
     let mut repairs = Vec::new();
     repairs.extend(envelope.repair_hints.clone());
     collect_repairs(&envelope.arguments_raw, &mut repairs);
-    let mut value = repair_json(&envelope.arguments_raw).map_err(|error| {
-        ToolParseFailureReason::InvalidJson {
-            detail: error.to_string(),
-        }
-    })?;
-    let originally_valid = serde_json::from_str::<Value>(&envelope.arguments_raw).is_ok();
-    let mut repaired = !originally_valid || !repairs.is_empty();
     if envelope.arguments_raw.contains("[https://") || envelope.arguments_raw.contains("[http://") {
         push_repair(
             &mut repairs,
@@ -150,23 +152,45 @@ fn parse_extracted_envelope(
         );
     }
 
-    validate_unknown_and_duplicate(&canonical_name, &value)?;
-    if let Some(hint) = &hint {
-        let before_coerce = value.clone();
-        value = coerce_to_schema(&mut value, hint);
-        if value != before_coerce {
-            repaired = true;
-        }
+    let canonicalized = canonicalize_raw_arguments(
+        &canonical_name,
+        &envelope.arguments_raw,
+        ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .map_err(|error| map_canonicalize_error(&canonical_name, &error.to_string()))?;
+
+    repairs.extend(canonicalized.repairs);
+    validate_unknown_and_duplicate(&canonical_name, &canonicalized.value)?;
+    if ToolCatalog::global()
+        .resolve(&canonical_name)
+        .and_then(|spec| spec.schema_hint.as_ref())
+        .is_none()
+    {
+        validate_required(&canonical_name, &canonicalized.value)?;
     }
-    normalize_special_values(&canonical_name, &mut value, &mut repaired, &mut repairs);
-    validate_required(&canonical_name, &value)?;
 
     Ok(ToolParseField {
         tool_name: canonical_name.clone(),
-        arguments_json: canonical_arguments_json(&canonical_name, &value),
-        repaired,
+        arguments_json: canonicalized.arguments_json,
+        repaired: canonicalized.repaired || !repairs.is_empty(),
         repairs,
     })
+}
+
+fn map_canonicalize_error(tool: &str, detail: &str) -> ToolParseFailureReason {
+    let missing_prefix = "Missing required field '";
+    if let Some(rest) = detail.strip_prefix(missing_prefix) {
+        if let Some((param, _)) = rest.split_once('\'') {
+            return ToolParseFailureReason::MissingRequiredParameter {
+                tool: tool.to_string(),
+                param: param.to_string(),
+            };
+        }
+    }
+    ToolParseFailureReason::InvalidJson {
+        detail: detail.to_string(),
+    }
 }
 
 fn extract_envelopes(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
@@ -526,7 +550,11 @@ fn validate_required(tool: &str, value: &Value) -> Result<(), ToolParseFailureRe
         return Ok(());
     };
     for required in required_parameters(tool) {
-        let missing = object.get(&required).is_none_or(is_missing_value);
+        let missing = if tool == "append_blocks" && required == "blocks" {
+            object.get(&required).is_none()
+        } else {
+            object.get(&required).is_none_or(is_missing_value)
+        };
         if missing {
             return Err(ToolParseFailureReason::MissingRequiredParameter {
                 tool: tool.to_string(),
@@ -647,113 +675,8 @@ fn explicit_required_parameter_names(tool: &str) -> Vec<&'static str> {
     }
 }
 
-fn schema_hint_for(tool: &str) -> Option<ToolSchemaHint> {
-    let mut defaults = HashMap::new();
-    match tool {
-        "web_extract" => {
-            defaults.insert(
-                "extract_depth".to_string(),
-                Value::String("basic".to_string()),
-            );
-            defaults.insert("format".to_string(), Value::String("markdown".to_string()));
-            Some(ToolSchemaHint {
-                required_fields: vec![FieldHint {
-                    name: "urls".to_string(),
-                    ty: "array".to_string(),
-                    description: "URLs to extract".to_string(),
-                }],
-                defaults,
-            })
-        }
-        "search_chat_history" => Some(ToolSchemaHint {
-            required_fields: vec![FieldHint {
-                name: "queries".to_string(),
-                ty: "array".to_string(),
-                description: "Queries to search".to_string(),
-            }],
-            defaults,
-        }),
-        _ => ToolCatalog::global()
-            .resolve(tool)
-            .and_then(|spec| spec.schema_hint.clone()),
-    }
-}
-
-fn normalize_special_values(
-    tool: &str,
-    value: &mut Value,
-    repaired: &mut bool,
-    repairs: &mut Vec<String>,
-) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-
-    if tool == "search_chat_history" {
-        if let Some(query) = object.remove("query") {
-            object.insert("queries".to_string(), Value::Array(vec![query]));
-            *repaired = true;
-        }
-    }
-
-    if tool == "web_extract" {
-        if let Some(Value::Array(urls)) = object.get_mut("urls") {
-            for url in urls {
-                if let Some(raw) = url.as_str() {
-                    let stripped = raw.trim().trim_start_matches('[').to_string();
-                    if stripped != raw {
-                        *url = Value::String(stripped);
-                        *repaired = true;
-                        push_repair(
-                            repairs,
-                            "stripped leading bracket from bracketed URL string",
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn canonical_arguments_json(tool: &str, value: &Value) -> String {
-    let Some(object) = value.as_object() else {
-        return value.to_string();
-    };
-    match tool {
-        "web_search" => {
-            json!({"query": object.get("query").cloned().unwrap_or(Value::Null)}).to_string()
-        }
-        "web_extract" => {
-            let urls = object
-                .get("urls")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new()));
-            let depth = object
-                .get("extract_depth")
-                .cloned()
-                .unwrap_or_else(|| Value::String("basic".to_string()));
-            let format = object
-                .get("format")
-                .cloned()
-                .unwrap_or_else(|| Value::String("markdown".to_string()));
-            format!(
-                "{{\"urls\":{},\"extract_depth\":{},\"format\":{}}}",
-                urls, depth, format
-            )
-        }
-        "search_chat_history" => {
-            let queries = object
-                .get("queries")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new()));
-            format!("{{\"queries\":{queries}}}")
-        }
-        _ => value.to_string(),
-    }
-}
-
 fn normalize_model_text(raw: &str) -> String {
-    let folded = raw.replace('｜', "|");
+    let folded = normalize_spaced_dsml(&raw.replace('｜', "|"));
     let mut lines = Vec::new();
     for line in folded.lines() {
         let trimmed = line.trim_start();

@@ -5,11 +5,13 @@ mod fuzzy;
 pub use fuzzy::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
 
-use crate::catalog::{FieldHint, ToolCatalog};
+use crate::canonicalize::{
+    canonicalize_tool_call, CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
+};
+use crate::catalog::ToolCatalog;
 use crate::events::AgentEvent;
-use crate::message::{RepairRecord, ToolCallRecord};
+use crate::message::ToolCallRecord;
 use crate::turn_io::RawToolCall;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,249 +31,38 @@ pub struct ToolRepairPipeline;
 
 impl ToolRepairPipeline {
     pub fn repair(raw: &RawToolCall, catalog: &ToolCatalog) -> (RepairOutcome, Vec<AgentEvent>) {
-        let mut events = Vec::new();
-        let (resolved_name, repair_meta) = match Self::repair_name(&raw.name, catalog, &mut events)
-        {
-            Ok(x) => x,
-            Err(rej) => return (rej, events),
+        let (outcome, events) =
+            canonicalize_tool_call(raw, catalog, ToolCallCanonicalizeMode::ExecutionStrict);
+        let outcome = match outcome {
+            CanonicalizeToolCallOutcome::Ok(call) => RepairOutcome::Repaired(ToolCallRecord {
+                call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
+                name: call.resolved_name,
+                arguments_json: call.arguments_json,
+                attempt_metadata: None,
+                repair_metadata: call.repair_metadata,
+            }),
+            CanonicalizeToolCallOutcome::Reject {
+                error_json_for_model,
+            } => RepairOutcome::Reject {
+                error_json_for_model,
+            },
+            CanonicalizeToolCallOutcome::Suggest {
+                original,
+                closest_name,
+            } => RepairOutcome::Suggest {
+                original,
+                closest_name,
+            },
         };
-
-        let arguments_json =
-            match Self::repair_arguments(&resolved_name, &raw.arguments_json, catalog) {
-                Ok(s) => s,
-                Err(rej) => return (rej, events),
-            };
-
-        let record = ToolCallRecord {
-            call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
-            name: resolved_name,
-            arguments_json,
-            attempt_metadata: None,
-            repair_metadata: repair_meta,
-        };
-
-        (RepairOutcome::Repaired(record), events)
+        (outcome, events)
     }
-
-    fn repair_name(
-        raw: &str,
-        catalog: &ToolCatalog,
-        events: &mut Vec<AgentEvent>,
-    ) -> Result<(String, Option<RepairRecord>), RepairOutcome> {
-        let mut s = raw.trim().to_string();
-        loop {
-            if let Some(r) = s.strip_prefix("functions.") {
-                s = r.to_string();
-            } else if let Some(r) = s.strip_prefix("tools.") {
-                s = r.to_string();
-            } else {
-                break;
-            }
-        }
-        let normalized = normalize_to_snake_case(&s);
-
-        if let Some(spec) = catalog.resolve(&normalized) {
-            return Ok((spec.name.clone(), None));
-        }
-
-        // Fuzzy
-        if let Some((best, score)) = best_catalog_match(&normalized, catalog) {
-            if score >= FUZZY_AUTO_ACCEPT {
-                events.push(AgentEvent::ToolRepaired {
-                    original_name: raw.to_string(),
-                    resolved_name: best.to_string(),
-                    confidence: score as f32,
-                });
-                return Ok((
-                    best.to_string(),
-                    Some(RepairRecord {
-                        original_name: raw.trim().to_string(),
-                        applied_aliases: vec![],
-                        confidence: score as f32,
-                    }),
-                ));
-            }
-            return Err(RepairOutcome::Reject {
-                error_json_for_model: reject_json(
-                    &format!(
-                        "Unknown tool '{}' (best match '{}' score {:.2} < {:.2})",
-                        raw, best, score, FUZZY_AUTO_ACCEPT
-                    ),
-                    catalog,
-                ),
-            });
-        }
-
-        Err(RepairOutcome::Reject {
-            error_json_for_model: reject_json(
-                &format!("Unknown tool '{raw}' after normalization '{normalized}'"),
-                catalog,
-            ),
-        })
-    }
-
-    fn repair_arguments(
-        resolved_tool: &str,
-        arguments_json: &str,
-        catalog: &ToolCatalog,
-    ) -> Result<String, RepairOutcome> {
-        let trimmed = strip_json_fences(arguments_json);
-        let mut value: Value = match serde_json::from_str(&trimmed) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(RepairOutcome::Reject {
-                    error_json_for_model: reject_json(
-                        &format!("Invalid JSON for tool arguments: {e}"),
-                        catalog,
-                    ),
-                });
-            }
-        };
-
-        let Some(spec) = catalog.resolve(resolved_tool) else {
-            return Ok(trimmed);
-        };
-
-        if let Some(hint) = &spec.schema_hint {
-            if let Some(obj) = value.as_object_mut() {
-                normalize_append_blocks_completion_alias(obj, resolved_tool);
-                self::apply_schema_hint(obj, hint, resolved_tool, catalog)?;
-            }
-        }
-
-        Ok(serde_json::to_string(&value).unwrap_or_else(|_| trimmed))
-    }
-}
-
-fn normalize_append_blocks_completion_alias(obj: &mut Map<String, Value>, tool_name: &str) {
-    if tool_name == "append_blocks" && !obj.contains_key("isComplete") {
-        if let Some(v) = obj.get("complete").cloned() {
-            obj.insert("isComplete".into(), v);
-        }
-    }
-}
-
-fn reject_json(msg: &str, catalog: &ToolCatalog) -> String {
-    let tools: Vec<&str> = catalog.all().iter().map(|s| s.name.as_str()).collect();
-    serde_json::to_string(&json!({
-        "error": msg,
-        "available_tools": tools,
-    }))
-    .unwrap_or_else(|_| format!(r#"{{"error":"{msg}"}}"#))
-}
-
-fn strip_json_fences(s: &str) -> String {
-    let mut t = s.trim().to_string();
-    while t.ends_with("```") {
-        t = t[..t.len() - 3].trim().to_string();
-    }
-    if let Some(rest) = t.strip_prefix("```json") {
-        return strip_json_fences(rest);
-    }
-    if let Some(rest) = t.strip_prefix("```") {
-        return strip_json_fences(rest);
-    }
-    if let Some(idx) = t.find(|c| c == '{' || c == '[') {
-        return t[idx..].trim().to_string();
-    }
-    t
-}
-
-fn normalize_to_snake_case(input: &str) -> String {
-    let mut r = String::new();
-    let chars: Vec<char> = input.trim().chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c == '-' || c == ' ' {
-            if !r.ends_with('_') && !r.is_empty() {
-                r.push('_');
-            }
-            continue;
-        }
-        if c.is_uppercase() {
-            let prev_lower = i > 0 && chars[i - 1].is_lowercase();
-            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
-            if prev_lower || (i > 0 && chars[i - 1].is_ascii_uppercase() && next_lower) {
-                if !r.ends_with('_') && !r.is_empty() {
-                    r.push('_');
-                }
-            }
-            for lc in c.to_lowercase() {
-                r.push(lc);
-            }
-        } else if c.is_alphanumeric() || c == '_' {
-            r.push(c);
-        }
-    }
-    while r.contains("__") {
-        r = r.replace("__", "_");
-    }
-    r.trim_matches('_').to_string()
-}
-
-fn apply_schema_hint(
-    obj: &mut Map<String, Value>,
-    hint: &crate::catalog::ToolSchemaHint,
-    tool_name: &str,
-    catalog: &ToolCatalog,
-) -> Result<(), RepairOutcome> {
-    for field in &hint.required_fields {
-        if obj.contains_key(&field.name) {
-            coerce_field(obj, field)?;
-            continue;
-        }
-        if let Some(def) = hint.defaults.get(&field.name) {
-            obj.insert(field.name.clone(), def.clone());
-        } else {
-            return Err(RepairOutcome::Reject {
-                error_json_for_model: reject_json(
-                    &format!(
-                        "Missing required field '{}' for tool '{}' (no default in catalog hint)",
-                        field.name, tool_name
-                    ),
-                    catalog,
-                ),
-            });
-        }
-    }
-    for (k, v) in &hint.defaults {
-        obj.entry(k.clone()).or_insert_with(|| v.clone());
-    }
-    Ok(())
-}
-
-fn coerce_field(obj: &mut Map<String, Value>, field: &FieldHint) -> Result<(), RepairOutcome> {
-    let Some(v) = obj.get_mut(&field.name) else {
-        return Ok(());
-    };
-    let ty = field.ty.to_lowercase();
-    if ty.contains("bool") {
-        if let Some(s) = v.as_str() {
-            if s == "true" {
-                *v = Value::Bool(true);
-            } else if s == "false" {
-                *v = Value::Bool(false);
-            }
-        }
-    } else if ty.contains("i32")
-        || ty.contains("i64")
-        || ty.contains("int")
-        || ty.contains("number")
-        || ty.contains("float")
-        || ty.contains("double")
-    {
-        if let Some(s) = v.as_str() {
-            if let Ok(n) = s.parse::<i64>() {
-                *v = Value::Number(n.into());
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::turn_io::RawToolCall;
+    use serde_json::Value;
 
     #[test]
     fn web_seach_fuzzy_repairs_to_web_search() {
