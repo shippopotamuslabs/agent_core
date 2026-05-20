@@ -1,0 +1,575 @@
+//! FEAT-executed-tool-call-replay: provider-facing `raw_tool_calls` metadata scenarios
+//! ETR-R-01 … ETR-R-09, ETR-M-01 … ETR-M-03.
+
+use std::sync::{Arc, Mutex};
+
+use agent_core::action::AgentAction;
+use agent_core::engine::{AgentEngine, SessionIoParams, SessionTestSnapshot};
+use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
+use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+
+const VALID_DSML_WEB_SEARCH: &str = concat!(
+    "<|DSML|tool_calls><|DSML|invoke name=\"web_search\">",
+    "<|DSML|parameter name=\"query\" string=\"true\">rust</|DSML|parameter>",
+    "</|DSML|invoke></|DSML|tool_calls>"
+);
+
+struct PanicTransport;
+
+impl AgentTransport for PanicTransport {
+    fn complete_model_turn(
+        &self,
+        _: ModelRequest,
+    ) -> Result<ModelResponse, agent_core::events::AgentError> {
+        panic!("transport unused")
+    }
+}
+
+struct RecordingExecutor {
+    pub results: Mutex<Vec<ToolCallRecord>>,
+}
+
+impl AgentToolExecutor for RecordingExecutor {
+    fn execute_tools(
+        &self,
+        calls: Vec<ToolCallRecord>,
+    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
+        self.results.lock().unwrap().extend(calls.clone());
+        Ok(calls
+            .into_iter()
+            .map(|c| ToolResultRecord {
+                call_id: c.call_id,
+                result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
+                truncated: false,
+                soft_failure: false,
+                result_metadata: None,
+            })
+            .collect())
+    }
+}
+
+fn io_large() -> SessionIoParams {
+    SessionIoParams {
+        provider: "openrouter".into(),
+        context_window_tokens: 200_000,
+        tools_schema_json: "[]".into(),
+        system_prompt: "sys".into(),
+    }
+}
+
+fn user_msg() -> AgentMessage {
+    AgentMessage {
+        id: "u1".into(),
+        role: AgentRole::User,
+        content: "hi".into(),
+        metadata: serde_json::Value::Null,
+    }
+}
+
+fn new_session(
+    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+) -> agent_core::engine::SessionHandle {
+    eng.create_session(
+        vec![user_msg()],
+        AgentConfig::default(),
+        SessionCapabilities {
+            summarization_allowed: false,
+            kv_fixed: false,
+            tool_result_budget_tokens: None,
+            ..Default::default()
+        },
+        serde_json::Value::Null,
+        io_large(),
+    )
+}
+
+fn last_assistant_message(snapshot: &SessionTestSnapshot) -> &AgentMessage {
+    snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == AgentRole::Assistant)
+        .expect("last assistant message")
+}
+
+fn raw_tool_calls_array(snapshot: &SessionTestSnapshot) -> &[serde_json::Value] {
+    let meta = &last_assistant_message(snapshot).metadata;
+    meta.get("raw_tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+}
+
+fn raw_tool_call_field<'a>(
+    entry: &'a serde_json::Value,
+    field: &str,
+) -> &'a str {
+    entry
+        .get(field)
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("raw_tool_calls entry missing {field}: {entry}"))
+}
+
+fn submit_tool_use(
+    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+    h: &agent_core::engine::SessionHandle,
+    tool_calls: Vec<RawToolCall>,
+) {
+    let _ = eng.next_action(h);
+    eng.submit_model_response(
+        h,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls,
+            finish_reason: FinishReason::ToolUse,
+        },
+    );
+}
+
+// ── ETR-R-01 ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_01_fence_wrapped_arguments_canonicalized_in_raw_tool_calls() {
+    let exec = Arc::new(RecordingExecutor {
+        results: Mutex::new(Vec::new()),
+    });
+    let eng = AgentEngine::new(Arc::new(PanicTransport), exec.clone(), Arc::new(NoOpSummarizer));
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("call-fence".into()),
+            name: "web_search".into(),
+            arguments_json: "```json\n{\"query\":\"rust\"}\n```".into(),
+        }],
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => assert_eq!(calls.len(), 1),
+        other => panic!("ETR-R-01 expected ExecuteTools, got {other:?}"),
+    }
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw.len(), 1, "ETR-R-01 raw_tool_calls length");
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert_eq!(raw_tool_call_field(&raw[0], "id"), "call-fence");
+    assert_eq!(
+        raw_tool_call_field(&raw[0], "arguments_json"),
+        "{\"query\":\"rust\"}"
+    );
+    assert!(
+        !raw_tool_call_field(&raw[0], "arguments_json").contains("```"),
+        "ETR-R-01 arguments_json must not contain markdown fences"
+    );
+}
+
+// ── ETR-R-02 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_02_fuzzy_tool_name_web_seach_stored_as_web_search() {
+    let exec = Arc::new(RecordingExecutor {
+        results: Mutex::new(Vec::new()),
+    });
+    let eng = AgentEngine::new(Arc::new(PanicTransport), exec.clone(), Arc::new(NoOpSummarizer));
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("c1".into()),
+            name: "web_seach".into(),
+            arguments_json: r#"{"query":"x"}"#.into(),
+        }],
+    );
+    let calls = match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => calls,
+        other => panic!("ETR-R-02 expected ExecuteTools, got {other:?}"),
+    };
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert_ne!(raw_tool_call_field(&raw[0], "name"), "web_seach");
+    assert_eq!(calls[0].name, "web_search");
+}
+
+// ── ETR-R-03 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_03_append_blocks_complete_alias_stored_as_is_complete() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("c-ab".into()),
+            name: "append_blocks".into(),
+            arguments_json: r#"{"artifactId":"a","blocks":[],"complete":true}"#.into(),
+        }],
+    );
+    let _ = eng.next_action(&h);
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "append_blocks");
+    let args = raw_tool_call_field(&raw[0], "arguments_json");
+    assert!(
+        args.contains("\"isComplete\":true"),
+        "ETR-R-03 expected isComplete:true in {args}"
+    );
+    assert!(
+        !args.contains("\"complete\":true"),
+        "ETR-R-03 must not retain complete alias in {args}"
+    );
+}
+
+// ── ETR-R-04 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_04_valid_json_metadata_matches_execute_tools_record() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("call-1".into()),
+            name: "web_search".into(),
+            arguments_json: r#"{"query":"finish boundary"}"#.into(),
+        }],
+    );
+    let calls = match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => calls,
+        other => panic!("ETR-R-04 expected ExecuteTools, got {other:?}"),
+    };
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw_tool_call_field(&raw[0], "id"), "call-1");
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert_eq!(
+        raw_tool_call_field(&raw[0], "arguments_json"),
+        r#"{"query":"finish boundary"}"#
+    );
+    assert_eq!(calls[0].call_id, "call-1");
+    assert_eq!(calls[0].name, "web_search");
+    assert_eq!(calls[0].arguments_json, r#"{"query":"finish boundary"}"#);
+}
+
+// ── ETR-R-05 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_05_reject_only_turn_persists_empty_raw_tool_calls() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: None,
+            name: "totally_unknown_tool_xyz".into(),
+            arguments_json: "{}".into(),
+        }],
+    );
+    let next = eng.next_action(&h);
+    assert!(
+        !matches!(next, AgentAction::ExecuteTools(_)),
+        "ETR-R-05 must not ExecuteTools, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        raw_tool_calls_array(&snapshot).len(),
+        0,
+        "ETR-R-05 raw_tool_calls must be empty"
+    );
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.role == AgentRole::Tool && m.content.contains("error")),
+        "ETR-R-05 tool error message"
+    );
+}
+
+// ── ETR-R-06 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_length_one() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![
+            RawToolCall {
+                id: Some("c-ok".into()),
+                name: "web_search".into(),
+                arguments_json: r#"{"query":"ok"}"#.into(),
+            },
+            RawToolCall {
+                id: Some("c-bad".into()),
+                name: "totally_unknown_tool_xyz".into(),
+                arguments_json: "{}".into(),
+            },
+        ],
+    );
+    let calls = match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1, "ETR-R-06 ExecuteTools count");
+            calls
+        }
+        other => panic!("ETR-R-06 expected ExecuteTools, got {other:?}"),
+    };
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw.len(), 1, "ETR-R-06 raw_tool_calls length");
+    assert_eq!(raw_tool_call_field(&raw[0], "id"), "c-ok");
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert_eq!(calls[0].call_id, "c-ok");
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.id.contains("tool-err-c-bad")),
+        "ETR-R-06 tool-err-c-bad message"
+    );
+}
+
+// ── ETR-R-07 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_07_invalid_json_arguments_reject_empty_raw_tool_calls() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: None,
+            name: "web_search".into(),
+            arguments_json: "".into(),
+        }],
+    );
+    let next = eng.next_action(&h);
+    assert!(
+        !matches!(next, AgentAction::ExecuteTools(_)),
+        "ETR-R-07 must not ExecuteTools, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        raw_tool_calls_array(&snapshot).len(),
+        0,
+        "ETR-R-07 raw_tool_calls must be empty"
+    );
+}
+
+// ── ETR-R-08 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_08_unknown_tool_zzzzz_reject_empty_raw_tool_calls() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: None,
+            name: "zzzzz_no_real_match_yyyyy".into(),
+            arguments_json: "{}".into(),
+        }],
+    );
+    let next = eng.next_action(&h);
+    assert!(
+        !matches!(next, AgentAction::ExecuteTools(_)),
+        "ETR-R-08 must not ExecuteTools, got {next:?}"
+    );
+    assert!(
+        matches!(next, AgentAction::CallModel(_)),
+        "ETR-R-08 expected CallModel, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        raw_tool_calls_array(&snapshot).len(),
+        0,
+        "ETR-R-08 raw_tool_calls must be empty"
+    );
+}
+
+// ── ETR-R-09 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(VALID_DSML_WEB_SEARCH.into()),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+        },
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "web_search");
+        }
+        other => panic!("ETR-R-09 expected ExecuteTools, got {other:?}"),
+    }
+    let snapshot = h.integration_test_snapshot();
+    let assistant = last_assistant_message(&snapshot);
+    assert_eq!(
+        assistant.metadata.get("envelope_ingest").and_then(|v| v.as_str()),
+        Some("reified"),
+        "ETR-R-09 envelope_ingest"
+    );
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert!(
+        raw_tool_call_field(&raw[0], "arguments_json").contains(r#""query":"rust""#),
+        "ETR-R-09 arguments_json must contain query rust"
+    );
+}
+
+// ── ETR-M-01 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_m_01_metadata_arguments_json_equals_execute_tools_record() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("call-fence".into()),
+            name: "web_search".into(),
+            arguments_json: "```json\n{\"query\":\"rust\"}\n```".into(),
+        }],
+    );
+    let calls = match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => calls,
+        other => panic!("ETR-M-01 expected ExecuteTools, got {other:?}"),
+    };
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(calls[0].arguments_json, raw_tool_call_field(&raw[0], "arguments_json"));
+    assert_eq!(calls[0].arguments_json, "{\"query\":\"rust\"}");
+    assert_eq!(raw_tool_call_field(&raw[0], "arguments_json"), "{\"query\":\"rust\"}");
+    assert!(
+        !raw_tool_call_field(&raw[0], "arguments_json").contains("```"),
+        "ETR-M-01 no fences in metadata"
+    );
+}
+
+// ── ETR-M-02 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_m_02_rust_snapshot_gate_requires_engine_patch_not_kotlin_only() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("call-fence".into()),
+            name: "web_search".into(),
+            arguments_json: "```json\n{\"query\":\"rust\"}\n```".into(),
+        }],
+    );
+    let _ = eng.next_action(&h);
+    let snapshot = h.integration_test_snapshot();
+    let raw = raw_tool_calls_array(&snapshot);
+    assert!(
+        !raw_tool_call_field(&raw[0], "arguments_json").contains("```"),
+        "ETR-M-02 provider metadata must be canonicalized in Rust, not only at Kotlin replay"
+    );
+}
+
+// ── ETR-M-03 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn etr_m_03_metadata_must_not_contain_web_seach_typo() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng);
+    submit_tool_use(
+        &eng,
+        &h,
+        vec![RawToolCall {
+            id: Some("c1".into()),
+            name: "web_seach".into(),
+            arguments_json: r#"{"query":"x"}"#.into(),
+        }],
+    );
+    let _ = eng.next_action(&h);
+    let snapshot = h.integration_test_snapshot();
+    let meta_str = serde_json::to_string(&last_assistant_message(&snapshot).metadata)
+        .expect("metadata json");
+    assert!(
+        !meta_str.contains("web_seach"),
+        "ETR-M-03 metadata must not contain web_seach typo: {meta_str}"
+    );
+    let raw = raw_tool_calls_array(&snapshot);
+    assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+}

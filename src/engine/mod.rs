@@ -2,6 +2,7 @@
 
 pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
+mod provider_tool_calls;
 mod state;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
@@ -273,8 +274,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 .filter(|message| message.role == AgentRole::Assistant)
                 .count()
         );
-        let meta = serde_json::to_value(&merged_tool_calls).unwrap_or(serde_json::Value::Null);
-        let mut metadata = json!({ "raw_tool_calls": meta });
+        let mut metadata = json!({ "raw_tool_calls": [] });
         if !ingest_metadata.is_null() {
             if let Some(obj) = metadata.as_object_mut() {
                 if let Some(ingest_obj) = ingest_metadata.as_object() {
@@ -390,6 +390,18 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     rejects += 1;
                 }
             }
+        }
+
+        if !merged_tool_calls.is_empty() {
+            let provider_calls = if repaired.is_empty() {
+                Vec::new()
+            } else {
+                provider_tool_calls::provider_facing_raw_tool_calls(&repaired)
+            };
+            provider_tool_calls::patch_last_assistant_raw_tool_calls(
+                &mut g.session,
+                provider_calls,
+            );
         }
 
         if !repaired.is_empty() {
