@@ -89,6 +89,7 @@ fn submit_no_tool_response(
             assistant_text: Some("final text".into()),
             tool_calls: vec![],
             finish_reason,
+            provider_reasoning_content: None,
         },
     );
     engine.next_action(handle)
@@ -195,6 +196,7 @@ fn fb_r_004_tool_use_executes_exact_web_search_call() {
                 arguments_json: r#"{"query":"finish boundary"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
 
@@ -404,6 +406,7 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             assistant_text: Some("final text".into()),
             tool_calls: vec![],
             finish_reason: FfiFinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
 

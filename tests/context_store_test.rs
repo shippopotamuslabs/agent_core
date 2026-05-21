@@ -101,6 +101,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
                 arguments_json: "{}".into(),
             }],
             finish_reason: agent_core::turn_io::FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);

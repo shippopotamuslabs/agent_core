@@ -77,6 +77,7 @@ fn main() {
                 arguments_json: "{}".into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     assert!(matches!(eng.next_action(&h), AgentAction::ExecuteTools(_)));

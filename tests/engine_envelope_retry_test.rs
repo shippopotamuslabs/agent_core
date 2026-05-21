@@ -91,6 +91,7 @@ fn malformed_response() -> ModelResponse {
         assistant_text: Some(MALFORMED_DSML.into()),
         tool_calls: vec![],
         finish_reason: FinishReason::Stop,
+        provider_reasoning_content: None,
     }
 }
 
@@ -178,6 +179,7 @@ fn e_03_valid_leaked_dsml_executes_tool() {
             assistant_text: Some(VALID_DSML_WEB_SEARCH.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     match eng.next_action(&h) {
@@ -211,6 +213,7 @@ fn e_04_persisted_assistant_strips_dsml() {
             assistant_text: Some(format!("Searching now.{VALID_DSML_WEB_SEARCH}")),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&h);
@@ -290,6 +293,7 @@ fn e_07_success_resets_envelope_streak() {
             assistant_text: Some(VALID_DSML_WEB_SEARCH.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     let AgentAction::ExecuteTools(calls) = eng.next_action(&h) else {
@@ -371,6 +375,7 @@ fn cl_tr_05_engine_allow_false_skips_leaked_tool_execution() {
             assistant_text: Some(CL_TR_05_LEAKED_TOOL_CALL.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     let next = eng.next_action(&h);
@@ -405,6 +410,7 @@ fn cl_e_01_engine_executes_recovered_append_blocks() {
             assistant_text: Some(APPEND_BLOCKS_LEAK.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     match eng.next_action(&h) {
@@ -443,6 +449,7 @@ fn cl_e_02_native_only_when_native_and_leak_present() {
                 arguments_json: r#"{"query":"kotlin"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     match eng.next_action(&h) {
@@ -504,6 +511,7 @@ fn cl_e_04_preamble_preserved_marker_stripped() {
             ),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&h);
@@ -538,6 +546,7 @@ fn cl_md_01_native_only_execution() {
                 arguments_json: r#"{"query":"kotlin"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     match eng.next_action(&h) {

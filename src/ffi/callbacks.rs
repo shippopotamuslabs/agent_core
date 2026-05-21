@@ -68,6 +68,7 @@ mod tests {
                 assistant_text: None,
                 tool_calls: vec![],
                 finish_reason: FfiFinishReason::Stop,
+                provider_reasoning_content: None,
             }
         }
     }
@@ -127,6 +128,7 @@ mod tests {
                     arguments_json: "{}".into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         let _ = eng.next_action(&h);

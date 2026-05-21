@@ -284,6 +284,18 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 }
             }
         }
+        if let Some(reasoning_content) = response
+            .provider_reasoning_content
+            .as_deref()
+            .filter(|content| !content.is_empty())
+        {
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "provider_reasoning".to_string(),
+                    json!({ "reasoning_content": reasoning_content }),
+                );
+            }
+        }
         g.session.messages.push(AgentMessage {
             id: assistant_id,
             role: AgentRole::Assistant,
@@ -1448,6 +1460,65 @@ mod tests {
     }
 
     #[test]
+    fn submit_model_response_preserves_provider_reasoning_metadata() {
+        let eng = AgentEngine::new(
+            Arc::new(PanicTransport),
+            Arc::new(RecordingExecutor {
+                results: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoOpSummarizer),
+        );
+        let h = eng.create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: serde_json::Value::Null,
+            }],
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+
+        assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![RawToolCall {
+                    id: Some("c1".into()),
+                    name: "web_search".into(),
+                    arguments_json: r#"{"query":"a"}"#.into(),
+                }],
+                finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: Some("need tool output first".into()),
+            },
+        );
+
+        let guard = h.lock_inner();
+        let assistant = guard
+            .session
+            .messages
+            .iter()
+            .find(|message| message.role == AgentRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(
+            assistant
+                .metadata
+                .get("provider_reasoning")
+                .and_then(|value| value.get("reasoning_content"))
+                .and_then(|value| value.as_str()),
+            Some("need tool output first"),
+        );
+    }
+
+    #[test]
     fn three_tool_happy_path() {
         let eng = AgentEngine::new(
             Arc::new(PanicTransport),
@@ -1497,6 +1568,7 @@ mod tests {
                     },
                 ],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         match eng.next_action(&h) {
@@ -1555,6 +1627,7 @@ mod tests {
                     arguments_json: r#"{"query":"x"}"#.into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         match eng.next_action(&h) {
@@ -1608,6 +1681,7 @@ mod tests {
                     arguments_json: "{}".into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         let _ = eng.next_action(&h);
@@ -1790,6 +1864,7 @@ mod tests {
                     arguments_json: r#"{"title":"T","kind":"document"}"#.into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         let _ = eng.next_action(&h);
@@ -1875,6 +1950,7 @@ mod tests {
                     arguments_json: r#"{"title":"T","kind":"document"}"#.into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
             },
         );
         assert!(matches!(eng.next_action(&h), AgentAction::ExecuteTools(_)));
@@ -1900,6 +1976,7 @@ mod tests {
                     arguments_json: r#"{"artifactId":"art-1","blocks":[]}"#.into(),
                 }],
                 finish_reason: FinishReason::Stop,
+                provider_reasoning_content: None,
             },
         );
         assert!(matches!(eng.next_action(&h), AgentAction::ExecuteTools(_)));

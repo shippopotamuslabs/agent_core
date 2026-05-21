@@ -46,6 +46,8 @@ pub struct ModelResponse {
     pub assistant_text: Option<String>,
     pub tool_calls: Vec<RawToolCall>,
     pub finish_reason: FinishReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_reasoning_content: Option<String>,
 }
 
 impl ModelResponse {
@@ -58,6 +60,7 @@ impl ModelResponse {
             assistant_text: Some(text.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         }
     }
 }
@@ -112,6 +115,7 @@ mod tests {
             assistant_text: None,
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: ModelResponse = serde_json::from_str(&json).unwrap();
@@ -136,6 +140,7 @@ mod tests {
                 },
             ],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         };
         assert!(r.has_tool_calls());
         assert_eq!(r.tool_calls.len(), 2);

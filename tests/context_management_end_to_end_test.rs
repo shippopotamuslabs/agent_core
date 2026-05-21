@@ -97,6 +97,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
                 arguments_json: r#"{"artifactId":"art-9","blocks":[]}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);
