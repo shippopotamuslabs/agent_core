@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::agent_tool_budget::AgentToolBudgetMeta;
 use crate::session::AgentConfig;
 use log::warn;
 
@@ -82,6 +83,33 @@ impl GuardrailState {
     /// Increment after each tool execution attempt (success, soft error payload, or synthetic limit error).
     pub fn count_tool_executed(&mut self, n: u32) {
         self.tool_calls_executed = self.tool_calls_executed.saturating_add(n);
+    }
+
+    /// Snapshot of proactive `_agent` budget metadata for tool message injection.
+    pub fn tool_budget_snapshot(
+        &self,
+        config: &AgentConfig,
+        last_model_response_had_append_blocks: bool,
+    ) -> AgentToolBudgetMeta {
+        let limit = self.effective_max_tool_calls(config, last_model_response_had_append_blocks);
+        let used = self.tool_calls_executed;
+        let allow = self.allow_tool_call(config, last_model_response_had_append_blocks);
+        let reason = if allow {
+            None
+        } else {
+            Some(crate::agent_tool_budget::resolve_shutdown_reason(
+                self,
+                config,
+                last_model_response_had_append_blocks,
+            ))
+        };
+        AgentToolBudgetMeta {
+            tool_calls_used: used,
+            tool_calls_limit: limit,
+            tool_calls_remaining: limit.saturating_sub(used),
+            allow_tool_call: allow,
+            reason,
+        }
     }
 
     /// End-of-turn accounting after all parallel tools in the model response are handled.
@@ -227,6 +255,53 @@ mod tests {
         assert!(!is_soft_failure_result_json(
             r#"{"data":null,"results":[]}"#
         ));
+    }
+
+    /// TB-01 — snapshot after mid-loop guardrail accounting (used=17, remaining=3).
+    #[test]
+    fn tb_01_tool_budget_snapshot_mid_loop() {
+        let mut g = GuardrailState {
+            tool_calls_executed: 17,
+            ..GuardrailState::default()
+        };
+        let c = cfg();
+        let snapshot = g.tool_budget_snapshot(&c, false);
+        assert_eq!(snapshot.tool_calls_used, 17, "TB-01 used");
+        assert_eq!(snapshot.tool_calls_limit, 20, "TB-01 limit");
+        assert_eq!(snapshot.tool_calls_remaining, 3, "TB-01 remaining");
+        assert!(snapshot.allow_tool_call, "TB-01 allow");
+        assert!(snapshot.reason.is_none(), "TB-01 reason absent");
+        let _ = &mut g;
+    }
+
+    /// TB-03 — first tool call reports used=1 remaining=19.
+    #[test]
+    fn tb_03_tool_budget_snapshot_first_tool() {
+        let g = GuardrailState {
+            tool_calls_executed: 1,
+            ..GuardrailState::default()
+        };
+        let c = cfg();
+        let snapshot = g.tool_budget_snapshot(&c, false);
+        assert_eq!(snapshot.tool_calls_used, 1, "TB-03 used");
+        assert_eq!(snapshot.tool_calls_limit, 20, "TB-03 limit");
+        assert_eq!(snapshot.tool_calls_remaining, 19, "TB-03 remaining");
+        assert!(snapshot.allow_tool_call, "TB-03 allow");
+    }
+
+    /// TB-09 — greedy append_blocks raises effective limit to 35.
+    #[test]
+    fn tb_09_tool_budget_snapshot_greedy_append_blocks() {
+        let g = GuardrailState {
+            tool_calls_executed: 21,
+            ..GuardrailState::default()
+        };
+        let c = cfg();
+        let snapshot = g.tool_budget_snapshot(&c, true);
+        assert_eq!(snapshot.tool_calls_limit, 41, "TB-09 limit");
+        assert_eq!(snapshot.tool_calls_used, 21, "TB-09 used");
+        assert_eq!(snapshot.tool_calls_remaining, 20, "TB-09 remaining");
+        assert!(snapshot.allow_tool_call, "TB-09 allow");
     }
 
     /// TOOL-PARSE-002 E-06 — envelope streak must disable `allow_tool_call` at retry limit.

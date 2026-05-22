@@ -89,4 +89,20 @@ impl SessionHandle {
             terminal_action: inner.terminal_action.clone(),
         }
     }
+
+    /// Seeds guardrail counters for integration tests (`tool_budget_agent_meta_test`).
+    pub fn integration_test_seed_guardrails(
+        &self,
+        tool_calls_executed: u32,
+        consecutive_soft_failure_turns: u32,
+        consecutive_envelope_parse_failures: u32,
+        last_model_response_had_append_blocks: bool,
+    ) {
+        let mut inner = self.lock_inner();
+        inner.guardrails.tool_calls_executed = tool_calls_executed;
+        inner.guardrails.consecutive_soft_failure_turns = consecutive_soft_failure_turns;
+        inner.guardrails.consecutive_envelope_parse_failures =
+            consecutive_envelope_parse_failures;
+        inner.last_model_response_had_append_blocks = last_model_response_had_append_blocks;
+    }
 }

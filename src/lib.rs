@@ -33,6 +33,7 @@ pub trait AgentSummarizerCallback: Send + Sync {
 }
 
 pub mod action;
+pub mod agent_tool_budget;
 pub mod artifact_finalize;
 pub mod budget;
 pub mod canonicalize;

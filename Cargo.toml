@@ -89,6 +89,10 @@ path = "tests/leaked_tool_recovery_test.rs"
 name = "executed_tool_call_replay_test"
 path = "tests/executed_tool_call_replay_test.rs"
 
+[[test]]
+name = "tool_budget_agent_meta_test"
+path = "tests/tool_budget_agent_meta_test.rs"
+
 [[example]]
 name = "mock_desktop_loop"
 path = "examples/mock_desktop_loop.rs"
