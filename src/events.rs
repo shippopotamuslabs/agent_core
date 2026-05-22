@@ -135,6 +135,10 @@ pub enum AgentEvent {
         tool_name: String,
         timeout_ms: u64,
     },
+    /// User-visible assistant text synthesized by the engine (not streamed from the model).
+    VisibleAssistantText {
+        text: String,
+    },
 }
 
 impl std::fmt::Display for AgentEvent {
@@ -184,6 +188,9 @@ impl std::fmt::Display for AgentEvent {
                 tool_name,
                 timeout_ms,
             } => write!(f, "ToolTimedOut({tool_name}, timeout_ms={timeout_ms})"),
+            AgentEvent::VisibleAssistantText { text } => {
+                write!(f, "VisibleAssistantText({} chars)", text.len())
+            }
         }
     }
 }

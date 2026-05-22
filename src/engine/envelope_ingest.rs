@@ -1,6 +1,7 @@
 //! Turn-end envelope ingest (TOOL-PARSE-002).
 
 use crate::engine::leaked_tool_recovery::resolve_model_turn_text;
+use crate::tool_parse::envelope_error::{tools_blocked_nudge_json, TOOLS_BLOCKED_USER_FALLBACK};
 use crate::tool_parse::envelope_failure_json;
 use crate::tool_parse::parse_tool_calls;
 use crate::turn_io::RawToolCall;
@@ -16,6 +17,12 @@ pub enum EnvelopeIngestOutcome {
         error_json_for_model: String,
         visible_assistant_text: String,
     },
+    /// Tool syntax detected while `allow_tool_call` is false.
+    ToolsBlocked {
+        nudge_json_for_model: String,
+        visible_assistant_text: String,
+        user_fallback_text: String,
+    },
 }
 
 /// Detect leaked envelopes in assistant text, reify tool calls, and strip marker regions.
@@ -26,6 +33,20 @@ pub fn ingest_model_response_envelopes(
 ) -> (EnvelopeIngestOutcome, Vec<RawToolCall>) {
     let text = assistant_text.unwrap_or("");
     let resolution = resolve_model_turn_text(text, native_tool_calls, allow_tool_call);
+
+    if !allow_tool_call {
+        if resolution.had_strong_tool_marker {
+            return (
+                EnvelopeIngestOutcome::ToolsBlocked {
+                    nudge_json_for_model: tools_blocked_nudge_json(),
+                    visible_assistant_text: resolution.visible_assistant_text,
+                    user_fallback_text: TOOLS_BLOCKED_USER_FALLBACK.to_string(),
+                },
+                Vec::new(),
+            );
+        }
+        return (EnvelopeIngestOutcome::NoMarkers, native_tool_calls.to_vec());
+    }
 
     if !resolution.had_strong_tool_marker {
         return (EnvelopeIngestOutcome::NoMarkers, native_tool_calls.to_vec());

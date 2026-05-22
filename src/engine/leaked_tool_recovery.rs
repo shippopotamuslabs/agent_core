@@ -19,17 +19,10 @@ pub fn resolve_model_turn_text(
     native_tool_calls: &[RawToolCall],
     allow_tool_call: bool,
 ) -> ModelTurnTextResolution {
-    if !allow_tool_call {
-        return ModelTurnTextResolution {
-            visible_assistant_text: buffered_text.to_string(),
-            native_tool_calls: native_tool_calls.to_vec(),
-            recovered_tool_calls: Vec::new(),
-            had_strong_tool_marker: false,
-        };
-    }
-
     let normalized = normalize_spaced_dsml(buffered_text);
-    let had_strong_tool_marker = first_strong_tool_marker_start(&normalized).is_some();
+    let text_markers = first_strong_tool_marker_start(&normalized).is_some();
+    let had_strong_tool_marker =
+        text_markers || (!allow_tool_call && !native_tool_calls.is_empty());
 
     if !had_strong_tool_marker {
         return ModelTurnTextResolution {
@@ -40,8 +33,31 @@ pub fn resolve_model_turn_text(
         };
     }
 
-    let batch = parse_tool_calls(&normalized);
-    let visible_assistant_text = visible_text_from_batch(&batch, buffered_text);
+    let batch = parse_tool_calls(if text_markers {
+        &normalized
+    } else {
+        buffered_text
+    });
+    let visible_assistant_text = if text_markers {
+        if !batch.successes.is_empty() {
+            visible_text_from_batch(&batch, buffered_text)
+        } else {
+            first_strong_tool_marker_start(&normalized)
+                .map(|start| buffered_text[..start].trim_end().to_string())
+                .unwrap_or_default()
+        }
+    } else {
+        buffered_text.to_string()
+    };
+
+    if !allow_tool_call {
+        return ModelTurnTextResolution {
+            visible_assistant_text,
+            native_tool_calls: native_tool_calls.to_vec(),
+            recovered_tool_calls: Vec::new(),
+            had_strong_tool_marker: true,
+        };
+    }
 
     if !native_tool_calls.is_empty() {
         return ModelTurnTextResolution {

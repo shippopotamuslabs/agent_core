@@ -117,13 +117,22 @@ fn sg_04_native_tools_do_not_flush_dsml_tail() {
 }
 
 #[test]
-fn sg_05_allow_tool_call_false() {
+fn sg_05_allow_tool_call_false_still_holds_back_tool_markers() {
     let mut gate = ToolStreamGate::new(false);
     let push = gate.push(r#"<tool_call>{"name":"web_search"}"#);
-    assert_eq!(
-        push.emitted_prefix, r#"<tool_call>{"name":"web_search"}"#,
-        "SG-05 emitted_prefix"
-    );
+    assert_eq!(push.emitted_prefix, "", "SG-05 emitted_prefix");
+    let finish = gate.finish(false);
+    assert_eq!(finish.trailing_flush, "", "SG-05 trailing_flush");
+    assert!(finish.has_tool_marker, "SG-05 has_tool_marker");
+}
+
+#[test]
+fn sg_05b_allow_tool_call_false_flushes_plain_prose() {
+    let mut gate = ToolStreamGate::new(false);
+    gate.push("All done.");
+    let finish = gate.finish(false);
+    assert_eq!(finish.trailing_flush, "All done.", "SG-05b trailing_flush");
+    assert!(!finish.has_tool_marker, "SG-05b has_tool_marker");
 }
 
 #[test]
@@ -220,13 +229,13 @@ fn cl_sg_04_json_prose_streams_through() {
 }
 
 #[test]
-fn cl_sg_05_allow_false_passthrough() {
+fn cl_sg_05_allow_false_still_holds_back_tool_markers() {
     let mut gate = ToolStreamGate::new(false);
     let push = gate.push(r#"<tool_call>{"name":"web_search"}"#);
-    assert_eq!(
-        push.emitted_prefix, r#"<tool_call>{"name":"web_search"}"#,
-        "CL-SG-05 emitted_prefix"
-    );
+    assert_eq!(push.emitted_prefix, "", "CL-SG-05 emitted_prefix");
+    let finish = gate.finish(false);
+    assert_eq!(finish.trailing_flush, "", "CL-SG-05 trailing_flush");
+    assert!(finish.has_tool_marker, "CL-SG-05 has_tool_marker");
 }
 
 #[test]

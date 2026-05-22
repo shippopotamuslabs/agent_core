@@ -160,6 +160,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 terminal_action: None,
                 last_model_response_had_append_blocks: false,
                 pending_artifact_ids: HashSet::new(),
+                tools_blocked_nudges_this_turn: 0,
             })),
         }
     }
@@ -281,6 +282,65 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     .on_tool_turn_finished(&cfg, 1, true, false, false, "agent_engine");
                 let last_tool_idx = g.session.messages.len().checked_sub(1);
                 inject_tool_budget_after_batch(&mut g, last_tool_idx);
+                return;
+            }
+            EnvelopeIngestOutcome::ToolsBlocked {
+                nudge_json_for_model,
+                visible_assistant_text,
+                user_fallback_text,
+            } => {
+                let assistant_id = format!(
+                    "a{}",
+                    g.session
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == AgentRole::Assistant)
+                        .count()
+                );
+                let can_nudge = g.tools_blocked_nudges_this_turn == 0
+                    && g.model_requests_this_turn < g.config.max_model_requests_per_turn;
+
+                if !can_nudge {
+                    g.session.messages.push(AgentMessage {
+                        id: assistant_id,
+                        role: AgentRole::Assistant,
+                        content: user_fallback_text.clone(),
+                        metadata: json!({ "tools_blocked_fallback": true }),
+                    });
+                    if g.config.enable_state_ledger {
+                        if let Some(message) = g.session.messages.last().cloned() {
+                            g.state_ledger.observe_assistant_message(&message);
+                        }
+                    }
+                    g.emit(AgentEvent::VisibleAssistantText {
+                        text: user_fallback_text.clone(),
+                    });
+                    g.finish_after_model_stop(response.finish_reason);
+                    return;
+                }
+
+                let assistant_id_clone = assistant_id.clone();
+                g.session.messages.push(AgentMessage {
+                    id: assistant_id,
+                    role: AgentRole::Assistant,
+                    content: visible_assistant_text.clone(),
+                    metadata: json!({ "envelope_ingest": "tools_blocked" }),
+                });
+                if g.config.enable_state_ledger {
+                    if let Some(message) = g.session.messages.last().cloned() {
+                        g.state_ledger.observe_assistant_message(&message);
+                    }
+                }
+                g.session.messages.push(AgentMessage {
+                    id: format!("tool-nudge-tools-blocked-{assistant_id_clone}"),
+                    role: AgentRole::Tool,
+                    content: nudge_json_for_model.clone(),
+                    metadata: json!({ "tools_blocked_nudge": true }),
+                });
+                let last_tool_idx = g.session.messages.len().checked_sub(1);
+                inject_tool_budget_after_batch(&mut g, last_tool_idx);
+                g.tools_blocked_nudges_this_turn += 1;
+                g.guardrails.reset_envelope_parse_failures();
                 return;
             }
         };

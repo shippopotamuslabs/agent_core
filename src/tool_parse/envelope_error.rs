@@ -5,6 +5,24 @@ use serde_json::json;
 use crate::catalog::ToolCatalog;
 use crate::tool_parse::result::{ToolParseFailure, ToolParseFailureReason};
 
+/// Shown in chat when the model keeps emitting tool syntax after tools were disabled.
+pub const TOOLS_BLOCKED_USER_FALLBACK: &str =
+    "Sorry, something went wrong on my end. Please try again.";
+
+/// Model-facing payload when tool calls are disabled but the model emitted tool syntax anyway.
+pub fn tools_blocked_nudge_json() -> String {
+    serde_json::to_string(&json!({
+        "error": "tool_calls_disabled",
+        "message": "Tool calls are disabled for this turn and will not be executed. \
+Do not emit tool_call, DSML, or function-call syntax. \
+Answer the user in plain text using what you already know."
+    }))
+    .unwrap_or_else(|_| {
+        r#"{"error":"tool_calls_disabled","message":"Tool calls are disabled. Answer in plain text only."}"#
+            .to_string()
+    })
+}
+
 /// Same top-level shape as repair reject payloads: `error` + `available_tools`.
 pub fn envelope_failure_json(failure: &ToolParseFailure) -> String {
     let message = envelope_failure_message(failure);

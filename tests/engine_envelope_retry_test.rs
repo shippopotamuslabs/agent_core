@@ -347,7 +347,7 @@ fn md_02_recovery_only_in_engine() {
 const CL_TR_05_LEAKED_TOOL_CALL: &str = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
 
 #[test]
-fn cl_tr_05_engine_allow_false_skips_leaked_tool_execution() {
+fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
         Arc::new(RecordingExecutor {
@@ -355,7 +355,21 @@ fn cl_tr_05_engine_allow_false_skips_leaked_tool_execution() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng);
+    let h = eng.create_session(
+        vec![user_msg()],
+        AgentConfig {
+            max_model_requests_per_turn: 10,
+            ..AgentConfig::default()
+        },
+        SessionCapabilities {
+            summarization_allowed: false,
+            kv_fixed: false,
+            tool_result_budget_tokens: None,
+            ..Default::default()
+        },
+        serde_json::Value::Null,
+        io_large(),
+    );
     for _ in 0..3 {
         let _ = eng.next_action(&h);
         eng.submit_model_response(&h, malformed_response());
@@ -380,14 +394,52 @@ fn cl_tr_05_engine_allow_false_skips_leaked_tool_execution() {
     );
     let next = eng.next_action(&h);
     assert!(
-        !matches!(next, AgentAction::ExecuteTools(_)),
-        "CL-TR-05 must not ExecuteTools when allow_tool_call false, got {next:?}"
+        matches!(next, AgentAction::CallModel(_)),
+        "CL-TR-05 first blocked response must nudge with another CallModel, got {next:?}"
     );
     let snapshot = h.integration_test_snapshot();
     assert_eq!(
         last_assistant_content(&snapshot),
-        CL_TR_05_LEAKED_TOOL_CALL,
-        "CL-TR-05 assistant content verbatim"
+        "",
+        "CL-TR-05 stripped assistant content before nudge"
+    );
+    assert!(
+        snapshot.messages.iter().any(|m| {
+            m.role == AgentRole::Tool
+                && m.metadata
+                    .get("tools_blocked_nudge")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        }),
+        "CL-TR-05 must insert tools_blocked nudge"
+    );
+
+    let AgentAction::CallModel(retry) = eng.next_action(&h) else {
+        panic!("CL-TR-05 expected retry CallModel");
+    };
+    assert!(
+        !retry.allow_tool_call,
+        "CL-TR-05 retry must remain allow_tool_call false"
+    );
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(CL_TR_05_LEAKED_TOOL_CALL.into()),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
+        },
+    );
+    let next = eng.next_action(&h);
+    assert!(
+        matches!(next, AgentAction::Finished),
+        "CL-TR-05 second blocked response must finish, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        "Sorry, something went wrong on my end. Please try again.",
+        "CL-TR-05 user fallback"
     );
 }
 
