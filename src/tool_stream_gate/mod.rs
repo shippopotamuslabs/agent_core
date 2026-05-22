@@ -11,6 +11,7 @@ pub use result::{PushResult, StreamGateFinish};
 
 #[derive(Debug, Default)]
 pub struct ToolStreamGate {
+    #[allow(dead_code)]
     allow_tool_call: bool,
     buffer: String,
     emitted_length: usize,
@@ -32,14 +33,9 @@ impl ToolStreamGate {
 
     pub fn push(&mut self, chunk: &str) -> PushResult {
         self.buffer.push_str(chunk);
-        if !self.allow_tool_call {
-            let emitted = chunk.to_string();
-            self.emitted_length = self.buffer.len();
-            return PushResult {
-                emitted_prefix: emitted,
-            };
-        }
-
+        // Hold back leaked tool syntax for UI streaming even when the engine has disabled
+        // tool execution (`allow_tool_call = false`). Execution policy is enforced in
+        // `engine::ingest_model_response_envelopes`; the gate only controls visible tokens.
         let safe_end = safe_emit_end(&self.buffer);
         let mut emitted_prefix = String::new();
         if safe_end > self.emitted_length {
@@ -50,15 +46,6 @@ impl ToolStreamGate {
     }
 
     pub fn finish(&mut self, has_native_tool_calls: bool) -> StreamGateFinish {
-        if !self.allow_tool_call {
-            let trailing_flush = self.buffer[self.emitted_length..].to_string();
-            self.emitted_length = self.buffer.len();
-            return StreamGateFinish {
-                trailing_flush,
-                has_tool_marker: false,
-            };
-        }
-
         let marker_start = first_strong_tool_marker_start(&self.buffer);
         let has_tool_marker = marker_start.is_some();
         let trailing_flush = if has_native_tool_calls {

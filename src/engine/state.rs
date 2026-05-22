@@ -63,6 +63,7 @@ pub(super) struct InnerSession {
     pub(super) terminal_action: Option<AgentAction>,
     pub(super) last_model_response_had_append_blocks: bool,
     pub(super) pending_artifact_ids: HashSet<String>,
+    pub(super) tools_blocked_nudges_this_turn: u32,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).

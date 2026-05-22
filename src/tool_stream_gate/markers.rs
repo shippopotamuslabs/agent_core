@@ -42,8 +42,9 @@ pub fn first_tool_marker_start(text: &str) -> Option<usize> {
 
 /// Collapse spaced DSML spellings (`< | DSML |` → `<|DSML|`) before marker detect / parse.
 pub fn normalize_spaced_dsml(text: &str) -> String {
+    // Qwen / OpenRouter sometimes emit `< | DSML | | tag>` (extra pipe after DSML).
     static SPACED_DSML: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?is)(</?)\s*\|\s*DSML\s*\|\s*").unwrap());
+        Lazy::new(|| Regex::new(r"(?is)(</?)\s*(?:\|\s*)+DSML(?:\s*\|)+\s*").unwrap());
     SPACED_DSML
         .replace_all(text, |caps: &regex::Captures| format!("{}|DSML|", &caps[1]))
         .into_owned()

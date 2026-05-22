@@ -96,13 +96,11 @@ fn cl_tr_04_prose_json_flushes_verbatim() {
 }
 
 #[test]
-fn cl_tr_05_allow_false_bypass() {
+fn cl_tr_05_allow_false_still_detects_and_strips_tool_markers() {
     let buffered = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
     let resolution = resolve_model_turn_text(buffered, &[], false);
-    assert_eq!(
-        resolution.visible_assistant_text, buffered,
-        "CL-TR-05 visible text"
-    );
+    assert_eq!(resolution.visible_assistant_text, "", "CL-TR-05 visible text");
+    assert!(resolution.had_strong_tool_marker, "CL-TR-05 had marker");
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-05 recovered must be empty"
@@ -112,9 +110,16 @@ fn cl_tr_05_allow_false_bypass() {
 #[test]
 fn cl_tr_06_normalize_spaced_dsml() {
     use agent_core::tool_stream_gate::normalize_spaced_dsml;
-    let input = "< | DSML | tool_calls>";
-    let normalized = normalize_spaced_dsml(input);
-    assert_eq!(normalized, "<|DSML|tool_calls>", "CL-TR-06 normalized");
+    assert_eq!(
+        normalize_spaced_dsml("< | DSML | tool_calls>"),
+        "<|DSML|tool_calls>",
+        "CL-TR-06 single-pipe normalized"
+    );
+    assert_eq!(
+        normalize_spaced_dsml("< | DSML | | tool_calls>"),
+        "<|DSML|tool_calls>",
+        "CL-TR-06 double-pipe normalized"
+    );
 }
 
 #[test]

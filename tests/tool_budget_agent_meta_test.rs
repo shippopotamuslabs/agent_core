@@ -343,7 +343,8 @@ fn tb_05_soft_failure_streak_sets_reason() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
-    h.integration_test_seed_guardrails(5, 3, 0, false);
+    // Streak 2: allow still true for the model tool request; becomes 3 after soft-failure result.
+    h.integration_test_seed_guardrails(5, 2, 0, false);
 
     drive_model_tool_batch(
         &eng,
@@ -377,42 +378,30 @@ fn tb_06_envelope_parse_streak_sets_reason() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
-    h.integration_test_seed_guardrails(2, 0, 3, false);
+    // Envelope streak 2: allow true for CallModel; hits limit after parse failure.
+    h.integration_test_seed_guardrails(2, 0, 2, false);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
         ModelResponse {
-            assistant_text: None,
-            tool_calls: vec![RawToolCall {
-                id: Some("c1".into()),
-                name: "web_search".into(),
-                arguments_json: r#"{"query":"x"}"#.into(),
-            }],
+            assistant_text: Some(
+                r#"<|DSML|tool_calls><|DSML|invoke name="web_search"></|DSML|invoke>"#.into(),
+            ),
+            tool_calls: vec![],
             finish_reason: FinishReason::ToolUse,
             provider_reasoning_content: None,
         },
     );
-    // Native tool responses reset envelope streak; re-seed before tool results.
-    h.integration_test_seed_guardrails(2, 0, 3, false);
-    match eng.next_action(&h) {
-        AgentAction::ExecuteTools(_) => {}
-        other => panic!("TB-06 expected ExecuteTools, got {other:?}"),
-    }
-    eng.submit_tool_results(
-        &h,
-        vec![ToolResultRecord {
-            call_id: "c1".into(),
-            result_json: r#"{"results":[]}"#.into(),
-            truncated: false,
-            soft_failure: false,
-            result_metadata: None,
-        }],
-    );
 
     let snapshot = h.integration_test_snapshot();
-    let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let agent = agent_block(&tool_msg.content);
+    let last_tool = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == AgentRole::Tool)
+        .expect("TB-06 tool message");
+    let agent = agent_block(&last_tool.content);
     assert_eq!(agent["allow_tool_call"], false, "TB-06 allow");
     assert_eq!(
         agent["reason"].as_str(),

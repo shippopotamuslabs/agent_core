@@ -979,6 +979,9 @@ pub enum FfiAgentEvent {
         tool_name: String,
         timeout_ms: u64,
     },
+    VisibleAssistantText {
+        text: String,
+    },
 }
 
 impl From<AgentEvent> for FfiAgentEvent {
@@ -1046,6 +1049,9 @@ impl From<AgentEvent> for FfiAgentEvent {
                 tool_name,
                 timeout_ms,
             },
+            AgentEvent::VisibleAssistantText { text } => {
+                FfiAgentEvent::VisibleAssistantText { text }
+            }
         }
     }
 }
