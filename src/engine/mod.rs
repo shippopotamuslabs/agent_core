@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 
 use crate::action::AgentAction;
+use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::artifact_finalize::{record_artifact_progress, synthetic_finalize_calls};
 use crate::budget::{effective_tool_result_budget, should_compact_at, TokenLedger};
 use crate::catalog::ToolCatalog;
@@ -45,6 +46,22 @@ use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
+
+fn inject_tool_budget_after_batch(
+    session: &mut InnerSession,
+    last_batch_tool_message_index: Option<usize>,
+) {
+    let meta = session.guardrails.tool_budget_snapshot(
+        &session.config,
+        session.last_model_response_had_append_blocks,
+    );
+    inject_tool_budget_into_session(
+        &mut session.session,
+        session.turn_index,
+        &meta,
+        last_batch_tool_message_index,
+    );
+}
 
 /// Generic agent loop engine (desktop-ready traits; Android drives via `submit_*`).
 pub struct AgentEngine<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> {
@@ -262,6 +279,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 g.guardrails.count_tool_executed(1);
                 g.guardrails
                     .on_tool_turn_finished(&cfg, 1, true, false, false, "agent_engine");
+                let last_tool_idx = g.session.messages.len().checked_sub(1);
+                inject_tool_budget_after_batch(&mut g, last_tool_idx);
                 return;
             }
         };
@@ -458,6 +477,12 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             false,
             "agent_engine",
         );
+        let last_tool_idx = g
+            .session
+            .messages
+            .iter()
+            .rposition(|message| message.role == AgentRole::Tool);
+        inject_tool_budget_after_batch(&mut g, last_tool_idx);
     }
 
     pub fn submit_tool_results(&self, handle: &SessionHandle, results: Vec<ToolResultRecord>) {
@@ -483,6 +508,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         g.pending_finalize_after_tool_stop = false;
 
         let mut processed_results: Vec<ToolResultRecord> = Vec::with_capacity(results.len());
+        let mut last_batch_tool_message_index: Option<usize> = None;
 
         for (call, mut res) in calls.iter().zip(results.into_iter()) {
             let spill_tokens_before = TokenLedger::estimate(
@@ -543,6 +569,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 content: res.result_json.clone(),
                 metadata: json!({"call_id": res.call_id, "tool_name": call.name}),
             });
+            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
                 g.state_ledger.observe_tool_result(&res);
             }
@@ -592,6 +619,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             g.pending_tool_turn_parallel = 0;
             g.pending_reject_count_this_turn = 0;
         }
+
+        inject_tool_budget_after_batch(&mut g, last_batch_tool_message_index);
 
         if g.pending_auto_finalize_finish {
             g.pending_auto_finalize_finish = false;
