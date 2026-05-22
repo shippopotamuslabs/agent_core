@@ -1,6 +1,6 @@
 //! Mutable per-session engine state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::action::AgentAction;
@@ -13,7 +13,7 @@ use crate::message::AgentMessage;
 use crate::message::ToolCallRecord;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::state_ledger::StateLedger;
-use crate::turn_io::{ModelRequest, SummaryRequest};
+use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
 #[derive(Debug, Clone)]
@@ -64,6 +64,10 @@ pub(super) struct InnerSession {
     pub(super) last_model_response_had_append_blocks: bool,
     pub(super) pending_artifact_ids: HashSet<String>,
     pub(super) tools_blocked_nudges_this_turn: u32,
+    /// Model-requested tool calls for the in-flight turn, in provider order.
+    pub(super) pending_tool_turn_request_order: Vec<RawToolCall>,
+    /// Reject/suggest tool payloads keyed by `call_id`, flushed after successful results.
+    pub(super) pending_reject_tool_by_call_id: HashMap<String, AgentMessage>,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).
