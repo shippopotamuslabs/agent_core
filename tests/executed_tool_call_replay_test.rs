@@ -318,7 +318,7 @@ fn etr_r_05_reject_only_turn_persists_empty_raw_tool_calls() {
 // ── ETR-R-06 ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_length_one() {
+fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids() {
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
         Arc::new(RecordingExecutor {
@@ -352,16 +352,41 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_length_one() {
     };
     let snapshot = h.integration_test_snapshot();
     let raw = raw_tool_calls_array(&snapshot);
-    assert_eq!(raw.len(), 1, "ETR-R-06 raw_tool_calls length");
+    assert_eq!(raw.len(), 2, "ETR-R-06 raw_tool_calls length");
     assert_eq!(raw_tool_call_field(&raw[0], "id"), "c-ok");
     assert_eq!(raw_tool_call_field(&raw[0], "name"), "web_search");
+    assert_eq!(raw_tool_call_field(&raw[1], "id"), "c-bad");
     assert_eq!(calls[0].call_id, "c-ok");
+
+    eng.submit_tool_results(
+        &h,
+        vec![ToolResultRecord {
+            call_id: "c-ok".into(),
+            result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = h.integration_test_snapshot();
+    let tool_msgs: Vec<_> = snapshot
+        .messages
+        .iter()
+        .filter(|m| m.role == AgentRole::Tool)
+        .collect();
+    assert_eq!(tool_msgs.len(), 2, "ETR-R-06 two tool messages");
     assert!(
-        snapshot
-            .messages
-            .iter()
-            .any(|m| m.id.contains("tool-err-c-bad")),
-        "ETR-R-06 tool-err-c-bad message"
+        tool_msgs[0]
+            .metadata
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            == Some("c-ok"),
+        "ETR-R-06 success tool first"
+    );
+    assert!(
+        tool_msgs[1].id.contains("tool-err-c-bad") || tool_msgs[1].metadata.get("call_id").is_some(),
+        "ETR-R-06 reject tool second"
     );
 }
 

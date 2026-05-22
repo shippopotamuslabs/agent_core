@@ -8,7 +8,7 @@ pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
 pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -43,7 +43,7 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::state_ledger::StateLedger;
 use crate::tool_context::build_tool_context_index;
 use crate::truncate::truncate_tool_result_json;
-use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, SummaryResult};
+use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
 
@@ -161,6 +161,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 last_model_response_had_append_blocks: false,
                 pending_artifact_ids: HashSet::new(),
                 tools_blocked_nudges_this_turn: 0,
+                pending_tool_turn_request_order: Vec::new(),
+                pending_reject_tool_by_call_id: HashMap::new(),
             })),
         }
     }
@@ -412,6 +414,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let mut repaired: Vec<ToolCallRecord> = Vec::new();
         let mut rejects = 0usize;
         let parallel = merged_tool_calls.len();
+        g.pending_tool_turn_request_order = merged_tool_calls.clone();
+        g.pending_reject_tool_by_call_id.clear();
 
         for raw in &merged_tool_calls {
             let (outcome, evs) = ToolRepairPipeline::repair(raw, ToolCatalog::global());
@@ -444,15 +448,16 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                         tool_name: raw.name.clone(),
                         turn_index: ti,
                     });
-                    g.session.messages.push(AgentMessage {
-                        id: format!(
-                            "tool-err-{}",
-                            raw.id.clone().unwrap_or_else(|| "noid".into())
-                        ),
-                        role: AgentRole::Tool,
-                        content: error_json_for_model,
-                        metadata: json!({"call_id": raw.id}),
-                    });
+                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
+                    g.pending_reject_tool_by_call_id.insert(
+                        call_id.clone(),
+                        AgentMessage {
+                            id: format!("tool-err-{call_id}"),
+                            role: AgentRole::Tool,
+                            content: error_json_for_model,
+                            metadata: json!({"call_id": call_id}),
+                        },
+                    );
                     rejects += 1;
                 }
                 RepairOutcome::Suggest {
@@ -469,29 +474,28 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                         "available_tools": ToolCatalog::global().all().iter().map(|t| &t.name).collect::<Vec<_>>(),
                     })
                     .to_string();
-                    g.session.messages.push(AgentMessage {
-                        id: format!(
-                            "tool-err-{}",
-                            raw.id.clone().unwrap_or_else(|| "noid".into())
-                        ),
-                        role: AgentRole::Tool,
-                        content: err,
-                        metadata: json!({"call_id": raw.id}),
-                    });
+                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
+                    g.pending_reject_tool_by_call_id.insert(
+                        call_id.clone(),
+                        AgentMessage {
+                            id: format!("tool-err-{call_id}"),
+                            role: AgentRole::Tool,
+                            content: err,
+                            metadata: json!({"call_id": call_id}),
+                        },
+                    );
                     rejects += 1;
                 }
             }
         }
 
         if !merged_tool_calls.is_empty() {
-            let provider_calls = if repaired.is_empty() {
-                Vec::new()
-            } else {
-                provider_tool_calls::provider_facing_raw_tool_calls(&repaired)
-            };
             provider_tool_calls::patch_last_assistant_raw_tool_calls(
                 &mut g.session,
-                provider_calls,
+                provider_tool_calls::provider_facing_raw_tool_calls_for_turn(
+                    &merged_tool_calls,
+                    &repaired,
+                ),
             );
         }
 
@@ -537,11 +541,15 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             false,
             "agent_engine",
         );
-        let last_tool_idx = g
-            .session
-            .messages
-            .iter()
-            .rposition(|message| message.role == AgentRole::Tool);
+        let mut last_tool_idx = None;
+        for raw in std::mem::take(&mut g.pending_tool_turn_request_order) {
+            let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
+            if let Some(message) = g.pending_reject_tool_by_call_id.remove(&call_id) {
+                g.session.messages.push(message);
+                last_tool_idx = Some(g.session.messages.len() - 1);
+            }
+        }
+        g.pending_reject_tool_by_call_id.clear();
         inject_tool_budget_after_batch(&mut g, last_tool_idx);
     }
 
@@ -567,10 +575,41 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         g.phase = EnginePhase::Idle;
         g.pending_finalize_after_tool_stop = false;
 
-        let mut processed_results: Vec<ToolResultRecord> = Vec::with_capacity(results.len());
+        let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
+        let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
+        let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> = calls
+            .iter()
+            .zip(results.into_iter())
+            .map(|(call, res)| (call.call_id.clone(), (call.clone(), res)))
+            .collect();
+
+        let mut processed_results: Vec<ToolResultRecord> =
+            Vec::with_capacity(executed_by_call_id.len());
         let mut last_batch_tool_message_index: Option<usize> = None;
 
-        for (call, mut res) in calls.iter().zip(results.into_iter()) {
+        let flush_order: Vec<RawToolCall> = if turn_order.is_empty() {
+            calls
+                .iter()
+                .map(|call| RawToolCall {
+                    id: Some(call.call_id.clone()),
+                    name: call.name.clone(),
+                    arguments_json: call.arguments_json.clone(),
+                })
+                .collect()
+        } else {
+            turn_order
+        };
+
+        for raw in &flush_order {
+            let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
+            if let Some(reject_msg) = reject_by_call_id.remove(&call_id) {
+                g.session.messages.push(reject_msg);
+                last_batch_tool_message_index = Some(g.session.messages.len() - 1);
+                continue;
+            }
+            let Some((call, mut res)) = executed_by_call_id.remove(&call_id) else {
+                continue;
+            };
             let spill_tokens_before = TokenLedger::estimate(
                 &g.session,
                 &g.config,
@@ -586,7 +625,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 spill_tool_result_if_needed(
                     &mut g.context_store,
                     &mut stored_copy,
-                    call,
+                    &call,
                     threshold,
                     turn_index,
                 )
@@ -596,7 +635,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 spill_tool_result_if_needed(
                     &mut g.context_store,
                     &mut res,
-                    call,
+                    &call,
                     threshold,
                     turn_index,
                 )
@@ -623,6 +662,87 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 &res.result_json,
             );
 
+            g.session.messages.push(AgentMessage {
+                id: format!("tool-{}", res.call_id),
+                role: AgentRole::Tool,
+                content: res.result_json.clone(),
+                metadata: json!({"call_id": res.call_id, "tool_name": call.name}),
+            });
+            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
+            if g.config.enable_state_ledger {
+                g.state_ledger.observe_tool_result(&res);
+            }
+            if spilled.is_some() && call.name != "append_blocks" {
+                let spill_tokens_after = TokenLedger::estimate(
+                    &g.session,
+                    &g.config,
+                    &g.io.provider,
+                    g.io.context_window_tokens,
+                    &g.io.tools_schema_json,
+                )
+                .total_tokens;
+                g.emit(AgentEvent::CompactionApplied(CompactionEvent {
+                    tier: CompactionTier::ToolSpill,
+                    tokens_before: spill_tokens_before,
+                    tokens_after: spill_tokens_after,
+                    trigger: CompactionTrigger::PostToolResult,
+                }));
+            }
+            processed_results.push(res);
+        }
+
+        for (_, reject_msg) in reject_by_call_id {
+            g.session.messages.push(reject_msg);
+            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
+        }
+        for (_, (call, mut res)) in executed_by_call_id {
+            let spill_tokens_before = TokenLedger::estimate(
+                &g.session,
+                &g.config,
+                &g.io.provider,
+                g.io.context_window_tokens,
+                &g.io.tools_schema_json,
+            )
+            .total_tokens;
+            let threshold = g.config.tool_spill_threshold_bytes;
+            let turn_index = g.turn_index;
+            let spilled = if call.name == "append_blocks" {
+                let mut stored_copy = res.clone();
+                spill_tool_result_if_needed(
+                    &mut g.context_store,
+                    &mut stored_copy,
+                    &call,
+                    threshold,
+                    turn_index,
+                )
+            } else {
+                spill_tool_result_if_needed(
+                    &mut g.context_store,
+                    &mut res,
+                    &call,
+                    threshold,
+                    turn_index,
+                )
+            };
+            if call.name != "append_blocks" {
+                let pressure = TokenLedger::estimate(
+                    &g.session,
+                    &g.config,
+                    &g.io.provider,
+                    g.io.context_window_tokens,
+                    &g.io.tools_schema_json,
+                );
+                let budget = effective_tool_result_budget(&pressure, &g.capabilities, &g.config);
+                let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
+                res.result_json = payload;
+                res.truncated = res.truncated || truncated;
+            }
+            record_artifact_progress(
+                &mut g.pending_artifact_ids,
+                &call.name,
+                &call.arguments_json,
+                &res.result_json,
+            );
             g.session.messages.push(AgentMessage {
                 id: format!("tool-{}", res.call_id),
                 role: AgentRole::Tool,
