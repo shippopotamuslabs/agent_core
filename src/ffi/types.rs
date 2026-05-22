@@ -278,6 +278,7 @@ pub struct FfiModelResponse {
     pub assistant_text: Option<String>,
     pub tool_calls: Vec<FfiRawToolCall>,
     pub finish_reason: FfiFinishReason,
+    pub provider_reasoning_content: Option<String>,
 }
 
 impl From<FfiModelResponse> for ModelResponse {
@@ -286,6 +287,7 @@ impl From<FfiModelResponse> for ModelResponse {
             assistant_text: m.assistant_text,
             tool_calls: m.tool_calls.into_iter().map(Into::into).collect(),
             finish_reason: m.finish_reason.into(),
+            provider_reasoning_content: m.provider_reasoning_content,
         }
     }
 }
@@ -296,6 +298,7 @@ impl From<ModelResponse> for FfiModelResponse {
             assistant_text: m.assistant_text,
             tool_calls: m.tool_calls.into_iter().map(Into::into).collect(),
             finish_reason: m.finish_reason.into(),
+            provider_reasoning_content: m.provider_reasoning_content,
         }
     }
 }

@@ -184,6 +184,7 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
                 arguments_json: r#"{"query":"x"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     // engine should detect mid-turn pressure and request summary
@@ -250,6 +251,7 @@ fn post_tool_small_result_on_large_window_skips_compaction() {
                 arguments_json: r#"{"query":"example"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);
@@ -306,6 +308,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
                 arguments_json: "{}".into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);
@@ -361,6 +364,7 @@ fn s5_artifact_squash_is_preferred_over_fifo() {
                 arguments_json: r#"{"artifactId":"art-1","blocks":[]}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);
@@ -662,6 +666,7 @@ fn submit_model_response_while_awaiting_summary_is_invalid_transition() {
             assistant_text: Some("should be rejected".into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
 
@@ -708,6 +713,7 @@ fn e3_over_threshold_pressure_with_no_eligible_tier_fails_loudly() {
                 arguments_json: "{}".into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     // mid-turn compaction is supposed to run now
@@ -799,6 +805,7 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
                 arguments_json: "{}".into(),
             }],
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
     let _ = eng.next_action(&handle);

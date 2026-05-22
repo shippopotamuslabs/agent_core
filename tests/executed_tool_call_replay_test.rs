@@ -102,10 +102,7 @@ fn raw_tool_calls_array(snapshot: &SessionTestSnapshot) -> &[serde_json::Value] 
         .unwrap_or(&[])
 }
 
-fn raw_tool_call_field<'a>(
-    entry: &'a serde_json::Value,
-    field: &str,
-) -> &'a str {
+fn raw_tool_call_field<'a>(entry: &'a serde_json::Value, field: &str) -> &'a str {
     entry
         .get(field)
         .and_then(|v| v.as_str())
@@ -124,6 +121,7 @@ fn submit_tool_use(
             assistant_text: None,
             tool_calls,
             finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
         },
     );
 }
@@ -135,7 +133,11 @@ fn etr_r_01_fence_wrapped_arguments_canonicalized_in_raw_tool_calls() {
     let exec = Arc::new(RecordingExecutor {
         results: Mutex::new(Vec::new()),
     });
-    let eng = AgentEngine::new(Arc::new(PanicTransport), exec.clone(), Arc::new(NoOpSummarizer));
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        exec.clone(),
+        Arc::new(NoOpSummarizer),
+    );
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -172,7 +174,11 @@ fn etr_r_02_fuzzy_tool_name_web_seach_stored_as_web_search() {
     let exec = Arc::new(RecordingExecutor {
         results: Mutex::new(Vec::new()),
     });
-    let eng = AgentEngine::new(Arc::new(PanicTransport), exec.clone(), Arc::new(NoOpSummarizer));
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        exec.clone(),
+        Arc::new(NoOpSummarizer),
+    );
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -450,6 +456,7 @@ fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
             assistant_text: Some(VALID_DSML_WEB_SEARCH.into()),
             tool_calls: vec![],
             finish_reason: FinishReason::Stop,
+            provider_reasoning_content: None,
         },
     );
     match eng.next_action(&h) {
@@ -462,7 +469,10 @@ fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
     let snapshot = h.integration_test_snapshot();
     let assistant = last_assistant_message(&snapshot);
     assert_eq!(
-        assistant.metadata.get("envelope_ingest").and_then(|v| v.as_str()),
+        assistant
+            .metadata
+            .get("envelope_ingest")
+            .and_then(|v| v.as_str()),
         Some("reified"),
         "ETR-R-09 envelope_ingest"
     );
@@ -502,9 +512,15 @@ fn etr_m_01_metadata_arguments_json_equals_execute_tools_record() {
     };
     let snapshot = h.integration_test_snapshot();
     let raw = raw_tool_calls_array(&snapshot);
-    assert_eq!(calls[0].arguments_json, raw_tool_call_field(&raw[0], "arguments_json"));
+    assert_eq!(
+        calls[0].arguments_json,
+        raw_tool_call_field(&raw[0], "arguments_json")
+    );
     assert_eq!(calls[0].arguments_json, "{\"query\":\"rust\"}");
-    assert_eq!(raw_tool_call_field(&raw[0], "arguments_json"), "{\"query\":\"rust\"}");
+    assert_eq!(
+        raw_tool_call_field(&raw[0], "arguments_json"),
+        "{\"query\":\"rust\"}"
+    );
     assert!(
         !raw_tool_call_field(&raw[0], "arguments_json").contains("```"),
         "ETR-M-01 no fences in metadata"
@@ -564,8 +580,8 @@ fn etr_m_03_metadata_must_not_contain_web_seach_typo() {
     );
     let _ = eng.next_action(&h);
     let snapshot = h.integration_test_snapshot();
-    let meta_str = serde_json::to_string(&last_assistant_message(&snapshot).metadata)
-        .expect("metadata json");
+    let meta_str =
+        serde_json::to_string(&last_assistant_message(&snapshot).metadata).expect("metadata json");
     assert!(
         !meta_str.contains("web_seach"),
         "ETR-M-03 metadata must not contain web_seach typo: {meta_str}"

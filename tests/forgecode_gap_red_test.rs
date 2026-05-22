@@ -120,6 +120,7 @@ fn response_with_tool(call_id: &str, name: &str) -> ModelResponse {
             arguments_json: r#"{"query":"same"}"#.into(),
         }],
         finish_reason: FinishReason::ToolUse,
+        provider_reasoning_content: None,
     }
 }
 
