@@ -65,6 +65,7 @@ mod tests {
                     result_json: r#"{"result":"ok"}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    activated_tool_names: Vec::new(),
                     result_metadata: None,
                 })
                 .collect())

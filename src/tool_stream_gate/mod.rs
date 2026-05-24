@@ -79,4 +79,3 @@ impl ToolStreamGate {
         &self.buffer
     }
 }
-

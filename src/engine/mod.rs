@@ -41,11 +41,59 @@ use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::request_pipeline::render_runtime_tool_view;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::state_ledger::StateLedger;
+use crate::tool_context::build_tool_context_index_with_registry;
+#[allow(unused_imports)]
 use crate::tool_context::build_tool_context_index;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
+
+fn parse_tool_names_from_schema(schema_json: &str) -> Vec<String> {
+    let parsed: serde_json::Value = match serde_json::from_str(schema_json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(array) = parsed.as_array() else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(String::from))
+        .collect()
+}
+
+/// Render an active-only schemas-JSON payload by filtering the registry by name.
+/// Preserves the order in `active_names`.
+fn render_active_schema_json(registry_json: &str, active_names: &[String]) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(registry_json) {
+        Ok(v) => v,
+        Err(_) => return "[]".to_string(),
+    };
+    let Some(array) = parsed.as_array() else {
+        return "[]".to_string();
+    };
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = array
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| (name, entry))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for name in active_names {
+        if let Some(entry) = by_name.get(name.as_str()) {
+            out.push((*entry).clone());
+        } else {
+            // If the registry doesn't carry this tool, advertise a stub so the active set
+            // remains structurally consistent.
+            out.push(serde_json::json!({"name": name}));
+        }
+    }
+    serde_json::Value::Array(out).to_string()
+}
 
 fn inject_tool_budget_after_batch(
     session: &mut InnerSession,
@@ -116,6 +164,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         let initial_msg_count = initial_messages.len() as u32;
+        let initial_active_tool_names_source = io.tools_schema_json.clone();
         let pending_work_items = session_context
             .get("pending_work")
             .and_then(|value| value.as_array())
@@ -163,6 +212,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 tools_blocked_nudges_this_turn: 0,
                 pending_tool_turn_request_order: Vec::new(),
                 pending_reject_tool_by_call_id: HashMap::new(),
+                active_tool_names: parse_tool_names_from_schema(&initial_active_tool_names_source),
             })),
         }
     }
@@ -418,6 +468,44 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         g.pending_reject_tool_by_call_id.clear();
 
         for raw in &merged_tool_calls {
+            // Lazy-disclosure guard: reject any call whose tool name is not part of the
+            // currently active set (the disclosure tool itself is always callable).
+            // Only enforce when active_tool_names has actually been initialized — empty
+            // active set means the host has not opted into the new contract yet.
+            let callable_now = !g.active_tool_names.is_empty()
+                && (g.active_tool_names.iter().any(|n| n == &raw.name)
+                    || raw.name == "disclose_tool_schemas");
+            if !g.active_tool_names.is_empty() && !callable_now {
+                let ti = g.turn_index;
+                g.emit(AgentEvent::ToolSoftFailure {
+                    tool_name: raw.name.clone(),
+                    turn_index: ti,
+                });
+                let mut available = g.active_tool_names.clone();
+                if !available.iter().any(|n| n == "disclose_tool_schemas") {
+                    available.insert(0, "disclose_tool_schemas".into());
+                }
+                let err = serde_json::json!({
+                    "error": format!(
+                        "Tool '{}' is not active. Call disclose_tool_schemas first.",
+                        raw.name
+                    ),
+                    "available_tools": available,
+                })
+                .to_string();
+                let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
+                g.pending_reject_tool_by_call_id.insert(
+                    call_id.clone(),
+                    AgentMessage {
+                        id: format!("tool-err-{call_id}"),
+                        role: AgentRole::Tool,
+                        content: err,
+                        metadata: json!({"call_id": call_id}),
+                    },
+                );
+                rejects += 1;
+                continue;
+            }
             let (outcome, evs) = ToolRepairPipeline::repair(raw, ToolCatalog::global());
             for ev in evs {
                 g.emit(ev);
@@ -577,6 +665,15 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
 
         let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
         let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
+        // Merge any disclosed tool names into the active set in first-seen order, deduped.
+        for res in &results {
+            for name in &res.activated_tool_names {
+                if !g.active_tool_names.iter().any(|existing| existing == name) {
+                    g.active_tool_names.push(name.clone());
+                }
+            }
+        }
+
         let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> = calls
             .iter()
             .zip(results.into_iter())
@@ -1428,17 +1525,37 @@ impl InnerSession {
         )
         .unwrap_or_else(|_| self.io.tools_schema_json.clone());
 
-        let tool_context_index = build_tool_context_index(
-            &self.io.tools_schema_json,
-            "",
+        let has_catalog = !self.io.tool_catalog_json.trim().is_empty()
+            && self.io.tool_catalog_json.trim() != "[]";
+        let has_registry = !self.io.tool_schema_registry_json.trim().is_empty()
+            && self.io.tool_schema_registry_json.trim() != "[]";
+
+        // Compute the live active-tool schema payload from the registry. When activation
+        // has not yet diverged from the host-supplied initial schema, use the original.
+        let active_schema_json: String = if has_registry && !self.active_tool_names.is_empty() {
+            render_active_schema_json(
+                &self.io.tool_schema_registry_json,
+                &self.active_tool_names,
+            )
+        } else {
+            self.io.tools_schema_json.clone()
+        };
+
+        let tool_context_index = build_tool_context_index_with_registry(
+            &active_schema_json,
+            &self.io.tool_catalog_json,
+            &self.io.tool_schema_registry_json,
             &mut self.context_store,
             &self.config,
             &self.capabilities,
         );
-        let tools_schema_json = if tool_context_index.is_some() {
+        let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
+            // Legacy single-channel deferral: zero out provider-facing schemas because
+            // the index already carries them. With the new compact/registry split we
+            // keep `tools_schema_json` as the active-only payload Kotlin supplied.
             "[]".to_string()
         } else {
-            self.io.tools_schema_json.clone()
+            active_schema_json
         };
 
         let file_context_index = self
@@ -1644,6 +1761,7 @@ mod tests {
                     result_json: r#"{"status":"success","stub":true}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    activated_tool_names: Vec::new(),
                     result_metadata: None,
                 })
                 .collect())
@@ -1654,6 +1772,8 @@ mod tests {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 256,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         }
@@ -1663,6 +1783,8 @@ mod tests {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         }
@@ -1792,6 +1914,7 @@ mod tests {
                     result_json: r#"{"results":[]}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    activated_tool_names: Vec::new(),
                     result_metadata: None,
                 })
                 .collect(),
@@ -1901,6 +2024,7 @@ mod tests {
                 result_json: r#"{"results":[]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );
@@ -2084,6 +2208,7 @@ mod tests {
                 result_json: r#"{"status":"success","artifactId":"art-1"}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );
@@ -2110,6 +2235,7 @@ mod tests {
                 result_json: r#"{"status":"success","isComplete":true}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );
@@ -2170,6 +2296,7 @@ mod tests {
                 result_json: r#"{"status":"success","artifactId":"art-1"}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );
@@ -2196,6 +2323,7 @@ mod tests {
                 result_json: r#"{"status":"success","isComplete":false}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );
@@ -2216,6 +2344,7 @@ mod tests {
                 result_json: r#"{"status":"success","isComplete":true}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );

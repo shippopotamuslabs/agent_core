@@ -65,6 +65,20 @@ mod tests {
     use serde_json::Value;
 
     #[test]
+    fn disclose_tool_schemas_repair_succeeds_in_global_catalog() {
+        let raw = RawToolCall {
+            id: Some("c1".into()),
+            name: "disclose_tool_schemas".into(),
+            arguments_json: r#"{"tool_names":["start_artifact"]}"#.into(),
+        };
+        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        match out {
+            RepairOutcome::Repaired(rec) => assert_eq!(rec.name, "disclose_tool_schemas"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn web_seach_fuzzy_repairs_to_web_search() {
         let raw = RawToolCall {
             id: Some("c1".into()),

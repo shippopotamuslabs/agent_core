@@ -103,6 +103,8 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 256,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },

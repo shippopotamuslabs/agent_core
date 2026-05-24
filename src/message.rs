@@ -64,6 +64,8 @@ pub struct ToolResultRecord {
     pub result_json: String,
     pub truncated: bool,
     pub soft_failure: bool,
+    #[serde(default)]
+    pub activated_tool_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_metadata: Option<ToolResultMetadata>,
 }
@@ -134,6 +136,7 @@ mod tests {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         };
         let json = serde_json::to_string(&rec).unwrap();

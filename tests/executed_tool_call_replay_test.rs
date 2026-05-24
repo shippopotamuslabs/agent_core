@@ -44,6 +44,7 @@ impl AgentToolExecutor for RecordingExecutor {
                 result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect())
@@ -54,6 +55,8 @@ fn io_large() -> SessionIoParams {
     SessionIoParams {
         provider: "openrouter".into(),
         context_window_tokens: 200_000,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     }
@@ -365,6 +368,7 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids()
             result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -385,7 +389,8 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids()
         "ETR-R-06 success tool first"
     );
     assert!(
-        tool_msgs[1].id.contains("tool-err-c-bad") || tool_msgs[1].metadata.get("call_id").is_some(),
+        tool_msgs[1].id.contains("tool-err-c-bad")
+            || tool_msgs[1].metadata.get("call_id").is_some(),
         "ETR-R-06 reject tool second"
     );
 }

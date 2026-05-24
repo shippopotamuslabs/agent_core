@@ -83,6 +83,7 @@ mod tests {
                     result_json: r#"{"ok":true}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    activated_tool_names: Vec::new(),
                 })
                 .collect()
         }
@@ -113,6 +114,8 @@ mod tests {
             crate::engine::SessionIoParams {
                 provider: "openai".into(),
                 context_window_tokens: 128_000,
+                tool_catalog_json: "[]".into(),
+                tool_schema_registry_json: "[]".into(),
                 tools_schema_json: "[]".into(),
                 system_prompt: "sys".into(),
             },
@@ -139,6 +142,7 @@ mod tests {
                 result_json: "{}".into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             }],
         );

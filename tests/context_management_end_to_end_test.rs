@@ -82,6 +82,8 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 256,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -112,6 +114,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );

@@ -32,6 +32,7 @@ impl AgentToolExecutor for MockExec {
                 result_json: r#"{"results":[]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect())
@@ -62,6 +63,8 @@ fn main() {
         SessionIoParams {
             provider: "openai".into(),
             context_window_tokens: 128_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -88,6 +91,7 @@ fn main() {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );

@@ -58,6 +58,7 @@ pub mod state_ledger;
 pub mod tool_context;
 pub mod tool_parse;
 pub mod tool_policy;
+pub mod tool_schema_activation;
 pub mod tool_stream_gate;
 pub mod truncate;
 pub mod turn_io;

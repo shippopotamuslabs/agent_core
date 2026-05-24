@@ -20,6 +20,8 @@ use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 pub struct SessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
+    pub tool_catalog_json: String,
+    pub tool_schema_registry_json: String,
     pub tools_schema_json: String,
     pub system_prompt: String,
 }
@@ -68,6 +70,9 @@ pub(super) struct InnerSession {
     pub(super) pending_tool_turn_request_order: Vec<RawToolCall>,
     /// Reject/suggest tool payloads keyed by `call_id`, flushed after successful results.
     pub(super) pending_reject_tool_by_call_id: HashMap<String, AgentMessage>,
+    /// Active tool names for the current session. Updated on disclosure activations.
+    /// Initially populated from the session's initial `tools_schema_json`.
+    pub(super) active_tool_names: Vec<String>,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).

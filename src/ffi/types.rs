@@ -367,6 +367,7 @@ pub struct FfiToolResultRecord {
     pub result_json: String,
     pub truncated: bool,
     pub soft_failure: bool,
+    pub activated_tool_names: Vec<String>,
 }
 
 impl From<FfiToolResultRecord> for crate::message::ToolResultRecord {
@@ -376,6 +377,7 @@ impl From<FfiToolResultRecord> for crate::message::ToolResultRecord {
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
+            activated_tool_names: t.activated_tool_names,
             result_metadata: None,
         }
     }
@@ -388,6 +390,7 @@ impl From<crate::message::ToolResultRecord> for FfiToolResultRecord {
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
+            activated_tool_names: t.activated_tool_names,
         }
     }
 }
@@ -642,6 +645,8 @@ impl From<SummaryResult> for FfiSummaryResult {
 pub struct FfiSessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
+    pub tool_catalog_json: String,
+    pub tool_schema_registry_json: String,
     pub tools_schema_json: String,
     pub system_prompt: String,
 }
@@ -651,6 +656,8 @@ impl From<FfiSessionIoParams> for crate::engine::SessionIoParams {
         Self {
             provider: p.provider,
             context_window_tokens: p.context_window_tokens,
+            tool_catalog_json: p.tool_catalog_json,
+            tool_schema_registry_json: p.tool_schema_registry_json,
             tools_schema_json: p.tools_schema_json,
             system_prompt: p.system_prompt,
         }
