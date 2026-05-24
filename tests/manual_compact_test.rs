@@ -64,6 +64,8 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -130,6 +132,8 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 256,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -195,6 +199,8 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },

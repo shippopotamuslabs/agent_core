@@ -96,6 +96,7 @@ impl AgentToolExecutor for FixtureExecutor {
                     result_json: r#"{"status":"success"}"#.into(),
                     truncated: false,
                     soft_failure: false,
+                    activated_tool_names: Vec::new(),
                     result_metadata: None,
                 })
                 .collect()),
@@ -106,6 +107,7 @@ impl AgentToolExecutor for FixtureExecutor {
                     result_json: r#"{"error":"soft"}"#.into(),
                     truncated: false,
                     soft_failure: true,
+                    activated_tool_names: Vec::new(),
                     result_metadata: None,
                 })
                 .collect()),
@@ -135,6 +137,8 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
     let io = SessionIoParams {
         provider: f.io.provider.clone(),
         context_window_tokens: f.io.context_window_tokens,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: f.io.tools_schema_json.clone(),
         system_prompt: f.io.system_prompt.clone(),
     };

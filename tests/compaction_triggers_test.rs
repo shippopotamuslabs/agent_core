@@ -34,6 +34,8 @@ fn io_large() -> SessionIoParams {
     SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens: 200_000,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     }
@@ -42,6 +44,8 @@ fn io_small() -> SessionIoParams {
     SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens: 256,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     }
@@ -262,6 +266,7 @@ fn post_tool_small_result_on_large_window_skips_compaction() {
             result_json: r#"{"results":[{"title":"Example","url":"https://example.com"}]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -320,6 +325,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -379,6 +385,7 @@ fn s5_artifact_squash_is_preferred_over_fifo() {
             result_json: big_payload,
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -817,6 +824,7 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
             result_json: huge,
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -907,6 +915,7 @@ fn m3_tool_spillover_must_preserve_full_raw_output() {
         result_json: full.clone(),
         truncated: false,
         soft_failure: false,
+        activated_tool_names: Vec::new(),
         result_metadata: None,
     };
     let reference =

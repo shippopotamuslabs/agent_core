@@ -37,6 +37,8 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     let io = || SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens: 256,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     };

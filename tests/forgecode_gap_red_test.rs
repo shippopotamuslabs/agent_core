@@ -74,6 +74,7 @@ fn tool_result(call_id: &str) -> ToolResultRecord {
         result_json: r#"{"status":"success"}"#.into(),
         truncated: false,
         soft_failure: false,
+        activated_tool_names: Vec::new(),
         result_metadata: None,
     }
 }
@@ -106,6 +107,8 @@ fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoP
     SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: tools_schema_json.into(),
         system_prompt: "sys".into(),
     }
@@ -623,6 +626,7 @@ fn fcg_020_string_only_reminder_is_insufficient() {
         result_json: r#"{"message":"policy_denied"}"#.into(),
         truncated: false,
         soft_failure: false,
+        activated_tool_names: Vec::new(),
         result_metadata: None,
     };
 

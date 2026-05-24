@@ -55,6 +55,7 @@ impl AgentToolExecutor for RecordingExecutor {
                 result_json: r#"{"results":[]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect())
@@ -65,6 +66,8 @@ fn io_large() -> SessionIoParams {
     SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens: 200_000,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     }
@@ -119,19 +122,11 @@ fn agent_block(content: &str) -> Value {
         .expect("_agent key")
 }
 
-fn tool_msg_by_call_id<'a>(
-    messages: &'a [AgentMessage],
-    call_id: &str,
-) -> &'a AgentMessage {
+fn tool_msg_by_call_id<'a>(messages: &'a [AgentMessage], call_id: &str) -> &'a AgentMessage {
     messages
         .iter()
         .filter(|m| m.role == AgentRole::Tool)
-        .find(|m| {
-            m.metadata
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                == Some(call_id)
-        })
+        .find(|m| m.metadata.get("call_id").and_then(|v| v.as_str()) == Some(call_id))
         .unwrap_or_else(|| panic!("tool message for call_id {call_id}"))
 }
 
@@ -183,6 +178,7 @@ fn drive_model_tool_batch(
                 result_json: (*json).into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect(),
@@ -258,11 +254,15 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
     let c2 = tool_msg_by_call_id(&snapshot.messages, "c2");
     let c3 = tool_msg_by_call_id(&snapshot.messages, "c3");
     assert!(
-        !parse_json(&c1.content).as_object().is_some_and(|o| o.contains_key("_agent")),
+        !parse_json(&c1.content)
+            .as_object()
+            .is_some_and(|o| o.contains_key("_agent")),
         "TB-02 c1 no _agent"
     );
     assert!(
-        !parse_json(&c2.content).as_object().is_some_and(|o| o.contains_key("_agent")),
+        !parse_json(&c2.content)
+            .as_object()
+            .is_some_and(|o| o.contains_key("_agent")),
         "TB-02 c2 no _agent"
     );
     let agent = agent_block(&c3.content);
@@ -346,12 +346,7 @@ fn tb_05_soft_failure_streak_sets_reason() {
     // Streak 2: allow still true for the model tool request; becomes 3 after soft-failure result.
     h.integration_test_seed_guardrails(5, 2, 0, false);
 
-    drive_model_tool_batch(
-        &eng,
-        &h,
-        &["c1"],
-        &[r#"{"error":"validation failed"}"#],
-    );
+    drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"error":"validation failed"}"#]);
 
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
@@ -527,6 +522,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -579,6 +575,7 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
             result_json: r#"{"status":"success","artifactId":"art-1"}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -605,6 +602,7 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
             result_json: r#"{"status":"success","isComplete":false}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -622,6 +620,7 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
             result_json: r#"{"status":"success","isComplete":true}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -632,7 +631,10 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
         .iter()
         .filter(|m| m.role == AgentRole::Tool && m.content.contains("_agent"))
         .collect();
-    assert!(!budget_msgs.is_empty(), "TB-10 budget-bearing message exists");
+    assert!(
+        !budget_msgs.is_empty(),
+        "TB-10 budget-bearing message exists"
+    );
     let agent = agent_block(&budget_msgs.last().unwrap().content);
     assert_eq!(agent["tool_calls_used"], 6, "TB-10 used");
     assert_eq!(agent["tool_calls_limit"], 26, "TB-10 limit");
@@ -659,6 +661,7 @@ fn tb_11_invalid_phase_submit_tool_results_does_not_inject() {
             result_json: r#"{"results":[]}"#.into(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -681,20 +684,25 @@ fn tb_11_invalid_phase_submit_tool_results_does_not_inject() {
 /// TB-12 — repair reject-only turn merges `_agent` before CallModel.
 #[test]
 fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
-    use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
     use agent_core::catalog::ToolCatalog;
+    use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
 
     let reject_raw = RawToolCall {
         id: Some("c1".into()),
         name: "totally_unknown_tool_xyz".into(),
         arguments_json: "{}".into(),
     };
-    let (RepairOutcome::Reject { error_json_for_model }, _) =
-        ToolRepairPipeline::repair(&reject_raw, ToolCatalog::global())
+    let (
+        RepairOutcome::Reject {
+            error_json_for_model,
+        },
+        _,
+    ) = ToolRepairPipeline::repair(&reject_raw, ToolCatalog::global())
     else {
         panic!("TB-12 harness must use a repair Reject path");
     };
-    let expected_error: Value = serde_json::from_str(&error_json_for_model).expect("TB-12 reject json");
+    let expected_error: Value =
+        serde_json::from_str(&error_json_for_model).expect("TB-12 reject json");
 
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
@@ -801,7 +809,8 @@ fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
     }
 
     fn walk(dir: &Path, needle: &str, matches: &mut usize) {
-        let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("MD-02 read {}: {e}", dir.display()));
+        let entries =
+            fs::read_dir(dir).unwrap_or_else(|e| panic!("MD-02 read {}: {e}", dir.display()));
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -953,7 +962,10 @@ fn md_06_merge_preserves_executor_provided_agent_fields() {
     );
     assert_eq!(parsed["_agent"]["tool_calls_used"], 1, "MD-06 used");
     assert_eq!(parsed["_agent"]["tool_calls_limit"], 20, "MD-06 limit");
-    assert_eq!(parsed["_agent"]["tool_calls_remaining"], 19, "MD-06 remaining");
+    assert_eq!(
+        parsed["_agent"]["tool_calls_remaining"], 19,
+        "MD-06 remaining"
+    );
     assert_eq!(parsed["_agent"]["allow_tool_call"], true, "MD-06 allow");
     assert!(parsed.get("results").is_some(), "MD-06 results present");
 }

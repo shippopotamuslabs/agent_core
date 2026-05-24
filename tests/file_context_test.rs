@@ -128,6 +128,8 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 8_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },

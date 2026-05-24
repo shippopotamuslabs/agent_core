@@ -74,8 +74,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_loads_14_tools() {
-        assert_eq!(ToolCatalog::global().all().len(), 14);
+    fn catalog_loads_15_tools() {
+        assert_eq!(ToolCatalog::global().all().len(), 15);
+    }
+
+    #[test]
+    fn disclose_tool_schemas_in_global_catalog() {
+        let spec = ToolCatalog::global().resolve("disclose_tool_schemas").unwrap();
+        assert!(spec.reproducible);
+        let hint = spec.schema_hint.as_ref().unwrap();
+        assert!(
+            hint.required_fields
+                .iter()
+                .any(|field| field.name == "tool_names")
+        );
     }
 
     #[test]
@@ -109,6 +121,7 @@ mod tests {
     fn reproducible_classification() {
         let cat = ToolCatalog::global();
         let reproducible = [
+            "disclose_tool_schemas",
             "web_search",
             "web_extract",
             "attached_image_inspect",

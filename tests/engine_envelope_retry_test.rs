@@ -45,6 +45,7 @@ impl AgentToolExecutor for RecordingExecutor {
                 result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect())
@@ -55,6 +56,8 @@ fn io_large() -> SessionIoParams {
     SessionIoParams {
         provider: "openrouter".into(),
         context_window_tokens: 200_000,
+        tool_catalog_json: "[]".into(),
+        tool_schema_registry_json: "[]".into(),
         tools_schema_json: "[]".into(),
         system_prompt: "sys".into(),
     }
@@ -308,6 +311,7 @@ fn e_07_success_resets_envelope_streak() {
                 result_json: r#"{"results":[]}"#.into(),
                 truncated: false,
                 soft_failure: false,
+                activated_tool_names: Vec::new(),
                 result_metadata: None,
             })
             .collect(),

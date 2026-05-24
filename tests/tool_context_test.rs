@@ -57,6 +57,8 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: SCHEMAS_JSON.into(),
             system_prompt: "sys".into(),
         },
@@ -123,6 +125,8 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: SCHEMAS_JSON.into(),
             system_prompt: "sys".into(),
         },
@@ -174,6 +178,8 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: r#"[{"name":"web_search"}]"#.into(),
             system_prompt: "sys".into(),
         },
@@ -217,6 +223,8 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: schemas.into(),
             system_prompt: "sys".into(),
         },

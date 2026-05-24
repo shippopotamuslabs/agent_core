@@ -45,6 +45,7 @@ fn s8_oversized_tool_output_spills_to_context_reference() {
         result_json: payload.clone(),
         truncated: false,
         soft_failure: false,
+        activated_tool_names: Vec::new(),
         result_metadata: None,
     };
     let reference = spill_tool_result_if_needed(&mut store, &mut result, &call, 64, 0)
@@ -84,6 +85,8 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -114,6 +117,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             result_json: payload.clone(),
             truncated: false,
             soft_failure: false,
+            activated_tool_names: Vec::new(),
             result_metadata: None,
         }],
     );
@@ -179,6 +183,8 @@ fn s23_terminal_output_references_share_retrieval_path() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
@@ -216,6 +222,8 @@ fn e4_missing_context_reference_read_returns_not_found() {
         SessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
