@@ -127,6 +127,30 @@
       "aliases": [],
       "reproducible": false,
       "schema_hint": null
+    },
+    {
+      "name": "x_get_thread",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "x_trending",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "x_user_tweets",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
+    },
+    {
+      "name": "x_mention_search",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": null
     }
   ]
 }

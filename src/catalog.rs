@@ -74,8 +74,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_loads_15_tools() {
-        assert_eq!(ToolCatalog::global().all().len(), 15);
+    fn catalog_loads_19_tools() {
+        assert_eq!(ToolCatalog::global().all().len(), 19);
     }
 
     #[test]
