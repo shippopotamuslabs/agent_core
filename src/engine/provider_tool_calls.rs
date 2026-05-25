@@ -7,6 +7,7 @@ use crate::session::AgentSession;
 use crate::turn_io::RawToolCall;
 
 /// Builds provider-replay tool calls from executed/repaired records only.
+#[allow(dead_code)]
 pub fn provider_facing_raw_tool_calls(repaired: &[ToolCallRecord]) -> Vec<RawToolCall> {
     repaired
         .iter()
