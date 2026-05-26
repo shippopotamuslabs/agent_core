@@ -12,6 +12,7 @@ use agent_core::events::{AgentError, AgentEvent};
 use agent_core::host::{AgentToolExecutor, AgentTransport};
 use agent_core::message::{AgentMessage, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::tool_semantics::ToolSemanticsConfig;
 use agent_core::turn_io::{ModelRequest, ModelResponse};
 use serde::Deserialize;
 
@@ -142,9 +143,13 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
         tools_schema_json: f.io.tools_schema_json.clone(),
         system_prompt: f.io.system_prompt.clone(),
     };
+    let mut config = f.initial_session.config.clone();
+    if config.greedy_append_blocks && config.tool_semantics.catalog.tools.is_empty() {
+        config.tool_semantics = ToolSemanticsConfig::enclave_compat();
+    }
     let handle = eng.create_session(
         f.initial_session.messages.clone(),
-        f.initial_session.config.clone(),
+        config,
         f.initial_session.capabilities.clone(),
         f.initial_session.session_context.clone(),
         io,

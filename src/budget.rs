@@ -3,10 +3,6 @@ use tiktoken_rs::CoreBPE;
 
 use crate::session::{AgentConfig, AgentSession, Pressure, SessionCapabilities};
 
-/// Reserved for model output tokens.
-const OUTPUT_RESERVE_TOKENS: u32 = 1024;
-/// Reserved for CoT / reasoning tokens.
-const REASONING_RESERVE_TOKENS: u32 = 256;
 /// Approximate bytes per token for local budget conversion.
 const AVG_BYTES_PER_TOKEN: usize = 4;
 
@@ -30,6 +26,12 @@ fn count_session_tokens(session: &AgentSession) -> u32 {
     session
         .messages
         .iter()
+        .filter(|m| {
+            !m.metadata
+                .get("superseded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .map(|m| count_tokens(&m.content))
         .sum()
 }
@@ -52,13 +54,12 @@ impl TokenLedger {
         let raw = count_session_tokens(session);
         let total_tokens = apply_correction(raw, provider, config);
 
-        let threshold_tokens =
-            (context_window_tokens as f32 * config.threshold_ratio).round() as u32;
+        let threshold_tokens = effective_preflight_threshold_tokens(config, context_window_tokens);
 
         let schema_tokens = count_tokens(tools_schema_json);
+        let reserve = effective_output_reserve_tokens(config, context_window_tokens);
         let usable_prompt_tokens = context_window_tokens
-            .saturating_sub(OUTPUT_RESERVE_TOKENS)
-            .saturating_sub(REASONING_RESERVE_TOKENS)
+            .saturating_sub(reserve)
             .saturating_sub(schema_tokens);
 
         let ratio = if context_window_tokens == 0 {
@@ -82,7 +83,7 @@ impl TokenLedger {
 /// thresholds use [`crate::compact::policy::threshold_ratio_for_trigger`] with
 /// [`should_compact_at`].
 pub fn should_compact(pressure: &Pressure, config: &AgentConfig) -> bool {
-    pressure.ratio >= config.threshold_ratio
+    pressure.total_tokens >= pressure.threshold_tokens || pressure.ratio >= config.threshold_ratio
 }
 
 /// Trigger-aware variant of [`should_compact`].
@@ -90,10 +91,117 @@ pub fn should_compact_at(pressure: &Pressure, threshold_ratio: f32) -> bool {
     pressure.ratio >= threshold_ratio
 }
 
+pub fn should_compact_at_token_threshold(pressure: &Pressure, threshold_tokens: u32) -> bool {
+    pressure.total_tokens >= threshold_tokens
+}
+
+pub fn effective_output_reserve_tokens(config: &AgentConfig, context_window_tokens: u32) -> u32 {
+    // Clamp ratio to 0.5 so the reserve never exceeds half the window; a ratio
+    // above 0.5 would produce usable_prompt_tokens == 0 and cause divide-by-zero
+    // in callers such as effective_retention_window_tokens.
+    let percent = ((context_window_tokens as f32) * config.output_reserve_ratio.clamp(0.0, 0.5))
+        .round() as u32;
+    let reserve = percent
+        .max(config.output_reserve_floor_tokens)
+        .min(config.output_reserve_max_tokens);
+    if context_window_tokens < 8192 {
+        reserve.min(context_window_tokens / 4)
+    } else {
+        reserve
+    }
+}
+
+pub fn effective_preflight_threshold_tokens(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> u32 {
+    effective_threshold_tokens(
+        config,
+        context_window_tokens,
+        config.threshold_ratio,
+        config.preflight_token_threshold,
+    )
+}
+
+pub fn effective_threshold_tokens(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+    threshold_ratio: f32,
+    token_threshold: Option<u32>,
+) -> u32 {
+    if threshold_ratio > 1.0 && token_threshold.is_none() {
+        return u32::MAX;
+    }
+    let reserve = effective_output_reserve_tokens(config, context_window_tokens);
+    let usable = context_window_tokens.saturating_sub(reserve);
+    let ratio_based = (context_window_tokens as f32 * threshold_ratio).round() as u32;
+    let abs_cap = token_threshold.unwrap_or(u32::MAX);
+    ratio_based.min(abs_cap).min(usable)
+}
+
+pub fn effective_retention_window_tokens(config: &AgentConfig, context_window_tokens: u32) -> u32 {
+    let reserve = effective_output_reserve_tokens(config, context_window_tokens);
+    let usable = context_window_tokens.saturating_sub(reserve);
+    config.retention_window_tokens.min(usable / 2)
+}
+
+pub fn effective_tool_spill_threshold_bytes(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> usize {
+    clamp_byte_budget_for_window(config.tool_spill_threshold_bytes, context_window_tokens)
+}
+
+pub fn effective_terminal_spill_threshold_bytes(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> usize {
+    clamp_byte_budget_for_window(config.terminal_spill_threshold_bytes, context_window_tokens)
+}
+
+pub fn effective_tool_result_budget_cloud_bytes(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> usize {
+    clamp_byte_budget_for_window(config.tool_result_budget_cloud_bytes, context_window_tokens)
+}
+
+pub fn effective_tool_result_budget_relaxed_bytes(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> usize {
+    clamp_byte_budget_for_window(
+        config.tool_result_budget_relaxed_bytes,
+        context_window_tokens,
+    )
+}
+
+pub fn effective_micro_keep_recent(config: &AgentConfig, context_window_tokens: u32) -> u32 {
+    if context_window_tokens < 8_000 {
+        1
+    } else if context_window_tokens < 32_000 {
+        2
+    } else {
+        config.micro_keep_recent
+    }
+}
+
+fn clamp_byte_budget_for_window(configured: usize, context_window_tokens: u32) -> usize {
+    let from_window = ((context_window_tokens as usize) * AVG_BYTES_PER_TOKEN) / 16;
+    configured.min(from_window.max(512))
+}
+
 /// Strict per-tool-result byte budget used when context pressure is high.
 ///
 /// - Local model with `tool_result_budget_tokens`: `tokens × AVG_BYTES_PER_TOKEN`.
 /// - Cloud (or no override): `config.tool_result_budget_cloud_bytes`.
+///
+/// # Note
+/// This function reads `config.tool_result_budget_cloud_bytes` without window-aware
+/// clamping. Callers such as `truncate.rs` that invoke this directly (outside the
+/// pressure-based path) intentionally bypass the window clamp. Use
+/// [`effective_tool_result_budget_for_window`] when a `context_window_tokens` value
+/// is available.
 pub fn truncate_budget_per_result(caps: &SessionCapabilities, config: &AgentConfig) -> usize {
     caps.tool_result_budget_tokens
         .map(|t| t as usize * AVG_BYTES_PER_TOKEN)
@@ -111,13 +219,28 @@ pub fn effective_tool_result_budget(
     caps: &SessionCapabilities,
     config: &AgentConfig,
 ) -> usize {
+    effective_tool_result_budget_for_window(pressure, caps, config, 0)
+}
+
+pub fn effective_tool_result_budget_for_window(
+    pressure: &Pressure,
+    caps: &SessionCapabilities,
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> usize {
     if caps.tool_result_budget_tokens.is_some() {
         return truncate_budget_per_result(caps, config);
     }
     if should_compact_at(pressure, config.tool_result_truncation_pressure_ratio) {
-        truncate_budget_per_result(caps, config)
-    } else {
+        if context_window_tokens == 0 {
+            truncate_budget_per_result(caps, config)
+        } else {
+            effective_tool_result_budget_cloud_bytes(config, context_window_tokens)
+        }
+    } else if context_window_tokens == 0 {
         config.tool_result_budget_relaxed_bytes
+    } else {
+        effective_tool_result_budget_relaxed_bytes(config, context_window_tokens)
     }
 }
 
@@ -211,11 +334,11 @@ mod tests {
     }
 
     #[test]
-    fn estimate_threshold_tokens_uses_locked_ratio() {
+    fn estimate_threshold_tokens_uses_adaptive_threshold() {
         let session = make_session(&[]);
         let config = AgentConfig::default(); // threshold_ratio = 0.80
         let p = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
-        assert_eq!(p.threshold_tokens, 160_000); // 200_000 * 0.80
+        assert_eq!(p.threshold_tokens, 160_000);
     }
 
     #[test]
@@ -224,11 +347,10 @@ mod tests {
         let config = AgentConfig::default();
         // tools_schema_json = "[]" → 1 token
         let p = TokenLedger::estimate(&session, &config, "anthropic", 10_000, "[]");
-        // 10_000 - 1024 (output) - 256 (reasoning) - schema_tokens
+        // 10_000 - adaptive output reserve - schema_tokens
         let schema_tokens = count_tokens("[]");
         let expected = 10_000u32
-            .saturating_sub(OUTPUT_RESERVE_TOKENS)
-            .saturating_sub(REASONING_RESERVE_TOKENS)
+            .saturating_sub(effective_output_reserve_tokens(&config, 10_000))
             .saturating_sub(schema_tokens);
         assert_eq!(p.usable_prompt_tokens, expected);
     }

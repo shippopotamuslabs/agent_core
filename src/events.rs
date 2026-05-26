@@ -127,7 +127,9 @@ pub enum AgentEvent {
         summary_ref: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         history_ref: Option<String>,
+        transcript_revision_after: u64,
     },
+    CompactionBoundary(crate::transcript_revision::CompactionBoundary),
     ToolPolicyDenied {
         tool_name: String,
     },
@@ -181,6 +183,9 @@ impl std::fmt::Display for AgentEvent {
             AgentEvent::KvCacheInvalidated { reason } => write!(f, "KvCacheInvalidated({reason})"),
             AgentEvent::PreCompact { trigger } => write!(f, "PreCompact({trigger:?})"),
             AgentEvent::PostCompact { trigger, .. } => write!(f, "PostCompact({trigger:?})"),
+            AgentEvent::CompactionBoundary(b) => {
+                write!(f, "CompactionBoundary({})", b.boundary_id)
+            }
             AgentEvent::ToolPolicyDenied { tool_name } => {
                 write!(f, "ToolPolicyDenied({tool_name})")
             }

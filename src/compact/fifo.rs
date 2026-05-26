@@ -22,7 +22,10 @@
 //! tool interleaving and protected roles as required by the agent-core ADR.
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::{should_compact_at, TokenLedger};
+use crate::budget::{
+    effective_retention_window_tokens, effective_threshold_tokens,
+    should_compact_at_token_threshold, TokenLedger,
+};
 use crate::compact::policy::threshold_ratio_for_trigger;
 use crate::events::{AgentError, CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
@@ -49,6 +52,7 @@ fn is_protected_index(
     idx: usize,
     msg: &crate::message::AgentMessage,
     last_user: Option<usize>,
+    retention_start: Option<usize>,
 ) -> bool {
     if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
         return true;
@@ -58,7 +62,30 @@ fn is_protected_index(
             return true;
         }
     }
+    if let Some(start) = retention_start {
+        if idx >= start {
+            return true;
+        }
+    }
     false
+}
+
+fn retention_start_index(
+    messages: &[crate::message::AgentMessage],
+    retention_window_tokens: u32,
+) -> Option<usize> {
+    if retention_window_tokens == 0 {
+        return None;
+    }
+    let mut approximate_tokens = 0u32;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        approximate_tokens =
+            approximate_tokens.saturating_add((msg.content.len() as u32 / 4).max(1));
+        if approximate_tokens >= retention_window_tokens {
+            return Some(idx);
+        }
+    }
+    Some(0)
 }
 
 /// Returns end-exclusive index of a user-block starting at `start`, or None if not a removable user block.
@@ -66,16 +93,17 @@ fn user_block_end(
     messages: &[crate::message::AgentMessage],
     start: usize,
     last_user: Option<usize>,
+    retention_start: Option<usize>,
 ) -> Option<usize> {
     if start >= messages.len() || messages[start].role != AgentRole::User {
         return None;
     }
-    if is_protected_index(start, &messages[start], last_user) {
+    if is_protected_index(start, &messages[start], last_user, retention_start) {
         return None;
     }
     let mut i = start + 1;
     while i < messages.len() {
-        if is_protected_index(i, &messages[i], last_user) {
+        if is_protected_index(i, &messages[i], last_user, retention_start) {
             return None;
         }
         match messages[i].role {
@@ -94,11 +122,12 @@ fn user_block_end(
 fn first_removable_unit_range(
     messages: &[crate::message::AgentMessage],
     last_user: Option<usize>,
+    retention_start: Option<usize>,
 ) -> Option<std::ops::Range<usize>> {
     let mut i = 0usize;
     while i < messages.len() {
         let msg = &messages[i];
-        if !is_protected_index(i, msg, last_user) {
+        if !is_protected_index(i, msg, last_user, retention_start) {
             break;
         }
         i += 1;
@@ -107,7 +136,7 @@ fn first_removable_unit_range(
         return None;
     }
 
-    if let Some(end) = user_block_end(messages, i, last_user) {
+    if let Some(end) = user_block_end(messages, i, last_user, retention_start) {
         return Some(i..end);
     }
 
@@ -152,15 +181,23 @@ impl CompactionTier for FifoCompactionTier {
 
         let tokens_before = estimate(&session, config, ctx).total_tokens;
         let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
+        let threshold_tokens =
+            effective_threshold_tokens(config, ctx.context_window_tokens, threshold_ratio, None);
 
-        if !should_compact_at(&estimate(&session, config, ctx), threshold_ratio) {
+        if !should_compact_at_token_threshold(&estimate(&session, config, ctx), threshold_tokens) {
             return CompactionOutcome::NotApplicable;
         }
 
+        let retention_start = retention_start_index(
+            &session.messages,
+            effective_retention_window_tokens(config, ctx.context_window_tokens),
+        );
         if config.require_snapshot_before_fifo {
-            let Some(range) =
-                first_removable_unit_range(&session.messages, last_user_index(&session.messages))
-            else {
+            let Some(range) = first_removable_unit_range(
+                &session.messages,
+                last_user_index(&session.messages),
+                retention_start,
+            ) else {
                 return CompactionOutcome::NotApplicable;
             };
             let removal_ids: Vec<String> = session.messages[range]
@@ -178,8 +215,15 @@ impl CompactionTier for FifoCompactionTier {
         let mut last_u = last_user_index(&session.messages);
         let mut changed = false;
 
-        while should_compact_at(&estimate(&session, config, ctx), threshold_ratio) {
-            let Some(range) = first_removable_unit_range(&session.messages, last_u) else {
+        while should_compact_at_token_threshold(&estimate(&session, config, ctx), threshold_tokens)
+        {
+            let retention_start = retention_start_index(
+                &session.messages,
+                effective_retention_window_tokens(config, ctx.context_window_tokens),
+            );
+            let Some(range) =
+                first_removable_unit_range(&session.messages, last_u, retention_start)
+            else {
                 break;
             };
             session.messages.drain(range.clone());

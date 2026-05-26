@@ -45,7 +45,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
 
     // 2) Drive file-backed context through session_context so the engine-owned
     //    ContextStore is the source surfaced in the ModelRequest.
-    let mut cfg = AgentConfig::default();
+    let mut cfg = AgentConfig::enclave_compat();
     cfg.enable_state_ledger = true;
     cfg.enable_context_store = true;
     cfg.enable_file_condensation = true;

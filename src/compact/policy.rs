@@ -10,6 +10,7 @@ use crate::session::{AgentConfig, SessionCapabilities};
 pub struct CompactionPlan {
     pub trigger: CompactionTrigger,
     pub threshold_ratio: f32,
+    pub threshold_tokens: u32,
     pub ordered_tiers: Vec<CompactionTier>,
     pub allow_history_rewrite: bool,
     pub require_snapshot_before_destructive_drop: bool,
@@ -35,8 +36,22 @@ pub fn build_compaction_plan(
 ) -> CompactionPlan {
     let threshold_ratio =
         effective_compaction_threshold_ratio(config, policy, trigger, context_window_tokens);
+    let token_threshold = match trigger {
+        CompactionTrigger::Preflight => config.preflight_token_threshold,
+        CompactionTrigger::MidTurn => config.mid_turn_token_threshold,
+        CompactionTrigger::PostToolResult => config.post_tool_result_token_threshold,
+        CompactionTrigger::Manual => None,
+    };
+    let threshold_tokens = crate::budget::effective_threshold_tokens(
+        config,
+        context_window_tokens,
+        threshold_ratio,
+        token_threshold,
+    );
 
-    let summary_allowed = policy.summarization_allowed && policy.history_rewrite_allowed;
+    let summary_allowed = policy.summarization_allowed
+        && policy.history_rewrite_allowed
+        && crate::long_loop_policy::long_loop_plan_includes_summary(_capabilities);
     let history_rewrite_allowed = policy.history_rewrite_allowed;
 
     let fifo_gate_for_trigger = match trigger {
@@ -80,6 +95,7 @@ pub fn build_compaction_plan(
     CompactionPlan {
         trigger,
         threshold_ratio,
+        threshold_tokens,
         ordered_tiers: ordered,
         allow_history_rewrite: history_rewrite_allowed,
         require_snapshot_before_destructive_drop: config.require_snapshot_before_fifo,

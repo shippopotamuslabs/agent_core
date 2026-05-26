@@ -7,6 +7,9 @@ use crate::events::AgentEvent;
 use crate::message::RepairRecord;
 use crate::repair::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 use crate::tool_parse::{coerce_to_schema, repair_json};
+use crate::tool_semantics::{
+    schema_hint_for_semantics, SpecialValueRepair, ToolSemanticsConfig,
+};
 use crate::turn_io::RawToolCall;
 use std::collections::HashMap;
 
@@ -111,6 +114,124 @@ pub fn canonicalize_tool_call(
         }),
         events,
     )
+}
+
+pub fn canonicalize_tool_call_with_semantics(
+    raw: &RawToolCall,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+    mode: ToolCallCanonicalizeMode,
+) -> (CanonicalizeToolCallOutcome, Vec<AgentEvent>) {
+    let mut events = Vec::new();
+    let (resolved_name, repair_metadata) = match resolve_tool_name_with_semantics(
+        &raw.name,
+        catalog,
+        semantics,
+        mode,
+    ) {
+        ToolNameResolution::Resolved {
+            name,
+            repair_metadata,
+            event,
+        } => {
+            if let Some(event) = event {
+                events.push(event);
+            }
+            (name, repair_metadata)
+        }
+        ToolNameResolution::Rejected { error_json } => {
+            return (
+                CanonicalizeToolCallOutcome::Reject {
+                    error_json_for_model: error_json,
+                },
+                events,
+            );
+        }
+    };
+
+    let arguments = match canonicalize_raw_arguments_with_semantics(
+        &resolved_name,
+        &raw.arguments_json,
+        catalog,
+        semantics,
+        mode,
+    ) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            return (
+                CanonicalizeToolCallOutcome::Reject {
+                    error_json_for_model: reject_json(
+                        &format!("Invalid JSON for tool arguments: {error}"),
+                        catalog,
+                    ),
+                },
+                events,
+            );
+        }
+    };
+
+    (
+        CanonicalizeToolCallOutcome::Ok(CanonicalizedToolCall {
+            resolved_name,
+            arguments_json: arguments.arguments_json,
+            arguments_value: arguments.value,
+            repair_metadata,
+            argument_repairs: arguments.repairs,
+        }),
+        events,
+    )
+}
+
+pub fn canonicalize_raw_arguments_with_semantics(
+    tool_name: &str,
+    raw_arguments_json: &str,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+    mode: ToolCallCanonicalizeMode,
+) -> Result<CanonicalizedArguments, CanonicalizeArgumentsError> {
+    let trimmed = strip_json_fences(raw_arguments_json);
+    let parsed = repair_json(&trimmed).map_err(|error| CanonicalizeArgumentsError {
+        message: error.to_string(),
+    })?;
+    let mut value = parsed;
+    let mut repaired = false;
+    let mut repairs = Vec::new();
+
+    apply_semantic_aliases(tool_name, semantics, &mut value, &mut repaired, &mut repairs);
+    validate_semantic_stringified_arrays(tool_name, semantics, &value)?;
+
+    if let Some(hint) = schema_hint_for_semantics(tool_name, semantics)
+        .or_else(|| catalog.resolve(tool_name).and_then(|spec| spec.schema_hint.clone()))
+    {
+        let before = value.clone();
+        value = coerce_to_schema(&mut value, &hint);
+        if value != before {
+            repaired = true;
+            if !only_schema_defaults_added(&before, &value, &hint) {
+                push_repair(&mut repairs, "coerced arguments to catalog schema");
+            }
+        }
+    }
+
+    apply_semantic_special_values(tool_name, semantics, &mut value, &mut repaired, &mut repairs);
+    if matches!(mode, ToolCallCanonicalizeMode::ExecutionStrict) {
+        validate_required_types(tool_name, &value, catalog)?;
+    }
+    if matches!(mode, ToolCallCanonicalizeMode::ExecutionStrict) {
+        validate_required_types_with_semantics(tool_name, &value, semantics)?;
+    }
+    let originally_valid = serde_json::from_str::<Value>(&trimmed).is_ok();
+    if !originally_valid {
+        repaired = true;
+        push_repair(&mut repairs, "repaired invalid JSON argument payload");
+    }
+    let arguments_json = canonical_arguments_json_with_semantics(tool_name, &value, semantics);
+    Ok(CanonicalizedArguments {
+        arguments_json,
+        value,
+        repaired,
+        repairs,
+    })
 }
 
 pub fn canonicalize_raw_arguments(
@@ -262,6 +383,73 @@ fn resolve_tool_name(
     }
 }
 
+fn resolve_tool_name_with_semantics(
+    raw: &str,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+    mode: ToolCallCanonicalizeMode,
+) -> ToolNameResolution {
+    let stripped = strip_tool_prefixes(raw);
+    let normalized = normalize_to_snake_case(&stripped);
+
+    if let Some(spec) = catalog.resolve(&normalized) {
+        return ToolNameResolution::Resolved {
+            name: spec.name.clone(),
+            repair_metadata: None,
+            event: None,
+        };
+    }
+
+    if catalog.all().is_empty() || matches!(mode, ToolCallCanonicalizeMode::ProviderIngress) {
+        return ToolNameResolution::Resolved {
+            name: normalized,
+            repair_metadata: None,
+            event: None,
+        };
+    }
+
+    if let Some((best, score)) = best_catalog_match(&normalized, catalog) {
+        if score >= FUZZY_AUTO_ACCEPT {
+            return ToolNameResolution::Resolved {
+                name: best.to_string(),
+                repair_metadata: Some(RepairRecord {
+                    original_name: raw.trim().to_string(),
+                    applied_aliases: vec![],
+                    confidence: score as f32,
+                }),
+                event: Some(AgentEvent::ToolRepaired {
+                    original_name: raw.to_string(),
+                    resolved_name: best.to_string(),
+                    confidence: score as f32,
+                }),
+            };
+        }
+        return ToolNameResolution::Rejected {
+            error_json: reject_json(
+                &format!(
+                    "Unknown tool '{}' (best match '{}' score {:.2} < {:.2})",
+                    raw, best, score, FUZZY_AUTO_ACCEPT
+                ),
+                catalog,
+            ),
+        };
+    }
+
+    let available = semantics
+        .catalog
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    ToolNameResolution::Rejected {
+        error_json: serde_json::json!({
+            "error": format!("Unknown tool '{raw}' after normalization '{normalized}'"),
+            "available_tools": available,
+        })
+        .to_string(),
+    }
+}
+
 fn strip_tool_prefixes(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     loop {
@@ -343,6 +531,113 @@ fn move_alias(
     );
 }
 
+fn semantic_rule<'a>(
+    tool: &str,
+    semantics: &'a ToolSemanticsConfig,
+) -> Option<&'a crate::tool_semantics::ToolArgumentRepairRule> {
+    semantics
+        .argument_repairs
+        .iter()
+        .find(|rule| normalize_to_snake_case(&rule.tool_name) == normalize_to_snake_case(tool))
+}
+
+fn apply_semantic_aliases(
+    tool: &str,
+    semantics: &ToolSemanticsConfig,
+    value: &mut Value,
+    repaired: &mut bool,
+    repairs: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(rule) = semantic_rule(tool, semantics) else {
+        return;
+    };
+    for alias in &rule.aliases {
+        move_alias(object, &alias.alias, &alias.canonical, repaired, repairs);
+    }
+}
+
+fn apply_semantic_special_values(
+    tool: &str,
+    semantics: &ToolSemanticsConfig,
+    value: &mut Value,
+    repaired: &mut bool,
+    repairs: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(rule) = semantic_rule(tool, semantics) else {
+        return;
+    };
+    for special in &rule.special_values {
+        match special {
+            SpecialValueRepair::ScalarToArray { source, target } => {
+                if let Some(query) = object.remove(source) {
+                    object.insert(target.clone(), Value::Array(vec![query]));
+                    *repaired = true;
+                    push_repair(repairs, &format!("normalized {source} to {target} array"));
+                }
+            }
+            SpecialValueRepair::StripLeadingBracketFromArrayStrings { field } => {
+                if let Some(Value::Array(items)) = object.get_mut(field) {
+                    for item in items {
+                        if let Some(raw) = item.as_str() {
+                            let stripped = raw.trim().trim_start_matches('[').to_string();
+                            if stripped != raw {
+                                *item = Value::String(stripped);
+                                *repaired = true;
+                                push_repair(
+                                    repairs,
+                                    "stripped leading bracket from bracketed URL string",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            SpecialValueRepair::ValidateStringifiedJsonArray { .. } => {}
+        }
+    }
+}
+
+fn validate_semantic_stringified_arrays(
+    tool: &str,
+    semantics: &ToolSemanticsConfig,
+    value: &Value,
+) -> Result<(), CanonicalizeArgumentsError> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let Some(rule) = semantic_rule(tool, semantics) else {
+        return Ok(());
+    };
+    for special in &rule.special_values {
+        let SpecialValueRepair::ValidateStringifiedJsonArray { field } = special else {
+            continue;
+        };
+        let Some(Value::String(raw)) = object.get(field) else {
+            continue;
+        };
+        match serde_json::from_str::<Value>(raw.trim()) {
+            Ok(Value::Array(_)) => {}
+            Ok(_) => {
+                return Err(CanonicalizeArgumentsError {
+                    message: format!("{field} string must contain a JSON array"),
+                });
+            }
+            Err(error) => {
+                return Err(CanonicalizeArgumentsError {
+                    message: format!("{field} string contains invalid JSON: {error}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn normalize_special_values(
     tool: &str,
     value: &mut Value,
@@ -392,6 +687,41 @@ fn validate_required_types(
         return Ok(());
     };
 
+    for field in &hint.required_fields {
+        let Some(field_value) = object.get(&field.name) else {
+            if !hint.defaults.contains_key(&field.name) {
+                return Err(CanonicalizeArgumentsError {
+                    message: format!(
+                        "Missing required field '{}' for tool '{}'",
+                        field.name, tool_name
+                    ),
+                });
+            }
+            continue;
+        };
+        if !matches_schema_type(field_value, &field.ty) {
+            return Err(CanonicalizeArgumentsError {
+                message: format!(
+                    "Field '{}' for tool '{}' could not be coerced to {}",
+                    field.name, tool_name, field.ty
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_required_types_with_semantics(
+    tool_name: &str,
+    value: &Value,
+    semantics: &ToolSemanticsConfig,
+) -> Result<(), CanonicalizeArgumentsError> {
+    let Some(hint) = schema_hint_for_semantics(tool_name, semantics) else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
     for field in &hint.required_fields {
         let Some(field_value) = object.get(&field.name) else {
             if !hint.defaults.contains_key(&field.name) {
@@ -484,6 +814,36 @@ fn canonical_arguments_json(tool: &str, value: &Value) -> String {
         }
         _ => value.to_string(),
     }
+}
+
+fn canonical_arguments_json_with_semantics(
+    tool: &str,
+    value: &Value,
+    semantics: &ToolSemanticsConfig,
+) -> String {
+    let Some(object) = value.as_object() else {
+        return value.to_string();
+    };
+    let Some(shape) = semantics
+        .canonical_shapes
+        .iter()
+        .find(|shape| normalize_to_snake_case(&shape.tool_name) == normalize_to_snake_case(tool))
+    else {
+        return canonical_arguments_json(tool, value);
+    };
+
+    let mut out = serde_json::Map::new();
+    for field in &shape.ordered_fields {
+        if let Some(field_value) = object.get(field) {
+            out.insert(field.clone(), field_value.clone());
+        }
+    }
+    for (field, field_value) in object {
+        if !out.contains_key(field) {
+            out.insert(field.clone(), field_value.clone());
+        }
+    }
+    Value::Object(out).to_string()
 }
 
 fn validate_stringified_structured_fields(

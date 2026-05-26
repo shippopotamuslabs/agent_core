@@ -6,7 +6,7 @@
 //! with a [`crate::turn_io::SummaryResult`].
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::TokenLedger;
+use crate::budget::{effective_retention_window_tokens, TokenLedger};
 use crate::events::{CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger};
 use crate::message::{AgentMessage, AgentRole};
 use crate::session::{AgentConfig, AgentSession};
@@ -40,17 +40,54 @@ fn last_user_index(messages: &[AgentMessage]) -> Option<usize> {
 /// - Active turn: assistant/tool traffic **after** the last user when there is no
 ///   prior history (common for post-tool compaction).
 /// - Lone oversized user turn: the user message itself when it is the only content.
-fn messages_to_summarize(messages: &[AgentMessage]) -> Option<(Vec<AgentMessage>, String)> {
+fn retention_start_index(messages: &[AgentMessage], retention_window_tokens: u32) -> Option<usize> {
+    if retention_window_tokens == 0 {
+        return None;
+    }
+    let mut approximate_tokens = 0u32;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        approximate_tokens =
+            approximate_tokens.saturating_add((msg.content.len() as u32 / 4).max(1));
+        if approximate_tokens >= retention_window_tokens {
+            return Some(idx);
+        }
+    }
+    Some(0)
+}
+
+fn messages_to_summarize(
+    messages: &[AgentMessage],
+    retention_window_tokens: u32,
+) -> Option<(Vec<AgentMessage>, String)> {
     let last_u = last_user_index(messages)?;
+    let retention_start = retention_start_index(messages, retention_window_tokens);
     let mut picked = Vec::new();
-    for msg in messages.iter().take(last_u) {
+    let mut picked_indices = Vec::new();
+    for (idx, msg) in messages.iter().enumerate().take(last_u) {
+        if retention_start.is_some_and(|start| idx >= start) {
+            continue;
+        }
         if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
             continue;
         }
+        picked_indices.push(idx);
         picked.push(msg.clone());
     }
+    if retention_window_tokens > 0
+        && picked_indices
+            .last()
+            .is_some_and(|last_picked| *last_picked + 1 < last_u)
+    {
+        return messages_to_summarize(messages, 0);
+    }
+    if picked.is_empty() && retention_window_tokens > 0 {
+        return messages_to_summarize(messages, 0);
+    }
     if picked.is_empty() && last_u + 1 < messages.len() {
-        for msg in messages.iter().skip(last_u + 1) {
+        for (idx, msg) in messages.iter().enumerate().skip(last_u + 1) {
+            if retention_start.is_some_and(|start| idx >= start) {
+                continue;
+            }
             if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
                 continue;
             }
@@ -74,11 +111,12 @@ fn messages_to_summarize(messages: &[AgentMessage]) -> Option<(Vec<AgentMessage>
 fn messages_to_summarize_for_trigger(
     messages: &[AgentMessage],
     _trigger: CompactionTrigger,
+    retention_window_tokens: u32,
 ) -> Option<(Vec<AgentMessage>, String)> {
     // Always keep the latest user turn and everything after it (including the
     // pending assistant tool-call message). Prior compact summaries are merged
     // in `apply_summary_result` instead of accumulating as separate messages.
-    messages_to_summarize(messages)
+    messages_to_summarize(messages, retention_window_tokens)
 }
 
 impl CompactionTier for SummaryCompactionTier {
@@ -92,14 +130,29 @@ impl CompactionTier for SummaryCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
+        if ctx.context_window_tokens < 8_000
+            && matches!(
+                ctx.capabilities.context_policy_tier,
+                crate::policy::ContextPolicyTier::SmallContext
+                    | crate::policy::ContextPolicyTier::FixedKv
+                    | crate::policy::ContextPolicyTier::LocalMutable
+            )
+        {
+            return CompactionOutcome::NotApplicable;
+        }
+
         // KV-fixed sessions cannot rebuild around a summarization round-trip (ADR AGENT-047).
         if ctx.capabilities.kv_fixed {
             return CompactionOutcome::NotApplicable;
         }
 
-        let Some((msgs, last_message_id)) =
-            messages_to_summarize_for_trigger(&session.messages, ctx.trigger)
-        else {
+        let retention_window_tokens =
+            effective_retention_window_tokens(_config, ctx.context_window_tokens);
+        let Some((msgs, last_message_id)) = messages_to_summarize_for_trigger(
+            &session.messages,
+            ctx.trigger,
+            retention_window_tokens,
+        ) else {
             return CompactionOutcome::NotApplicable;
         };
 
@@ -360,7 +413,7 @@ mod tests {
             },
         ];
         let (picked, last_id) =
-            messages_to_summarize(&messages).expect("post-user assistant/tool range");
+            messages_to_summarize(&messages, 0).expect("post-user assistant/tool range");
         assert_eq!(picked.len(), 2);
         assert_eq!(last_id, "t1");
     }

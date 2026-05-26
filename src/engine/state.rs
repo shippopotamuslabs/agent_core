@@ -9,9 +9,11 @@ use crate::context_store::ContextStore;
 use crate::events::AgentEvent;
 use crate::guardrails::GuardrailState;
 use crate::loop_metrics::LoopMetrics;
-use crate::message::AgentMessage;
-use crate::message::ToolCallRecord;
+#[cfg(feature = "lalr-harness")]
+use crate::message::AgentRole;
+use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
+use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
@@ -39,7 +41,7 @@ pub(super) enum EnginePhase {
     AwaitingSummary,
 }
 
-pub(super) struct InnerSession {
+pub(crate) struct InnerSession {
     pub(super) session: AgentSession,
     pub(super) config: AgentConfig,
     pub(super) capabilities: SessionCapabilities,
@@ -73,6 +75,12 @@ pub(super) struct InnerSession {
     /// Active tool names for the current session. Updated on disclosure activations.
     /// Initially populated from the session's initial `tools_schema_json`.
     pub(super) active_tool_names: Vec<String>,
+    pub(super) sidecar_builder: SidecarBuilder,
+    /// Telemetry: number of compaction passes run this user turn (reset on turn start).
+    pub(super) compaction_passes_this_turn: u32,
+    /// Telemetry: number of destructive compaction tiers (Micro/Fifo/Summary) applied
+    /// this user turn (reset on turn start).
+    pub(super) destructive_tiers_this_turn: u32,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).
@@ -84,7 +92,7 @@ pub struct SessionTestSnapshot {
 }
 
 impl SessionHandle {
-    pub(super) fn lock_inner(&self) -> MutexGuard<'_, InnerSession> {
+    pub(crate) fn lock_inner(&self) -> MutexGuard<'_, InnerSession> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -99,8 +107,82 @@ impl SessionHandle {
             terminal_action: inner.terminal_action.clone(),
         }
     }
+}
 
+#[cfg(feature = "lalr-harness")]
+impl SessionHandle {
     /// Seeds guardrail counters for integration tests (`tool_budget_agent_meta_test`).
+    pub(crate) fn lalr_seed_user_message_if_empty(&self, content: &str) {
+        let mut inner = self.lock_inner();
+        if inner.session.messages.is_empty() {
+            inner.session.messages.push(AgentMessage {
+                id: "u0".into(),
+                role: AgentRole::User,
+                content: content.into(),
+                metadata: serde_json::Value::Null,
+            });
+        }
+    }
+
+    pub(crate) fn lalr_prepare_long_loop_run(&self, min_tool_turns: u32) {
+        let mut inner = self.lock_inner();
+        inner
+            .state_ledger
+            .constraints
+            .push("PROJECT_CODENAME=ENCLAVE".to_string());
+        inner.config.enable_state_ledger = true;
+        inner.config.max_turns = inner.config.max_turns.max(min_tool_turns);
+        inner.config.long_loop.max_tool_turns =
+            inner.config.long_loop.max_tool_turns.max(min_tool_turns);
+        inner.config.threshold_ratio = 0.15;
+        inner.config.mid_turn_threshold_ratio = 0.20;
+        inner.config.post_tool_result_threshold_ratio = 0.20;
+        inner.config.allow_fifo_on_preflight = true;
+        inner.config.allow_fifo_on_post_tool_result = true;
+        inner.io.context_window_tokens = 8_192;
+        inner.config.tool_spill_threshold_bytes = 1024;
+    }
+
+    pub(crate) fn lalr_long_loop_outcome_snapshot(
+        &self,
+        semantic_fact: &str,
+    ) -> (usize, u64, bool) {
+        let inner = self.lock_inner();
+        let preserved = inner
+            .state_ledger
+            .constraints
+            .iter()
+            .any(|c| c.contains(semantic_fact))
+            || inner
+                .session
+                .messages
+                .iter()
+                .any(|m| m.content.contains(semantic_fact))
+            || serde_json::to_string(&inner.state_ledger)
+                .map(|s| s.contains(semantic_fact))
+                .unwrap_or(false);
+        (
+            inner.session.messages.len(),
+            inner.session.transcript_revision,
+            preserved,
+        )
+    }
+
+    pub(crate) fn lalr_seed_tool_round_index(&self, tool_round_index: u32) {
+        let mut inner = self.lock_inner();
+        inner.guardrails.tool_calls_executed = tool_round_index;
+    }
+
+    pub(crate) fn lalr_config(&self) -> AgentConfig {
+        self.lock_inner().config.clone()
+    }
+
+    pub(crate) fn lalr_get_session(&self) -> AgentSession {
+        self.lock_inner().session.clone()
+    }
+}
+
+impl SessionHandle {
     pub fn integration_test_seed_guardrails(
         &self,
         tool_calls_executed: u32,
@@ -111,8 +193,7 @@ impl SessionHandle {
         let mut inner = self.lock_inner();
         inner.guardrails.tool_calls_executed = tool_calls_executed;
         inner.guardrails.consecutive_soft_failure_turns = consecutive_soft_failure_turns;
-        inner.guardrails.consecutive_envelope_parse_failures =
-            consecutive_envelope_parse_failures;
+        inner.guardrails.consecutive_envelope_parse_failures = consecutive_envelope_parse_failures;
         inner.last_model_response_had_append_blocks = last_model_response_had_append_blocks;
     }
 }

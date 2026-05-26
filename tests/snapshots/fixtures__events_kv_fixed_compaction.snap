@@ -1,6 +1,6 @@
 ---
 source: tests/fixtures.rs
-assertion_line: 213
+assertion_line: 219
 expression: events
 ---
 [
@@ -23,7 +23,7 @@ expression: events
     "type": "compaction_applied",
     "tier": "fifo",
     "tokens_before": 803,
-    "tokens_after": 1,
+    "tokens_after": 402,
     "trigger": "preflight"
   },
   {
@@ -31,9 +31,38 @@ expression: events
     "reason": "Compacted: fifo"
   },
   {
+    "type": "pre_compact",
+    "trigger": "preflight"
+  },
+  {
+    "type": "context_pressure",
+    "ratio": 1.5703125
+  },
+  {
+    "type": "compaction_applied",
+    "tier": "history_snapshot",
+    "tokens_before": 402,
+    "tokens_after": 402,
+    "trigger": "preflight"
+  },
+  {
+    "type": "compaction_boundary",
+    "boundary_id": "cb-1-preflight",
+    "revision_before": 0,
+    "revision_after": 1,
+    "trigger": "preflight",
+    "tiers_applied": [
+      "fifo"
+    ],
+    "message_count_before": 3,
+    "message_count_after": 2,
+    "destructive": true
+  },
+  {
     "type": "post_compact",
     "trigger": "preflight",
-    "history_ref": "history-u0-u1"
+    "history_ref": "history-a0-u1",
+    "transcript_revision_after": 1
   },
   {
     "type": "turn_started",

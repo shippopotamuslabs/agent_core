@@ -76,7 +76,7 @@ fn new_session(
 ) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
-        AgentConfig::default(),
+        AgentConfig::enclave_compat(),
         SessionCapabilities {
             summarization_allowed: false,
             kv_fixed: false,
@@ -110,6 +110,21 @@ fn raw_tool_call_field<'a>(entry: &'a serde_json::Value, field: &str) -> &'a str
         .get(field)
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("raw_tool_calls entry missing {field}: {entry}"))
+}
+
+fn non_budget_tool_messages(snapshot: &SessionTestSnapshot) -> Vec<&AgentMessage> {
+    snapshot
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == AgentRole::Tool
+                && !m
+                    .metadata
+                    .get("agent_tool_budget")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        })
+        .collect()
 }
 
 fn submit_tool_use(
@@ -374,11 +389,7 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids()
     );
 
     let snapshot = h.integration_test_snapshot();
-    let tool_msgs: Vec<_> = snapshot
-        .messages
-        .iter()
-        .filter(|m| m.role == AgentRole::Tool)
-        .collect();
+    let tool_msgs = non_budget_tool_messages(&snapshot);
     assert_eq!(tool_msgs.len(), 2, "ETR-R-06 two tool messages");
     assert!(
         tool_msgs[0]

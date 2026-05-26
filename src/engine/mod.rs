@@ -15,8 +15,14 @@ use serde_json::json;
 
 use crate::action::AgentAction;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
-use crate::artifact_finalize::{record_artifact_progress, synthetic_finalize_calls};
-use crate::budget::{effective_tool_result_budget, should_compact_at, TokenLedger};
+use crate::artifact_finalize::{
+    record_artifact_progress, record_artifact_progress_with_semantics, synthetic_finalize_calls,
+    synthetic_finalize_calls_with_semantics,
+};
+use crate::budget::{
+    effective_threshold_tokens, effective_tool_result_budget_for_window,
+    effective_tool_spill_threshold_bytes, should_compact_at_token_threshold, TokenLedger,
+};
 use crate::catalog::ToolCatalog;
 use crate::compact::{
     apply_summary_result,
@@ -33,6 +39,7 @@ use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, Com
 use crate::file_context::condense_file_context;
 use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
 use crate::host::{AgentSummarizer, AgentToolExecutor, AgentTransport};
+use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
 use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
@@ -40,14 +47,24 @@ use crate::policy::resolve_context_policy;
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::request_pipeline::render_runtime_tool_view;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
+use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
 use crate::state_ledger::StateLedger;
-use crate::tool_context::build_tool_context_index_with_registry;
 #[allow(unused_imports)]
 use crate::tool_context::build_tool_context_index;
+use crate::tool_context::build_tool_context_index_with_registry;
+use crate::tool_semantics::result_policy_for;
+use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
+
+fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
+    matches!(
+        tier,
+        CompactionTier::Micro | CompactionTier::Fifo | CompactionTier::Summary
+    )
+}
 
 fn parse_tool_names_from_schema(schema_json: &str) -> Vec<String> {
     let parsed: serde_json::Value = match serde_json::from_str(schema_json) {
@@ -150,11 +167,13 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
     pub fn create_session(
         &self,
         initial_messages: Vec<AgentMessage>,
-        config: AgentConfig,
+        mut config: AgentConfig,
         capabilities: SessionCapabilities,
         session_context: serde_json::Value,
         io: SessionIoParams,
     ) -> SessionHandle {
+        config
+            .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -213,6 +232,9 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 pending_tool_turn_request_order: Vec::new(),
                 pending_reject_tool_by_call_id: HashMap::new(),
                 active_tool_names: parse_tool_names_from_schema(&initial_active_tool_names_source),
+                sidecar_builder: SidecarBuilder::new(),
+                compaction_passes_this_turn: 0,
+                destructive_tiers_this_turn: 0,
             })),
         }
     }
@@ -450,10 +472,17 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         g.last_model_response_had_append_blocks = merged_tool_calls.iter().any(|c| {
-            ToolCatalog::global()
-                .resolve(&normalize_tool_name_hint(&c.name))
-                .map(|s| s.name.as_str())
-                == Some("append_blocks")
+            let normalized = normalize_tool_name_hint(&c.name);
+            g.config
+                .tool_semantics
+                .greedy_extension_tools
+                .iter()
+                .any(|tool| tool.tool_name == normalized)
+                || (g.config.greedy_append_blocks
+                    && ToolCatalog::global()
+                        .resolve(&normalized)
+                        .map(|s| s.name.as_str())
+                        == Some("append_blocks"))
         });
 
         if merged_tool_calls.is_empty() {
@@ -472,9 +501,15 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             // currently active set (the disclosure tool itself is always callable).
             // Only enforce when active_tool_names has actually been initialized — empty
             // active set means the host has not opted into the new contract yet.
+            let disclosure = g.config.tool_semantics.disclosure.clone();
+            let disclosure_name = disclosure.as_ref().map(|d| d.tool_name.as_str());
+            let disclosure_always_callable = disclosure
+                .as_ref()
+                .map(|d| d.always_callable && raw.name == d.tool_name)
+                .unwrap_or(false);
             let callable_now = !g.active_tool_names.is_empty()
                 && (g.active_tool_names.iter().any(|n| n == &raw.name)
-                    || raw.name == "disclose_tool_schemas");
+                    || disclosure_always_callable);
             if !g.active_tool_names.is_empty() && !callable_now {
                 let ti = g.turn_index;
                 g.emit(AgentEvent::ToolSoftFailure {
@@ -482,14 +517,18 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     turn_index: ti,
                 });
                 let mut available = g.active_tool_names.clone();
-                if !available.iter().any(|n| n == "disclose_tool_schemas") {
-                    available.insert(0, "disclose_tool_schemas".into());
+                if let Some(name) = disclosure_name {
+                    if !available.iter().any(|n| n == name) {
+                        available.insert(0, name.to_string());
+                    }
                 }
+                let error = if let Some(name) = disclosure_name {
+                    format!("Tool '{}' is not active. Call {name} first.", raw.name)
+                } else {
+                    format!("Tool '{}' is not active.", raw.name)
+                };
                 let err = serde_json::json!({
-                    "error": format!(
-                        "Tool '{}' is not active. Call disclose_tool_schemas first.",
-                        raw.name
-                    ),
+                    "error": error,
                     "available_tools": available,
                 })
                 .to_string();
@@ -506,7 +545,26 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 rejects += 1;
                 continue;
             }
-            let (outcome, evs) = ToolRepairPipeline::repair(raw, ToolCatalog::global());
+            let semantics = g.config.tool_semantics.clone();
+            let semantics_catalog = ToolCatalog::from_semantics(&semantics).ok();
+            let (outcome, evs) = if semantics.catalog.tools.is_empty() {
+                (
+                    RepairOutcome::Repaired(ToolCallRecord {
+                        call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
+                        name: normalize_tool_name_hint(&raw.name),
+                        arguments_json: raw.arguments_json.clone(),
+                        attempt_metadata: None,
+                        repair_metadata: None,
+                    }),
+                    Vec::new(),
+                )
+            } else {
+                ToolRepairPipeline::repair_with_semantics(
+                    raw,
+                    semantics_catalog.as_ref().unwrap_or_else(|| ToolCatalog::global()),
+                    &semantics,
+                )
+            };
             for ev in evs {
                 g.emit(ev);
             }
@@ -588,6 +646,18 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         if !repaired.is_empty() {
+            if g.config.long_loop.max_tool_turns < g.config.max_turns
+                && crate::long_loop_policy::should_stop_tool_rounds(
+                    &g.config,
+                    g.guardrails.tool_calls_executed,
+                    false,
+                )
+            {
+                g.set_terminal(AgentAction::Failed(AgentError::GuardrailExceeded {
+                    kind: "max_tool_turns".into(),
+                }));
+                return;
+            }
             if g.config.enable_state_ledger {
                 for call in &repaired {
                     g.state_ledger.observe_tool_call(call);
@@ -715,9 +785,17 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 &g.io.tools_schema_json,
             )
             .total_tokens;
-            let spilled = if call.name == "append_blocks" {
+            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+            let spill_stored_copy_only = policy
+                .map(|policy| policy.spill_stored_copy_only)
+                .unwrap_or(false);
+            let skip_result_truncation = policy
+                .map(|policy| policy.skip_result_truncation)
+                .unwrap_or(false);
+            let spilled = if spill_stored_copy_only {
                 let mut stored_copy = res.clone();
-                let threshold = g.config.tool_spill_threshold_bytes;
+                let threshold =
+                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
                 let turn_index = g.turn_index;
                 spill_tool_result_if_needed(
                     &mut g.context_store,
@@ -727,7 +805,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     turn_index,
                 )
             } else {
-                let threshold = g.config.tool_spill_threshold_bytes;
+                let threshold =
+                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
                 let turn_index = g.turn_index;
                 spill_tool_result_if_needed(
                     &mut g.context_store,
@@ -738,7 +817,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 )
             };
 
-            if call.name != "append_blocks" {
+            if !skip_result_truncation {
                 let pressure = TokenLedger::estimate(
                     &g.session,
                     &g.config,
@@ -746,30 +825,39 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     g.io.context_window_tokens,
                     &g.io.tools_schema_json,
                 );
-                let budget = effective_tool_result_budget(&pressure, &g.capabilities, &g.config);
+                let budget = effective_tool_result_budget_for_window(
+                    &pressure,
+                    &g.capabilities,
+                    &g.config,
+                    g.io.context_window_tokens,
+                );
                 let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
                 res.result_json = payload;
                 res.truncated = res.truncated || truncated;
             }
 
-            record_artifact_progress(
-                &mut g.pending_artifact_ids,
-                &call.name,
-                &call.arguments_json,
-                &res.result_json,
-            );
+            if g.config.tool_semantics.artifact.is_some() {
+                let semantics = g.config.tool_semantics.clone();
+                record_artifact_progress_with_semantics(
+                    &mut g.pending_artifact_ids,
+                    &semantics,
+                    &call.name,
+                    &call.arguments_json,
+                    &res.result_json,
+                );
+            }
 
             g.session.messages.push(AgentMessage {
                 id: format!("tool-{}", res.call_id),
                 role: AgentRole::Tool,
                 content: res.result_json.clone(),
-                metadata: json!({"call_id": res.call_id, "tool_name": call.name}),
+                metadata: json!({"call_id": res.call_id, "tool_name": call.name, "truncated": res.truncated}),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
                 g.state_ledger.observe_tool_result(&res);
             }
-            if spilled.is_some() && call.name != "append_blocks" {
+            if spilled.is_some() && !spill_stored_copy_only {
                 let spill_tokens_after = TokenLedger::estimate(
                     &g.session,
                     &g.config,
@@ -801,9 +889,17 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 &g.io.tools_schema_json,
             )
             .total_tokens;
-            let threshold = g.config.tool_spill_threshold_bytes;
+            let threshold =
+                effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
             let turn_index = g.turn_index;
-            let spilled = if call.name == "append_blocks" {
+            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+            let spill_stored_copy_only = policy
+                .map(|policy| policy.spill_stored_copy_only)
+                .unwrap_or(false);
+            let skip_result_truncation = policy
+                .map(|policy| policy.skip_result_truncation)
+                .unwrap_or(false);
+            let spilled = if spill_stored_copy_only {
                 let mut stored_copy = res.clone();
                 spill_tool_result_if_needed(
                     &mut g.context_store,
@@ -821,7 +917,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     turn_index,
                 )
             };
-            if call.name != "append_blocks" {
+            if !skip_result_truncation {
                 let pressure = TokenLedger::estimate(
                     &g.session,
                     &g.config,
@@ -829,28 +925,37 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     g.io.context_window_tokens,
                     &g.io.tools_schema_json,
                 );
-                let budget = effective_tool_result_budget(&pressure, &g.capabilities, &g.config);
+                let budget = effective_tool_result_budget_for_window(
+                    &pressure,
+                    &g.capabilities,
+                    &g.config,
+                    g.io.context_window_tokens,
+                );
                 let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
                 res.result_json = payload;
                 res.truncated = res.truncated || truncated;
             }
-            record_artifact_progress(
-                &mut g.pending_artifact_ids,
-                &call.name,
-                &call.arguments_json,
-                &res.result_json,
-            );
+            if g.config.tool_semantics.artifact.is_some() {
+                let semantics = g.config.tool_semantics.clone();
+                record_artifact_progress_with_semantics(
+                    &mut g.pending_artifact_ids,
+                    &semantics,
+                    &call.name,
+                    &call.arguments_json,
+                    &res.result_json,
+                );
+            }
             g.session.messages.push(AgentMessage {
                 id: format!("tool-{}", res.call_id),
                 role: AgentRole::Tool,
                 content: res.result_json.clone(),
-                metadata: json!({"call_id": res.call_id, "tool_name": call.name}),
+                metadata: json!({"call_id": res.call_id, "tool_name": call.name, "truncated": res.truncated}),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
                 g.state_ledger.observe_tool_result(&res);
             }
-            if spilled.is_some() && call.name != "append_blocks" {
+            if spilled.is_some() && !spill_stored_copy_only {
                 let spill_tokens_after = TokenLedger::estimate(
                     &g.session,
                     &g.config,
@@ -913,7 +1018,14 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         if finalize_after_tool_stop {
-            let synth = synthetic_finalize_calls(&g.pending_artifact_ids);
+            let synth = if g.config.tool_semantics.artifact.is_some() {
+                synthetic_finalize_calls_with_semantics(
+                    &g.pending_artifact_ids,
+                    &g.config.tool_semantics,
+                )
+            } else {
+                synthetic_finalize_calls(&g.pending_artifact_ids)
+            };
             if !synth.is_empty() {
                 g.pending_execute = Some(synth);
                 g.pending_execute_skip_guardrail_count = true;
@@ -922,12 +1034,16 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             }
         }
 
-        match g.run_compaction_pass(CompactionTrigger::PostToolResult) {
-            Ok(Some(_)) => return,
-            Ok(None) => {}
-            Err(e) => {
-                g.set_terminal(AgentAction::Failed(e));
-                return;
+        let auto_finalize_queued =
+            g.pending_execute_skip_guardrail_count && g.pending_execute.is_some();
+        if !auto_finalize_queued {
+            match g.run_compaction_pass(CompactionTrigger::PostToolResult) {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(e) => {
+                    g.set_terminal(AgentAction::Failed(e));
+                    return;
+                }
             }
         }
 
@@ -959,6 +1075,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         g.phase = EnginePhase::Idle;
 
         let cfg = g.config.clone();
+        let message_count_before = g.session.messages.len() as u32;
         if let Err(reason) = apply_summary_result(&mut g.session, &req, &summary, &cfg, &ctx) {
             g.set_terminal(AgentAction::Failed(AgentError::CompactionFailed {
                 tier: "summary".into(),
@@ -986,11 +1103,13 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             .cloned()
             .expect("summary event");
         g.emit(AgentEvent::CompactionApplied(compact_ev));
-        g.emit(AgentEvent::PostCompact {
-            trigger: ctx.trigger,
-            summary_ref: Some(summary_ref),
-            history_ref: req.history_ref.clone(),
-        });
+        g.emit_post_compact(
+            ctx.trigger,
+            Some(summary_ref),
+            req.history_ref.clone(),
+            &[CompactionTier::Summary],
+            message_count_before,
+        );
 
         if g.pending_execute.is_some() {
             g.phase = EnginePhase::AwaitingTools;
@@ -1079,7 +1198,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 let tokens_after = ev.tokens_after;
                 g.session = sess;
                 g.emit(AgentEvent::CompactionApplied(ev));
-                g.emit_post_compact(trigger, None, None);
+                g.emit_post_compact(trigger, None, None, &[], 0);
                 AgentAction::ManualCompactCompleted(ManualCompactResult {
                     summary_ref: None,
                     history_ref: None,
@@ -1088,7 +1207,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 })
             }
             CompactionOutcome::NotApplicable => {
-                g.emit_post_compact(trigger, None, None);
+                g.emit_post_compact(trigger, None, None, &[], 0);
                 AgentAction::ManualCompactCompleted(ManualCompactResult {
                     summary_ref: None,
                     history_ref: None,
@@ -1164,11 +1283,23 @@ impl InnerSession {
         trigger: CompactionTrigger,
         summary_ref: Option<String>,
         history_ref: Option<String>,
+        destructive_tiers: &[CompactionTier],
+        message_count_before: u32,
     ) {
+        if !destructive_tiers.is_empty() {
+            let boundary = record_destructive_compaction_boundary(
+                &mut self.session,
+                trigger,
+                destructive_tiers.to_vec(),
+                message_count_before,
+            );
+            self.emit(AgentEvent::CompactionBoundary(boundary));
+        }
         self.emit(AgentEvent::PostCompact {
             trigger,
             summary_ref,
             history_ref,
+            transcript_revision_after: self.session.transcript_revision,
         });
     }
 
@@ -1212,6 +1343,8 @@ impl InnerSession {
     ) -> Result<Option<AgentAction>, AgentError> {
         let mut sync_applied = false;
         let mut last_history_ref: Option<String> = None;
+        let message_count_before = self.session.messages.len() as u32;
+        let mut destructive_tiers: Vec<CompactionTier> = Vec::new();
         loop {
             let ctx = self.make_ctx(trigger);
             let policy = resolve_context_policy(
@@ -1227,7 +1360,13 @@ impl InnerSession {
                 trigger,
                 self.io.context_window_tokens,
             );
-            let threshold_ratio = plan.threshold_ratio;
+            let threshold_tokens = plan.threshold_tokens;
+            let ratio_threshold_tokens = effective_threshold_tokens(
+                &self.config,
+                self.io.context_window_tokens,
+                plan.threshold_ratio,
+                None,
+            );
             let pressure = TokenLedger::estimate(
                 &self.session,
                 &self.config,
@@ -1237,10 +1376,39 @@ impl InnerSession {
             );
             self.session.ledger_snapshot = Some(pressure.clone());
 
+            let has_append_context = self.session.messages.iter().any(|message| {
+                message.content.contains("append_blocks")
+                    || message.content.contains("\"totalBlocks\"")
+                    || message
+                        .metadata
+                        .get("raw_tool_calls")
+                        .and_then(|v| v.as_array())
+                        .map(|calls| {
+                            calls.iter().any(|call| {
+                                call.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|name| name == "append_blocks")
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false)
+            });
+            let session_has_tool_messages = self
+                .session
+                .messages
+                .iter()
+                .any(|m| m.role == AgentRole::Tool);
+            let defer_compaction_failure = has_append_context
+                || self.pending_finalize_after_tool_stop
+                || (self.pending_execute.is_some()
+                    && !self.session.compaction_log.is_empty()
+                    && session_has_tool_messages);
+
             if matches!(trigger, CompactionTrigger::MidTurn)
                 && !self.config.allow_fifo_on_mid_turn
                 && !self.capabilities.summarization_allowed
                 && !self.session.compaction_log.is_empty()
+                && !defer_compaction_failure
             {
                 return Err(AgentError::CompactionFailed {
                     tier: "pipeline".into(),
@@ -1267,6 +1435,20 @@ impl InnerSession {
                     .unwrap_or(false),
                 CompactionTrigger::Manual => false,
             };
+            let has_destructive_compaction_candidate = self.capabilities.summarization_allowed
+                || (session_has_tool_messages && self.config.micro_keep_recent == 0)
+                || match trigger {
+                    CompactionTrigger::Preflight => self.config.allow_fifo_on_preflight,
+                    CompactionTrigger::MidTurn => self.config.allow_fifo_on_mid_turn,
+                    CompactionTrigger::PostToolResult => self.config.allow_fifo_on_post_tool_result,
+                    CompactionTrigger::Manual => true,
+                };
+            let absolute_fires = absolute_fires && has_destructive_compaction_candidate;
+            let active_threshold_tokens = if has_destructive_compaction_candidate {
+                threshold_tokens
+            } else {
+                ratio_threshold_tokens
+            };
             let turn_fires = matches!(trigger, CompactionTrigger::Preflight)
                 && self
                     .config
@@ -1282,13 +1464,34 @@ impl InnerSession {
                     .map(|m| matches!(m.role, AgentRole::Tool | AgentRole::User))
                     .unwrap_or(false);
 
-            if !should_compact_at(&pressure, threshold_ratio)
+            let tool_round_index = self.guardrails.tool_calls_executed;
+            let long_loop_fires = session_has_tool_messages
+                && should_compact_for_long_loop(
+                    &self.config,
+                    &self.capabilities,
+                    tool_round_index,
+                    trigger,
+                );
+            let entered_for_long_loop_only = long_loop_fires
+                && !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
+                && !absolute_fires
+                && !turn_fires
+                && !turn_end_fires;
+
+            if !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
                 && !absolute_fires
                 && !turn_fires
                 && !turn_end_fires
+                && !long_loop_fires
             {
                 if sync_applied {
-                    self.emit_post_compact(trigger, None, last_history_ref);
+                    self.emit_post_compact(
+                        trigger,
+                        None,
+                        last_history_ref,
+                        &destructive_tiers,
+                        message_count_before,
+                    );
                 }
                 return Ok(None);
             }
@@ -1298,27 +1501,10 @@ impl InnerSession {
                 ratio: pressure.ratio,
             });
 
-            let has_append_context = self.session.messages.iter().any(|message| {
-                message.content.contains("append_blocks")
-                    || message.content.contains("\"totalBlocks\"")
-                    || message
-                        .metadata
-                        .get("raw_tool_calls")
-                        .and_then(|v| v.as_array())
-                        .map(|calls| {
-                            calls.iter().any(|call| {
-                                call.get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|name| name == "append_blocks")
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
-            });
             if matches!(trigger, CompactionTrigger::MidTurn)
                 && !self.config.allow_fifo_on_mid_turn
                 && !self.capabilities.summarization_allowed
-                && !has_append_context
+                && !defer_compaction_failure
             {
                 return Err(AgentError::CompactionFailed {
                     tier: "pipeline".into(),
@@ -1331,7 +1517,10 @@ impl InnerSession {
                 if let Some(event) = spill_tool_messages_in_session(
                     &mut self.context_store,
                     &mut self.session,
-                    self.config.tool_spill_threshold_bytes,
+                    effective_tool_spill_threshold_bytes(
+                        &self.config,
+                        self.io.context_window_tokens,
+                    ),
                     self.turn_index,
                     trigger,
                 ) {
@@ -1375,11 +1564,13 @@ impl InnerSession {
             //  - plan.threshold_ratio = 0.0 so the pipeline's own ratio guard passes
             //  - ctx.trigger = MidTurn so the summary tier summarizes all messages
             //    (not just "before last user") for short sessions
-            let forced_by_non_ratio = !should_compact_at(&pressure, threshold_ratio)
-                && (absolute_fires || turn_fires || turn_end_fires);
+            let forced_by_non_ratio =
+                !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
+                    && (absolute_fires || turn_fires || turn_end_fires);
             let (effective_plan, effective_ctx) = if forced_by_non_ratio {
                 let mut p = plan.clone();
                 p.threshold_ratio = 0.0;
+                p.threshold_tokens = 0;
                 let mut c = ctx.clone();
                 c.trigger = CompactionTrigger::MidTurn;
                 (p, c)
@@ -1423,6 +1614,11 @@ impl InnerSession {
                     return Ok(Some(AgentAction::RequestSummary(req)));
                 }
                 CompactionOutcome::Applied(sess, ev) => {
+                    if is_destructive_compaction_tier(&ev.tier) {
+                        destructive_tiers.push(ev.tier.clone());
+                        self.destructive_tiers_this_turn += 1;
+                    }
+                    self.compaction_passes_this_turn += 1;
                     self.session = sess;
                     self.emit(AgentEvent::CompactionApplied(ev.clone()));
                     sync_applied = true;
@@ -1441,7 +1637,11 @@ impl InnerSession {
                         self.io.context_window_tokens,
                         &self.io.tools_schema_json,
                     );
-                    if should_compact_at(&p2, threshold_ratio) {
+                    if should_compact_at_token_threshold(&p2, active_threshold_tokens)
+                        && !entered_for_long_loop_only
+                        && !sync_applied
+                        && !defer_compaction_failure
+                    {
                         return Err(AgentError::CompactionFailed {
                             tier: "pipeline".into(),
                             reason:
@@ -1450,7 +1650,13 @@ impl InnerSession {
                         });
                     }
                     if sync_applied {
-                        self.emit_post_compact(trigger, None, last_history_ref);
+                        self.emit_post_compact(
+                            trigger,
+                            None,
+                            last_history_ref,
+                            &destructive_tiers,
+                            message_count_before,
+                        );
                     }
                     return Ok(None);
                 }
@@ -1467,6 +1673,9 @@ impl InnerSession {
         }
 
         self.turn_index += 1;
+        // Reset per-turn telemetry counters for the new user turn.
+        self.compaction_passes_this_turn = 0;
+        self.destructive_tiers_this_turn = 0;
         let allow = self
             .guardrails
             .allow_tool_call(&self.config, self.last_model_response_had_append_blocks);
@@ -1477,33 +1686,14 @@ impl InnerSession {
         });
 
         let cache_hints = if self.capabilities.prompt_cache_supported {
-            let stable_chars = self.io.system_prompt.len()
-                + self.io.tools_schema_json.len()
-                + self
-                    .session
-                    .messages
-                    .iter()
-                    .map(|message| message.content.len())
-                    .sum::<usize>();
-            if (stable_chars / 4) as u32 >= self.config.prompt_cache_anchor_threshold_tokens {
-                vec!["stable-prefix".to_string()]
-            } else {
+            if self.config.prompt_cache_anchor_threshold_tokens == u32::MAX {
                 vec![]
+            } else {
+                vec!["stable-prefix".to_string()]
             }
         } else {
             vec![]
         };
-
-        let mut session_messages = self.session.messages.clone();
-        if self.config.enable_state_ledger
-            && !session_messages
-                .iter()
-                .any(|message| message.role == AgentRole::CompactSummary)
-        {
-            if let Some(anchor) = self.state_ledger.as_anchor_message() {
-                session_messages.insert(0, anchor);
-            }
-        }
 
         // Emit before_model_request only when the last message is NOT a tool result
         // (i.e., this is the start of a new user→model cycle, not continuation after tools)
@@ -1517,80 +1707,7 @@ impl InnerSession {
             });
         }
 
-        let rendered_tool_catalog_json = render_runtime_tool_view(
-            &self.io.tools_schema_json,
-            &self.config,
-            &self.capabilities,
-            &self.loop_metrics,
-        )
-        .unwrap_or_else(|_| self.io.tools_schema_json.clone());
-
-        let has_catalog = !self.io.tool_catalog_json.trim().is_empty()
-            && self.io.tool_catalog_json.trim() != "[]";
-        let has_registry = !self.io.tool_schema_registry_json.trim().is_empty()
-            && self.io.tool_schema_registry_json.trim() != "[]";
-
-        // Compute the live active-tool schema payload from the registry. When activation
-        // has not yet diverged from the host-supplied initial schema, use the original.
-        let active_schema_json: String = if has_registry && !self.active_tool_names.is_empty() {
-            render_active_schema_json(
-                &self.io.tool_schema_registry_json,
-                &self.active_tool_names,
-            )
-        } else {
-            self.io.tools_schema_json.clone()
-        };
-
-        let tool_context_index = build_tool_context_index_with_registry(
-            &active_schema_json,
-            &self.io.tool_catalog_json,
-            &self.io.tool_schema_registry_json,
-            &mut self.context_store,
-            &self.config,
-            &self.capabilities,
-        );
-        let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
-            // Legacy single-channel deferral: zero out provider-facing schemas because
-            // the index already carries them. With the new compact/registry split we
-            // keep `tools_schema_json` as the active-only payload Kotlin supplied.
-            "[]".to_string()
-        } else {
-            active_schema_json
-        };
-
-        let file_context_index = self
-            .session
-            .session_context
-            .get("included_files")
-            .and_then(|value| serde_json::to_string(value).ok())
-            .and_then(|included_files_json| {
-                condense_file_context(
-                    &included_files_json,
-                    &mut self.context_store,
-                    &self.config,
-                    &self.capabilities,
-                )
-            });
-
-        let req = ModelRequest {
-            session_messages,
-            system_prompt: self.io.system_prompt.clone(),
-            rendered_tool_catalog_json,
-            tools_schema_json,
-            allow_tool_call: allow,
-            context_references: self
-                .context_store
-                .entries()
-                .map(|entry| entry.reference.clone())
-                .collect(),
-            state_ledger: self
-                .config
-                .enable_state_ledger
-                .then(|| self.state_ledger.clone()),
-            tool_context_index,
-            file_context_index,
-            cache_hints,
-        };
+        let req = self.build_model_request(allow, cache_hints);
 
         self.pending_call_model = Some(req.clone());
         self.model_requests_this_turn += 1;
@@ -1619,7 +1736,14 @@ impl InnerSession {
             }
         }
 
-        let synth = synthetic_finalize_calls(&self.pending_artifact_ids);
+        let synth = if self.config.tool_semantics.artifact.is_some() {
+            synthetic_finalize_calls_with_semantics(
+                &self.pending_artifact_ids,
+                &self.config.tool_semantics,
+            )
+        } else {
+            synthetic_finalize_calls(&self.pending_artifact_ids)
+        };
         if !synth.is_empty() {
             self.pending_execute = Some(synth);
             self.pending_execute_skip_guardrail_count = true;
@@ -1690,20 +1814,127 @@ impl InnerSession {
         if self.config.enable_state_ledger {
             self.state_ledger.observe_user_message(&injected_message);
         }
-        let request = ModelRequest {
-            session_messages: self.session.messages.clone(),
-            system_prompt: self.io.system_prompt.clone(),
-            rendered_tool_catalog_json: render_runtime_tool_view(
-                &self.io.tools_schema_json,
-                &self.config,
-                &self.capabilities,
-                &self.loop_metrics,
+        let allow = self
+            .guardrails
+            .allow_tool_call(&self.config, self.last_model_response_had_append_blocks);
+        let request = self.build_model_request(allow, vec![]);
+        self.pending_call_model = Some(request.clone());
+        self.model_requests_this_turn += 1;
+        self.phase = EnginePhase::AwaitingModel;
+        Some(AgentAction::CallModel(request))
+    }
+
+    fn build_model_request(
+        &mut self,
+        allow_tool_call: bool,
+        cache_hints: Vec<String>,
+    ) -> ModelRequest {
+        let session_messages: Vec<AgentMessage> = self
+            .session
+            .messages
+            .iter()
+            .filter(|m| {
+                m.metadata
+                    .get("superseded")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    != true
+            })
+            .cloned()
+            .collect();
+        // State-ledger anchor intentionally NOT injected at position 0 of session_messages.
+        // It would mutate byte 0 of the prefix on every turn (objective/decisions grow),
+        // breaking xAI/OpenAI prompt-cache prefix stability. Ledger content is already
+        // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
+
+        let rendered_tool_catalog_json = render_runtime_tool_view(
+            &self.io.tools_schema_json,
+            &self.config,
+            &self.capabilities,
+            &self.loop_metrics,
+        )
+        .unwrap_or_else(|_| self.io.tools_schema_json.clone());
+
+        let has_catalog = !self.io.tool_catalog_json.trim().is_empty()
+            && self.io.tool_catalog_json.trim() != "[]";
+        let has_registry = !self.io.tool_schema_registry_json.trim().is_empty()
+            && self.io.tool_schema_registry_json.trim() != "[]";
+
+        let active_schema_json: String = if has_registry && !self.active_tool_names.is_empty() {
+            render_active_schema_json(&self.io.tool_schema_registry_json, &self.active_tool_names)
+        } else {
+            self.io.tools_schema_json.clone()
+        };
+
+        let tool_context_index = build_tool_context_index_with_registry(
+            &active_schema_json,
+            &self.io.tool_catalog_json,
+            &self.io.tool_schema_registry_json,
+            &mut self.context_store,
+            &self.config,
+            &self.capabilities,
+        );
+        let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
+            "[]".to_string()
+        } else {
+            active_schema_json
+        };
+
+        let file_context_index = self
+            .session
+            .session_context
+            .get("included_files")
+            .and_then(|value| serde_json::to_string(value).ok())
+            .and_then(|included_files_json| {
+                condense_file_context(
+                    &included_files_json,
+                    &mut self.context_store,
+                    &self.config,
+                    &self.capabilities,
+                )
+            });
+
+        let generation = self.sidecar_builder.next_generation();
+        let sidecar_budget = self.config.long_loop.sidecar_byte_budget_per_call;
+        let ledger_delta = self
+            .config
+            .enable_state_ledger
+            .then(|| {
+                self.sidecar_builder.build_ledger_delta(
+                    &mut self.context_store,
+                    &self.state_ledger,
+                    sidecar_budget,
+                )
+            })
+            .flatten();
+        let tool_index_delta = tool_context_index.as_ref().and_then(|index| {
+            self.sidecar_builder.build_tool_index_payload(
+                &mut self.context_store,
+                index,
+                sidecar_budget,
             )
-            .unwrap_or_else(|_| self.io.tools_schema_json.clone()),
-            tools_schema_json: self.io.tools_schema_json.clone(),
-            allow_tool_call: self
-                .guardrails
-                .allow_tool_call(&self.config, self.last_model_response_had_append_blocks),
+        });
+        let file_index_delta = file_context_index.as_ref().and_then(|index| {
+            self.sidecar_builder.build_file_index_payload(
+                &mut self.context_store,
+                index,
+                sidecar_budget,
+            )
+        });
+        let sidecar_byte_len = ledger_delta.as_ref().map(|s| s.len()).unwrap_or(0)
+            + tool_index_delta.as_ref().map(|s| s.len()).unwrap_or(0)
+            + file_index_delta.as_ref().map(|s| s.len()).unwrap_or(0);
+        self.sidecar_builder
+            .record_rolling_cache_entry(generation, sidecar_byte_len);
+        self.sidecar_builder
+            .enforce_total_budget(&self.config.long_loop);
+
+        ModelRequest {
+            session_messages,
+            system_prompt: self.io.system_prompt.clone(),
+            rendered_tool_catalog_json,
+            tools_schema_json,
+            allow_tool_call,
             context_references: self
                 .context_store
                 .entries()
@@ -1713,14 +1944,46 @@ impl InnerSession {
                 .config
                 .enable_state_ledger
                 .then(|| self.state_ledger.clone()),
-            tool_context_index: None,
-            file_context_index: None,
-            cache_hints: vec![],
-        };
-        self.pending_call_model = Some(request.clone());
-        self.model_requests_this_turn += 1;
-        self.phase = EnginePhase::AwaitingModel;
-        Some(AgentAction::CallModel(request))
+            tool_context_index,
+            file_context_index,
+            cache_hints,
+            provider_context: ProviderContextSnapshot {
+                transcript_revision: self.session.transcript_revision,
+                sidecar_generation: generation,
+                sidecar_byte_len: sidecar_byte_len.min(u32::MAX as usize) as u32,
+                compaction_passes_this_turn: self.compaction_passes_this_turn,
+                destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+                pressure_ratio_at_call_model_millis: {
+                    let ratio = self
+                        .session
+                        .ledger_snapshot
+                        .as_ref()
+                        .map(|p| p.ratio)
+                        .unwrap_or_else(|| {
+                            TokenLedger::estimate(
+                                &self.session,
+                                &self.config,
+                                &self.io.provider,
+                                self.io.context_window_tokens,
+                                &self.io.tools_schema_json,
+                            )
+                            .ratio
+                        });
+                    (ratio * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32
+                },
+            },
+            state_ledger_delta_json: if generation == 0 { None } else { ledger_delta },
+            tool_context_index_delta_json: if generation == 0 {
+                None
+            } else {
+                tool_index_delta
+            },
+            file_context_index_delta_json: if generation == 0 {
+                None
+            } else {
+                file_index_delta
+            },
+        }
     }
 
     fn set_terminal_or_pending(&mut self, action: AgentAction) {
@@ -1788,6 +2051,57 @@ mod tests {
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         }
+    }
+
+    #[test]
+    #[cfg(feature = "lalr-harness")]
+    fn create_session_wires_long_loop_policy_from_context_tier() {
+        use crate::long_loop_policy::LongLoopPolicy;
+        use crate::policy::ContextPolicyTier;
+
+        let eng = AgentEngine::new(
+            Arc::new(PanicTransport),
+            Arc::new(RecordingExecutor {
+                results: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoOpSummarizer),
+        );
+        let hosted = eng.create_session(
+            vec![],
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                context_policy_tier: ContextPolicyTier::HostedMutable,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+        assert_eq!(
+            hosted.lalr_config().long_loop,
+            LongLoopPolicy::hosted_mutable_defaults()
+        );
+
+        let fixed_kv = eng.create_session(
+            vec![],
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                context_policy_tier: ContextPolicyTier::FixedKv,
+                kv_fixed: true,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+        assert_eq!(
+            fixed_kv.lalr_config().long_loop,
+            LongLoopPolicy::fixed_kv_defaults()
+        );
     }
 
     #[test]
@@ -1938,7 +2252,10 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::default(),
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                ..AgentConfig::default()
+            },
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2171,7 +2488,7 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::default(),
+            AgentConfig::enclave_compat(),
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2263,7 +2580,7 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::default(),
+            AgentConfig::enclave_compat(),
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2350,6 +2667,134 @@ mod tests {
         );
 
         assert!(matches!(eng.next_action(&h), AgentAction::Finished));
+    }
+
+    #[test]
+    fn tb_10_seed_guardrails_auto_finalize_repro() {
+        let eng = AgentEngine::new(
+            Arc::new(PanicTransport),
+            Arc::new(RecordingExecutor {
+                results: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoOpSummarizer),
+        );
+        let h = eng.create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: serde_json::Value::Null,
+            }],
+            AgentConfig::enclave_compat(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+        h.integration_test_seed_guardrails(3, 0, 0, false);
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![RawToolCall {
+                    id: Some("c1".into()),
+                    name: "web_search".into(),
+                    arguments_json: r#"{"query":"x"}"#.into(),
+                }],
+                finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
+            },
+        );
+        let _ = eng.next_action(&h);
+        eng.submit_tool_results(
+            &h,
+            vec![ToolResultRecord {
+                call_id: "c1".into(),
+                result_json: r#"{"results":[]}"#.into(),
+                truncated: false,
+                soft_failure: false,
+                activated_tool_names: Vec::new(),
+                result_metadata: None,
+            }],
+        );
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![RawToolCall {
+                    id: Some("c-art".into()),
+                    name: "start_artifact".into(),
+                    arguments_json: r#"{"title":"T","kind":"document"}"#.into(),
+                }],
+                finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
+            },
+        );
+        let after_art = eng.next_action(&h);
+        assert!(
+            matches!(after_art, AgentAction::ExecuteTools(_)),
+            "after start_artifact: {after_art:?}"
+        );
+        eng.submit_tool_results(
+            &h,
+            vec![ToolResultRecord {
+                call_id: "c-art".into(),
+                result_json: r#"{"status":"success","artifactId":"art-1"}"#.into(),
+                truncated: false,
+                soft_failure: false,
+                activated_tool_names: Vec::new(),
+                result_metadata: None,
+            }],
+        );
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![RawToolCall {
+                    id: Some("c2".into()),
+                    name: "append_blocks".into(),
+                    arguments_json: r#"{"artifactId":"art-1","blocks":[]}"#.into(),
+                }],
+                finish_reason: FinishReason::Stop,
+                provider_reasoning_content: None,
+            },
+        );
+        let inner = h.lock_inner();
+        assert!(
+            inner.terminal_action.is_none(),
+            "terminal after append submit: {:?}",
+            inner.terminal_action
+        );
+        drop(inner);
+        let after_append_submit = eng.next_action(&h);
+        assert!(
+            matches!(after_append_submit, AgentAction::ExecuteTools(_)),
+            "after append submit: {after_append_submit:?}"
+        );
+        eng.submit_tool_results(
+            &h,
+            vec![ToolResultRecord {
+                call_id: "c2".into(),
+                result_json: r#"{"status":"success","isComplete":false}"#.into(),
+                truncated: false,
+                soft_failure: false,
+                activated_tool_names: Vec::new(),
+                result_metadata: None,
+            }],
+        );
+        match eng.next_action(&h) {
+            AgentAction::ExecuteTools(calls) => {
+                assert_eq!(calls[0].call_id, "auto-finalize-art-1");
+            }
+            other => panic!("expected auto-finalize, got {other:?}"),
+        }
     }
 
     #[test]

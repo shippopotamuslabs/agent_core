@@ -85,12 +85,11 @@ pub fn build_tool_context_index_with_registry(
 
     // Persist the registry (full schemas) when supplied; otherwise fall back to the
     // legacy single-channel persistence of `tools_schema_json`.
-    let stash_content =
-        if !registry_json.trim().is_empty() && registry_json.trim() != "[]" {
-            registry_json.to_string()
-        } else {
-            tools_schema_json.to_string()
-        };
+    let stash_content = if !registry_json.trim().is_empty() && registry_json.trim() != "[]" {
+        registry_json.to_string()
+    } else {
+        tools_schema_json.to_string()
+    };
     let seq = store.next_sequence();
     let id = format!("tool-schema-{seq}");
     let preview = make_preview(&stash_content);

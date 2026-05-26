@@ -1,10 +1,12 @@
 //! UniFFI-friendly DTOs (no `serde_json::Value` in the FFI boundary).
 
 use crate::context_store::{ContextReference, ContextReferenceKind};
+use crate::long_loop_policy::LongLoopPolicy;
 use crate::manual_compact::{ManualCompactRequest, ManualCompactResult};
 use crate::message::{AgentMessage, AgentRole, RepairRecord, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
 use crate::session::{AgentConfig, SessionCapabilities};
+use crate::sidecar_builder::ProviderContextSnapshot;
 use crate::tool_parse::result::{
     ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField,
 };
@@ -159,6 +161,42 @@ impl From<FfiContextReference> for ContextReference {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiProviderContextSnapshot {
+    pub transcript_revision: u64,
+    pub sidecar_generation: u32,
+    pub sidecar_byte_len: u32,
+    pub compaction_passes_this_turn: u32,
+    pub destructive_tiers_this_turn: u32,
+    pub pressure_ratio_at_call_model_millis: u32,
+}
+
+impl From<ProviderContextSnapshot> for FfiProviderContextSnapshot {
+    fn from(snapshot: ProviderContextSnapshot) -> Self {
+        Self {
+            transcript_revision: snapshot.transcript_revision,
+            sidecar_generation: snapshot.sidecar_generation,
+            sidecar_byte_len: snapshot.sidecar_byte_len,
+            compaction_passes_this_turn: snapshot.compaction_passes_this_turn,
+            destructive_tiers_this_turn: snapshot.destructive_tiers_this_turn,
+            pressure_ratio_at_call_model_millis: snapshot.pressure_ratio_at_call_model_millis,
+        }
+    }
+}
+
+impl From<FfiProviderContextSnapshot> for ProviderContextSnapshot {
+    fn from(snapshot: FfiProviderContextSnapshot) -> Self {
+        Self {
+            transcript_revision: snapshot.transcript_revision,
+            sidecar_generation: snapshot.sidecar_generation,
+            sidecar_byte_len: snapshot.sidecar_byte_len,
+            compaction_passes_this_turn: snapshot.compaction_passes_this_turn,
+            destructive_tiers_this_turn: snapshot.destructive_tiers_this_turn,
+            pressure_ratio_at_call_model_millis: snapshot.pressure_ratio_at_call_model_millis,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiModelRequest {
     pub session_messages: Vec<FfiAgentMessage>,
     pub system_prompt: String,
@@ -169,6 +207,10 @@ pub struct FfiModelRequest {
     pub tool_context_index_json: Option<String>,
     pub file_context_index_json: Option<String>,
     pub cache_hints: Vec<String>,
+    pub provider_context: FfiProviderContextSnapshot,
+    pub state_ledger_delta_json: Option<String>,
+    pub tool_context_index_delta_json: Option<String>,
+    pub file_context_index_delta_json: Option<String>,
 }
 
 impl From<FfiModelRequest> for ModelRequest {
@@ -190,6 +232,10 @@ impl From<FfiModelRequest> for ModelRequest {
                 .file_context_index_json
                 .and_then(|json| serde_json::from_str(&json).ok()),
             cache_hints: m.cache_hints,
+            provider_context: m.provider_context.into(),
+            state_ledger_delta_json: m.state_ledger_delta_json,
+            tool_context_index_delta_json: m.tool_context_index_delta_json,
+            file_context_index_delta_json: m.file_context_index_delta_json,
         }
     }
 }
@@ -212,6 +258,10 @@ impl From<ModelRequest> for FfiModelRequest {
                 .file_context_index
                 .and_then(|index| serde_json::to_string(&index).ok()),
             cache_hints: m.cache_hints,
+            provider_context: m.provider_context.into(),
+            state_ledger_delta_json: m.state_ledger_delta_json,
+            tool_context_index_delta_json: m.tool_context_index_delta_json,
+            file_context_index_delta_json: m.file_context_index_delta_json,
         }
     }
 }
@@ -665,6 +715,39 @@ impl From<FfiSessionIoParams> for crate::engine::SessionIoParams {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiLongLoopPolicy {
+    pub max_tool_turns: u32,
+    pub sidecar_byte_budget_per_call: u64,
+    pub sidecar_total_byte_budget: u64,
+    pub summarize_after_tool_turns: u32,
+    pub compact_every_n_tool_turns: u32,
+}
+
+impl From<FfiLongLoopPolicy> for LongLoopPolicy {
+    fn from(f: FfiLongLoopPolicy) -> Self {
+        Self {
+            max_tool_turns: f.max_tool_turns,
+            sidecar_byte_budget_per_call: f.sidecar_byte_budget_per_call as usize,
+            sidecar_total_byte_budget: f.sidecar_total_byte_budget as usize,
+            summarize_after_tool_turns: f.summarize_after_tool_turns,
+            compact_every_n_tool_turns: f.compact_every_n_tool_turns,
+        }
+    }
+}
+
+impl From<LongLoopPolicy> for FfiLongLoopPolicy {
+    fn from(l: LongLoopPolicy) -> Self {
+        Self {
+            max_tool_turns: l.max_tool_turns,
+            sidecar_byte_budget_per_call: l.sidecar_byte_budget_per_call as u64,
+            sidecar_total_byte_budget: l.sidecar_total_byte_budget as u64,
+            summarize_after_tool_turns: l.summarize_after_tool_turns,
+            compact_every_n_tool_turns: l.compact_every_n_tool_turns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiAgentConfig {
     pub max_turns: u32,
     pub threshold_ratio: f32,
@@ -672,6 +755,8 @@ pub struct FfiAgentConfig {
     pub tool_retry_limit: u32,
     pub greedy_append_blocks: bool,
     pub tool_result_budget_cloud_bytes: u64,
+    pub tool_result_budget_relaxed_bytes: u64,
+    pub tool_result_truncation_pressure_ratio: f32,
     pub mid_turn_threshold_ratio: f32,
     pub post_tool_result_threshold_ratio: f32,
     pub manual_compact_threshold_ratio: f32,
@@ -689,9 +774,18 @@ pub struct FfiAgentConfig {
     pub history_snapshot_threshold_tokens: u32,
     pub file_outline_threshold_tokens: u32,
     pub prompt_cache_anchor_threshold_tokens: u32,
+    pub output_reserve_ratio: f32,
+    pub output_reserve_floor_tokens: u32,
+    pub output_reserve_max_tokens: u32,
+    pub preflight_token_threshold: Option<u32>,
+    pub mid_turn_token_threshold: Option<u32>,
+    pub post_tool_result_token_threshold: Option<u32>,
+    pub message_threshold: Option<u32>,
+    pub retention_window_tokens: u32,
     pub max_model_requests_per_turn: u32,
     pub enable_loop_hooks: bool,
     pub enable_pending_work_guard: bool,
+    pub long_loop: FfiLongLoopPolicy,
 }
 
 impl Default for FfiAgentConfig {
@@ -704,6 +798,8 @@ impl Default for FfiAgentConfig {
             tool_retry_limit: c.tool_retry_limit,
             greedy_append_blocks: c.greedy_append_blocks,
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
+            tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
+            tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,
             mid_turn_threshold_ratio: c.mid_turn_threshold_ratio,
             post_tool_result_threshold_ratio: c.post_tool_result_threshold_ratio,
             manual_compact_threshold_ratio: c.manual_compact_threshold_ratio,
@@ -721,9 +817,18 @@ impl Default for FfiAgentConfig {
             history_snapshot_threshold_tokens: c.history_snapshot_threshold_tokens,
             file_outline_threshold_tokens: c.file_outline_threshold_tokens,
             prompt_cache_anchor_threshold_tokens: c.prompt_cache_anchor_threshold_tokens,
+            output_reserve_ratio: c.output_reserve_ratio,
+            output_reserve_floor_tokens: c.output_reserve_floor_tokens,
+            output_reserve_max_tokens: c.output_reserve_max_tokens,
+            preflight_token_threshold: c.preflight_token_threshold,
+            mid_turn_token_threshold: c.mid_turn_token_threshold,
+            post_tool_result_token_threshold: c.post_tool_result_token_threshold,
+            message_threshold: c.message_threshold,
+            retention_window_tokens: c.retention_window_tokens,
             max_model_requests_per_turn: c.max_model_requests_per_turn,
             enable_loop_hooks: c.enable_loop_hooks,
             enable_pending_work_guard: c.enable_pending_work_guard,
+            long_loop: FfiLongLoopPolicy::from(c.long_loop),
         }
     }
 }
@@ -737,6 +842,8 @@ impl From<FfiAgentConfig> for AgentConfig {
             tool_retry_limit: f.tool_retry_limit,
             greedy_append_blocks: f.greedy_append_blocks,
             tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
+            tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
+            tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
             mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
             post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
             manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
@@ -754,25 +861,27 @@ impl From<FfiAgentConfig> for AgentConfig {
             history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
             file_outline_threshold_tokens: f.file_outline_threshold_tokens,
             prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
+            output_reserve_ratio: f.output_reserve_ratio,
+            output_reserve_floor_tokens: f.output_reserve_floor_tokens,
+            output_reserve_max_tokens: f.output_reserve_max_tokens,
             max_model_requests_per_turn: f.max_model_requests_per_turn,
             token_correction: std::collections::HashMap::new(),
-            preflight_token_threshold: None,
-            mid_turn_token_threshold: None,
-            post_tool_result_token_threshold: None,
+            preflight_token_threshold: f.preflight_token_threshold,
+            mid_turn_token_threshold: f.mid_turn_token_threshold,
+            post_tool_result_token_threshold: f.post_tool_result_token_threshold,
             turn_threshold: None,
-            message_threshold: None,
+            message_threshold: f.message_threshold,
             compact_on_turn_end: false,
             retention_window_messages: 0,
+            retention_window_tokens: f.retention_window_tokens,
             eviction_window_ratio: 0.0,
             enable_loop_hooks: f.enable_loop_hooks,
             enable_doom_loop_guard: false,
             enable_pending_work_guard: f.enable_pending_work_guard,
             require_read_before_edit: false,
             default_tool_timeout_ms: None,
-            tool_result_budget_relaxed_bytes: AgentConfig::default()
-                .tool_result_budget_relaxed_bytes,
-            tool_result_truncation_pressure_ratio: AgentConfig::default()
-                .tool_result_truncation_pressure_ratio,
+            long_loop: LongLoopPolicy::from(f.long_loop),
+            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::agnostic(),
         }
     }
 }
@@ -867,7 +976,7 @@ impl From<FfiSessionCapabilities> for SessionCapabilities {
 use crate::action::AgentAction;
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum FfiCompactionTrigger {
     Preflight,
     MidTurn,
@@ -897,7 +1006,7 @@ impl From<FfiCompactionTrigger> for CompactionTrigger {
     }
 }
 
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum FfiCompactionTier {
     Micro,
     Fifo,
@@ -935,6 +1044,34 @@ impl From<CompactionEvent> for FfiCompactionEvent {
             tokens_before: e.tokens_before,
             tokens_after: e.tokens_after,
             trigger: e.trigger.into(),
+        }
+    }
+}
+
+/// UniFFI mirror of [`crate::transcript_revision::CompactionBoundary`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct FfiCompactionBoundary {
+    pub boundary_id: String,
+    pub revision_before: u64,
+    pub revision_after: u64,
+    pub trigger: FfiCompactionTrigger,
+    pub tiers_applied: Vec<FfiCompactionTier>,
+    pub message_count_before: u32,
+    pub message_count_after: u32,
+    pub destructive: bool,
+}
+
+impl From<crate::transcript_revision::CompactionBoundary> for FfiCompactionBoundary {
+    fn from(b: crate::transcript_revision::CompactionBoundary) -> Self {
+        Self {
+            boundary_id: b.boundary_id,
+            revision_before: b.revision_before,
+            revision_after: b.revision_after,
+            trigger: b.trigger.into(),
+            tiers_applied: b.tiers_applied.into_iter().map(Into::into).collect(),
+            message_count_before: b.message_count_before,
+            message_count_after: b.message_count_after,
+            destructive: b.destructive,
         }
     }
 }
@@ -978,6 +1115,10 @@ pub enum FfiAgentEvent {
         trigger: FfiCompactionTrigger,
         summary_ref: Option<String>,
         history_ref: Option<String>,
+        transcript_revision_after: u64,
+    },
+    CompactionBoundary {
+        boundary: FfiCompactionBoundary,
     },
     ToolPolicyDenied {
         tool_name: String,
@@ -1041,10 +1182,15 @@ impl From<AgentEvent> for FfiAgentEvent {
                 trigger,
                 summary_ref,
                 history_ref,
+                transcript_revision_after,
             } => FfiAgentEvent::PostCompact {
                 trigger: trigger.into(),
                 summary_ref,
                 history_ref,
+                transcript_revision_after,
+            },
+            AgentEvent::CompactionBoundary(boundary) => FfiAgentEvent::CompactionBoundary {
+                boundary: boundary.into(),
             },
             AgentEvent::ToolPolicyDenied { tool_name } => {
                 FfiAgentEvent::ToolPolicyDenied { tool_name }

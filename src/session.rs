@@ -1,5 +1,8 @@
 use crate::events::CompactionEvent;
+use crate::long_loop_policy::LongLoopPolicy;
 use crate::message::{AgentMessage, ToolCallRecord};
+use crate::policy::ContextPolicyTier;
+use crate::tool_semantics::ToolSemanticsConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
@@ -70,8 +73,23 @@ pub struct AgentConfig {
     pub history_snapshot_threshold_tokens: u32,
     #[serde(default = "default_file_outline_threshold_tokens")]
     pub file_outline_threshold_tokens: u32,
+    /// Opportunistic prompt-cache anchor control.
+    ///
+    /// Semantics are intentionally inverted from a normal threshold:
+    /// - `u32::MAX` — cache anchoring **disabled** (used for small-window / FixedKv tiers
+    ///   where rewriting history invalidates the KV cache).
+    /// - Any other value — cache anchoring **enabled** (0 is the standard on-by-default value).
+    ///
+    /// The name retains the original "threshold" form for FFI/serialization compatibility.
+    /// Use `== u32::MAX` to test for disabled state.
     #[serde(default = "default_prompt_cache_anchor_threshold_tokens")]
     pub prompt_cache_anchor_threshold_tokens: u32,
+    #[serde(default = "default_output_reserve_ratio")]
+    pub output_reserve_ratio: f32,
+    #[serde(default = "default_output_reserve_floor_tokens")]
+    pub output_reserve_floor_tokens: u32,
+    #[serde(default = "default_output_reserve_max_tokens")]
+    pub output_reserve_max_tokens: u32,
     #[serde(default)]
     pub preflight_token_threshold: Option<u32>,
     #[serde(default)]
@@ -87,6 +105,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub retention_window_messages: usize,
     #[serde(default)]
+    pub retention_window_tokens: u32,
+    #[serde(default)]
     pub eviction_window_ratio: f32,
     #[serde(default)]
     pub enable_loop_hooks: bool,
@@ -100,6 +120,11 @@ pub struct AgentConfig {
     pub default_tool_timeout_ms: Option<u64>,
     #[serde(default = "default_max_model_requests_per_turn")]
     pub max_model_requests_per_turn: u32,
+    /// Long agent-loop policy (tool caps, sidecar budgets, turn-count compaction).
+    #[serde(default)]
+    pub long_loop: LongLoopPolicy,
+    #[serde(default)]
+    pub tool_semantics: ToolSemanticsConfig,
 }
 
 fn default_threshold_ratio() -> f32 {
@@ -154,7 +179,16 @@ fn default_file_outline_threshold_tokens() -> u32 {
     2048
 }
 fn default_prompt_cache_anchor_threshold_tokens() -> u32 {
+    0
+}
+fn default_output_reserve_ratio() -> f32 {
+    0.05
+}
+fn default_output_reserve_floor_tokens() -> u32 {
     4096
+}
+fn default_output_reserve_max_tokens() -> u32 {
+    16_384
 }
 fn default_max_model_requests_per_turn() -> u32 {
     1
@@ -167,7 +201,7 @@ impl Default for AgentConfig {
             threshold_ratio: default_threshold_ratio(),
             micro_keep_recent: default_micro_keep_recent(),
             tool_retry_limit: default_tool_retry_limit(),
-            greedy_append_blocks: default_true(),
+            greedy_append_blocks: false,
             tool_result_budget_cloud_bytes: default_tool_result_budget_cloud_bytes(),
             tool_result_budget_relaxed_bytes: default_tool_result_budget_relaxed_bytes(),
             tool_result_truncation_pressure_ratio: default_tool_result_truncation_pressure_ratio(),
@@ -189,6 +223,9 @@ impl Default for AgentConfig {
             history_snapshot_threshold_tokens: default_history_snapshot_threshold_tokens(),
             file_outline_threshold_tokens: default_file_outline_threshold_tokens(),
             prompt_cache_anchor_threshold_tokens: default_prompt_cache_anchor_threshold_tokens(),
+            output_reserve_ratio: default_output_reserve_ratio(),
+            output_reserve_floor_tokens: default_output_reserve_floor_tokens(),
+            output_reserve_max_tokens: default_output_reserve_max_tokens(),
             preflight_token_threshold: None,
             mid_turn_token_threshold: None,
             post_tool_result_token_threshold: None,
@@ -196,6 +233,7 @@ impl Default for AgentConfig {
             message_threshold: None,
             compact_on_turn_end: false,
             retention_window_messages: 0,
+            retention_window_tokens: 0,
             eviction_window_ratio: 0.0,
             enable_loop_hooks: false,
             enable_doom_loop_guard: false,
@@ -203,6 +241,178 @@ impl Default for AgentConfig {
             require_read_before_edit: false,
             default_tool_timeout_ms: None,
             max_model_requests_per_turn: default_max_model_requests_per_turn(),
+            long_loop: LongLoopPolicy::default(),
+            tool_semantics: ToolSemanticsConfig::agnostic(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Enclave/Pocket Crew compatibility: catalog, disclosure, artifact, and repair semantics.
+    pub fn enclave_compat() -> Self {
+        let mut config = Self::default();
+        config.tool_semantics = ToolSemanticsConfig::enclave_compat();
+        config.greedy_append_blocks = true;
+        config
+    }
+
+    pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
+        let mut config = Self::default();
+        config.long_loop = LongLoopPolicy::for_policy_tier(tier);
+        match tier {
+            ContextPolicyTier::HostedMutable | ContextPolicyTier::HighContext => {
+                config.threshold_ratio = 0.80;
+                config.preflight_token_threshold = Some(150_000);
+                config.mid_turn_token_threshold = Some(180_000);
+                config.output_reserve_ratio = 0.05;
+                config.output_reserve_floor_tokens = 4096;
+                config.output_reserve_max_tokens = 16_384;
+                config.retention_window_tokens = 16_384;
+                config.message_threshold = Some(200);
+                config.tool_spill_threshold_bytes = 8192;
+                config.terminal_spill_threshold_bytes = 8192;
+                config.tool_result_budget_cloud_bytes = 16_384;
+                config.tool_result_budget_relaxed_bytes = 131_072;
+                config.prompt_cache_anchor_threshold_tokens = 0;
+            }
+            ContextPolicyTier::HostedProxy => {
+                config.threshold_ratio = 0.80;
+                config.preflight_token_threshold = Some(120_000);
+                config.mid_turn_token_threshold = None;
+                config.output_reserve_ratio = 0.10;
+                config.output_reserve_floor_tokens = 4096;
+                config.output_reserve_max_tokens = 12_288;
+                config.retention_window_tokens = 12_288;
+                config.message_threshold = Some(150);
+                config.tool_spill_threshold_bytes = 8192;
+                config.terminal_spill_threshold_bytes = 8192;
+                config.tool_result_budget_cloud_bytes = 16_384;
+                config.tool_result_budget_relaxed_bytes = 131_072;
+                config.prompt_cache_anchor_threshold_tokens = 0;
+            }
+            ContextPolicyTier::LocalMutable => {
+                config.threshold_ratio = 0.78;
+                config.preflight_token_threshold = None;
+                config.mid_turn_token_threshold = None;
+                config.output_reserve_ratio = 0.15;
+                config.output_reserve_floor_tokens = 2048;
+                config.output_reserve_max_tokens = 8192;
+                config.retention_window_tokens = 8192;
+                config.message_threshold = Some(100);
+                config.tool_spill_threshold_bytes = 4096;
+                config.terminal_spill_threshold_bytes = 4096;
+                config.tool_result_budget_cloud_bytes = 8192;
+                config.tool_result_budget_relaxed_bytes = 65_536;
+                config.prompt_cache_anchor_threshold_tokens = 0;
+            }
+            ContextPolicyTier::SmallContext => {
+                config.threshold_ratio = 0.72;
+                config.preflight_token_threshold = None;
+                config.mid_turn_token_threshold = None;
+                config.output_reserve_ratio = 0.20;
+                config.output_reserve_floor_tokens = 1024;
+                config.output_reserve_max_tokens = 4096;
+                config.retention_window_tokens = 4096;
+                config.message_threshold = Some(80);
+                config.tool_spill_threshold_bytes = 2048;
+                config.terminal_spill_threshold_bytes = 2048;
+                config.tool_result_budget_cloud_bytes = 4096;
+                config.tool_result_budget_relaxed_bytes = 32_768;
+                config.enable_context_store = true;
+                config.prompt_cache_anchor_threshold_tokens = u32::MAX;
+            }
+            ContextPolicyTier::FixedKv => {
+                config.threshold_ratio = 0.60;
+                config.preflight_token_threshold = None;
+                config.mid_turn_token_threshold = None;
+                config.output_reserve_ratio = 0.20;
+                config.output_reserve_floor_tokens = 512;
+                config.output_reserve_max_tokens = 2048;
+                config.retention_window_tokens = 2048;
+                config.message_threshold = Some(60);
+                config.tool_spill_threshold_bytes = 1024;
+                config.terminal_spill_threshold_bytes = 1024;
+                config.tool_result_budget_cloud_bytes = 2048;
+                config.tool_result_budget_relaxed_bytes = 16_384;
+                config.enable_context_store = true;
+                config.prompt_cache_anchor_threshold_tokens = u32::MAX;
+            }
+        }
+        config
+    }
+
+    /// Apply tier-level defaults to fields that the host has not explicitly overridden.
+    ///
+    /// # Trade-off
+    /// Field-by-field equality against `Self::default()` cannot distinguish "host explicitly
+    /// set this field to its default value" from "host left this field unset". For example,
+    /// a host that intentionally sets `retention_window_tokens = 0` on a `HostedMutable`
+    /// session will see it overridden to `16384`.
+    ///
+    /// If per-field opt-out is needed in the future, fields should be migrated to
+    /// `Option<T>` (a larger refactor deferred for now).
+    pub fn apply_policy_tier_defaults(
+        &mut self,
+        tier: ContextPolicyTier,
+        context_window_tokens: u32,
+    ) {
+        let base = Self::default();
+        let tiered = Self::for_policy_tier(tier);
+
+        if self.long_loop == base.long_loop {
+            self.long_loop = tiered.long_loop;
+        }
+        if self.threshold_ratio == base.threshold_ratio {
+            self.threshold_ratio = tiered.threshold_ratio;
+        }
+        if self.preflight_token_threshold == base.preflight_token_threshold
+            && self.threshold_ratio == base.threshold_ratio
+        {
+            self.preflight_token_threshold = tiered.preflight_token_threshold;
+        }
+        if self.mid_turn_token_threshold == base.mid_turn_token_threshold
+            && self.mid_turn_threshold_ratio == base.mid_turn_threshold_ratio
+        {
+            self.mid_turn_token_threshold = tiered.mid_turn_token_threshold;
+        }
+        if self.post_tool_result_token_threshold == base.post_tool_result_token_threshold
+            && self.post_tool_result_threshold_ratio == base.post_tool_result_threshold_ratio
+        {
+            self.post_tool_result_token_threshold = tiered.post_tool_result_token_threshold;
+        }
+        if self.output_reserve_ratio == base.output_reserve_ratio {
+            self.output_reserve_ratio = tiered.output_reserve_ratio;
+        }
+        if self.output_reserve_floor_tokens == base.output_reserve_floor_tokens {
+            self.output_reserve_floor_tokens = tiered.output_reserve_floor_tokens;
+        }
+        if self.output_reserve_max_tokens == base.output_reserve_max_tokens {
+            self.output_reserve_max_tokens = tiered.output_reserve_max_tokens;
+        }
+        if self.retention_window_tokens == base.retention_window_tokens {
+            self.retention_window_tokens = tiered.retention_window_tokens;
+        }
+        if self.message_threshold == base.message_threshold {
+            self.message_threshold = tiered.message_threshold;
+        }
+        if self.tool_spill_threshold_bytes == base.tool_spill_threshold_bytes {
+            self.tool_spill_threshold_bytes = tiered.tool_spill_threshold_bytes;
+        }
+        if self.terminal_spill_threshold_bytes == base.terminal_spill_threshold_bytes {
+            self.terminal_spill_threshold_bytes = tiered.terminal_spill_threshold_bytes;
+        }
+        if self.tool_result_budget_cloud_bytes == base.tool_result_budget_cloud_bytes {
+            self.tool_result_budget_cloud_bytes = tiered.tool_result_budget_cloud_bytes;
+        }
+        if self.tool_result_budget_relaxed_bytes == base.tool_result_budget_relaxed_bytes {
+            self.tool_result_budget_relaxed_bytes = tiered.tool_result_budget_relaxed_bytes;
+        }
+        if self.prompt_cache_anchor_threshold_tokens == base.prompt_cache_anchor_threshold_tokens {
+            self.prompt_cache_anchor_threshold_tokens = tiered.prompt_cache_anchor_threshold_tokens;
+        }
+        if context_window_tokens < 8_000 {
+            self.enable_context_store = true;
+            self.prompt_cache_anchor_threshold_tokens = u32::MAX;
         }
     }
 }
@@ -277,6 +487,9 @@ pub struct AgentSession {
     /// Read by `AgentToolExecutorAdapter` to plumb IDs into `ToolCallRequest`.
     #[serde(default)]
     pub session_context: serde_json::Value,
+    /// Monotonic counter bumped on destructive compaction rewrites.
+    #[serde(default)]
+    pub transcript_revision: u64,
 }
 
 impl AgentSession {
@@ -287,6 +500,7 @@ impl AgentSession {
             compaction_log: VecDeque::new(),
             ledger_snapshot: None,
             session_context,
+            transcript_revision: 0,
         }
     }
 
@@ -329,7 +543,7 @@ mod tests {
         assert_eq!(cfg.threshold_ratio, 0.80);
         assert_eq!(cfg.micro_keep_recent, 4);
         assert_eq!(cfg.tool_retry_limit, 3);
-        assert!(cfg.greedy_append_blocks);
+        assert!(!cfg.greedy_append_blocks);
         assert_eq!(cfg.tool_result_budget_cloud_bytes, 16_384);
         assert_eq!(cfg.tool_result_budget_relaxed_bytes, 131_072);
         assert_eq!(cfg.tool_result_truncation_pressure_ratio, 0.85);

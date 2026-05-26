@@ -106,6 +106,20 @@ fn tool_role_messages(snapshot: &agent_core::engine::SessionTestSnapshot) -> Vec
         .collect()
 }
 
+fn non_budget_tool_role_messages(
+    snapshot: &agent_core::engine::SessionTestSnapshot,
+) -> Vec<&AgentMessage> {
+    tool_role_messages(snapshot)
+        .into_iter()
+        .filter(|m| {
+            !m.metadata
+                .get("agent_tool_budget")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn last_assistant_content(snapshot: &agent_core::engine::SessionTestSnapshot) -> &str {
     snapshot
         .messages
@@ -138,7 +152,17 @@ fn e_01_malformed_dsml_retries_model() {
         "E-01 must not finish"
     );
     let snapshot = h.integration_test_snapshot();
-    assert_eq!(tool_role_messages(&snapshot).len(), 1, "E-01 tool messages");
+    assert_eq!(
+        non_budget_tool_role_messages(&snapshot).len(),
+        1,
+        "E-01 tool messages"
+    );
+    assert!(
+        tool_role_messages(&snapshot)
+            .iter()
+            .any(|m| m.metadata.get("agent_tool_budget").is_some()),
+        "E-01 budget sidecar"
+    );
 }
 
 #[test]
