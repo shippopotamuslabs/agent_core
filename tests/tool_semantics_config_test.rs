@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 use agent_core::artifact_finalize::{
     record_artifact_progress_with_semantics, synthetic_finalize_calls_with_semantics,
 };
@@ -164,12 +168,11 @@ fn ts_001_agnostic_default_contains_no_enclave_tool_semantics() {
     assert!(config.tool_semantics.disclosure.is_none());
     assert!(config.tool_semantics.artifact.is_none());
     assert_eq!(config.tool_semantics.greedy_extension_tools.len(), 0);
-    assert!(!config.greedy_append_blocks);
 }
 
 #[test]
 fn ts_002_enclave_compatibility_config_preserves_existing_semantic_names() {
-    let semantics = ToolSemanticsConfig::enclave_compat();
+    let semantics = enclave_test_semantics();
     let disclosure = semantics.disclosure.expect("disclosure semantics");
     let artifact = semantics.artifact.expect("artifact semantics");
 
@@ -238,7 +241,7 @@ fn ts_006_invalid_artifact_config_is_rejected() {
 
 #[test]
 fn ts_007_global_catalog_remains_compatibility_only() {
-    let catalog = ToolCatalog::global();
+    let catalog = enclave_test_catalog();
 
     assert_eq!(
         catalog.resolve("append_blocks").unwrap().name,
@@ -372,7 +375,9 @@ fn ts_014_existing_repair_wrapper_remains_enclave_compatible() {
         arguments_json: r#"{"artifactId":"a","blocks":[]}"#.to_string(),
     };
 
-    let (outcome, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+    let semantics = enclave_test_semantics();
+    let catalog = enclave_test_catalog();
+    let (outcome, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
     match outcome {
         RepairOutcome::Repaired(record) => {
             assert_eq!(record.name, "append_blocks");
@@ -494,25 +499,24 @@ fn ts_023_synthetic_finalize_uses_custom_append_tool_and_fields() {
 
 #[test]
 fn ts_027_custom_greedy_tool_extends_guardrail_cap() {
-    let semantics = custom_semantics();
     let mut guardrails = GuardrailState::default();
     guardrails.count_tool_executed(20);
     let config = AgentConfig {
         max_turns: 20,
+        tool_semantics: custom_semantics(),
         ..AgentConfig::default()
     };
     let last_tools = vec!["write_doc".to_string()];
 
     assert_eq!(
-        guardrails.effective_max_tool_calls_with_semantics(&config, &semantics, &last_tools),
+        guardrails.effective_max_tool_calls(&config, &last_tools),
         40,
     );
-    assert!(guardrails.allow_tool_call_with_semantics(&config, &semantics, &last_tools));
+    assert!(guardrails.allow_tool_call(&config, &last_tools));
 }
 
 #[test]
 fn ts_028_no_greedy_config_keeps_base_guardrail_cap() {
-    let semantics = ToolSemanticsConfig::agnostic();
     let mut guardrails = GuardrailState::default();
     guardrails.count_tool_executed(20);
     let config = AgentConfig {
@@ -522,10 +526,10 @@ fn ts_028_no_greedy_config_keeps_base_guardrail_cap() {
     let last_tools = vec!["write_doc".to_string()];
 
     assert_eq!(
-        guardrails.effective_max_tool_calls_with_semantics(&config, &semantics, &last_tools),
+        guardrails.effective_max_tool_calls(&config, &last_tools),
         20,
     );
-    assert!(!guardrails.allow_tool_call_with_semantics(&config, &semantics, &last_tools));
+    assert!(!guardrails.allow_tool_call(&config, &last_tools));
 }
 
 #[test]

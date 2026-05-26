@@ -48,9 +48,9 @@ pub enum InjectOutcome {
 pub fn resolve_shutdown_reason(
     guardrails: &GuardrailState,
     config: &AgentConfig,
-    last_model_response_had_append_blocks: bool,
+    last_model_response_tool_names: &[String],
 ) -> ToolBudgetShutdownReason {
-    let limit = guardrails.effective_max_tool_calls(config, last_model_response_had_append_blocks);
+    let limit = guardrails.effective_max_tool_calls(config, last_model_response_tool_names);
     if guardrails.tool_calls_executed >= limit {
         return ToolBudgetShutdownReason::ToolCallBudgetExhausted;
     }

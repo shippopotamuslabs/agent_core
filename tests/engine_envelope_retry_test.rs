@@ -1,6 +1,10 @@
 //! TOOL-PARSE-002 engine envelope scenarios E-01 … E-07, MD-02.
 //! centralized-leaked-tool-call-recovery engine scenarios CL-E-*, CL-MD-01.
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::{Arc, Mutex};
 
 use agent_core::action::AgentAction;
@@ -77,7 +81,7 @@ fn new_session(
 ) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
-        AgentConfig::default(),
+        enclave_test_agent_config(),
         SessionCapabilities {
             summarization_allowed: false,
             kv_fixed: false,

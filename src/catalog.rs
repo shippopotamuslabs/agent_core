@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -35,14 +34,8 @@ pub struct ToolCatalog {
     index: HashMap<String, usize>,
 }
 
-static CATALOG: Lazy<ToolCatalog> = Lazy::new(|| {
-    let raw = include_str!("../resources/tool_catalog.json");
-    let file: CatalogFile = serde_json::from_str(raw).expect("tool_catalog.json is malformed");
-    ToolCatalog::from_specs(file.tools)
-});
-
 impl ToolCatalog {
-    fn from_specs(tools: Vec<ToolSpec>) -> Self {
+    pub(crate) fn from_specs(tools: Vec<ToolSpec>) -> Self {
         let mut index = HashMap::new();
         for (i, spec) in tools.iter().enumerate() {
             index.insert(normalize(&spec.name), i);
@@ -51,10 +44,6 @@ impl ToolCatalog {
             }
         }
         ToolCatalog { tools, index }
-    }
-
-    pub fn global() -> &'static ToolCatalog {
-        &CATALOG
     }
 
     pub fn from_semantics(config: &ToolSemanticsConfig) -> Result<ToolCatalog, ToolSemanticsError> {
@@ -80,16 +69,21 @@ fn normalize(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn fixture_catalog() -> ToolCatalog {
+        let raw = include_str!("../resources/tool_catalog.json");
+        let file: CatalogFile = serde_json::from_str(raw).expect("tool_catalog.json");
+        ToolCatalog::from_specs(file.tools)
+    }
+
     #[test]
     fn catalog_loads_19_tools() {
-        assert_eq!(ToolCatalog::global().all().len(), 19);
+        assert_eq!(fixture_catalog().all().len(), 19);
     }
 
     #[test]
     fn disclose_tool_schemas_in_global_catalog() {
-        let spec = ToolCatalog::global()
-            .resolve("disclose_tool_schemas")
-            .unwrap();
+        let catalog = fixture_catalog();
+        let spec = catalog.resolve("disclose_tool_schemas").unwrap();
         assert!(spec.reproducible);
         let hint = spec.schema_hint.as_ref().unwrap();
         assert!(hint
@@ -100,7 +94,7 @@ mod tests {
 
     #[test]
     fn resolve_canonical_name() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("web_search").unwrap();
         assert_eq!(spec.name, "web_search");
         assert!(spec.reproducible);
@@ -108,26 +102,26 @@ mod tests {
 
     #[test]
     fn resolve_alias() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("websearch").unwrap();
         assert_eq!(spec.name, "web_search");
     }
 
     #[test]
     fn resolve_web_fetch_alias() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("web_fetch").unwrap();
         assert_eq!(spec.name, "web_extract");
     }
 
     #[test]
     fn resolve_unknown_returns_none() {
-        assert!(ToolCatalog::global().resolve("does_not_exist").is_none());
+        assert!(fixture_catalog().resolve("does_not_exist").is_none());
     }
 
     #[test]
     fn reproducible_classification() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let reproducible = [
             "disclose_tool_schemas",
             "web_search",
@@ -163,7 +157,7 @@ mod tests {
 
     #[test]
     fn start_artifact_schema_hint() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("start_artifact").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         let fields: Vec<&str> = hint
@@ -176,7 +170,7 @@ mod tests {
 
     #[test]
     fn append_blocks_default_is_complete_false() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("append_blocks").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         assert_eq!(
@@ -187,7 +181,7 @@ mod tests {
 
     #[test]
     fn search_x_recent_schema_hint_covers_boolean_defaults() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("search_x_recent").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         assert_eq!(
@@ -202,14 +196,14 @@ mod tests {
 
     #[test]
     fn normalize_is_case_and_separator_insensitive() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         assert!(cat.resolve("Web_Search").is_some());
         assert!(cat.resolve("WEB-SEARCH").is_some());
     }
 
     #[test]
     fn x_search_alias_resolves() {
-        let cat = ToolCatalog::global();
+        let cat = fixture_catalog();
         let spec = cat.resolve("x_search").unwrap();
         assert_eq!(spec.name, "search_x_recent");
     }

@@ -98,8 +98,15 @@ impl ToolRepairPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_semantics::ToolSemanticsConfig;
     use crate::turn_io::RawToolCall;
     use serde_json::Value;
+
+    fn enclave_repair_env() -> (ToolCatalog, ToolSemanticsConfig) {
+        let semantics = crate::tool_semantics::test_fixture_enclave_semantics();
+        let catalog = ToolCatalog::from_semantics(&semantics).expect("enclave catalog");
+        (catalog, semantics)
+    }
 
     #[test]
     fn disclose_tool_schemas_repair_succeeds_in_global_catalog() {
@@ -108,7 +115,8 @@ mod tests {
             name: "disclose_tool_schemas".into(),
             arguments_json: r#"{"tool_names":["start_artifact"]}"#.into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => assert_eq!(rec.name, "disclose_tool_schemas"),
             other => panic!("expected Repaired, got {other:?}"),
@@ -122,7 +130,8 @@ mod tests {
             name: "web_seach".into(),
             arguments_json: r#"{"query":"rust"}"#.into(),
         };
-        let (out, evs) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, evs) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 assert_eq!(rec.name, "web_search");
@@ -137,9 +146,10 @@ mod tests {
         let raw = RawToolCall {
             id: None,
             name: "WEB_SEARCH".into(),
-            arguments_json: "{}".into(),
+            arguments_json: r#"{"query":"rust"}"#.into(),
         };
-        let (out, evs) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, evs) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 assert_eq!(rec.name, "web_search");
@@ -154,9 +164,10 @@ mod tests {
         let raw = RawToolCall {
             id: None,
             name: "functions.web_search".into(),
-            arguments_json: "{}".into(),
+            arguments_json: r#"{"query":"rust"}"#.into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         assert!(matches!(out, RepairOutcome::Repaired(r) if r.name == "web_search"));
     }
 
@@ -167,14 +178,15 @@ mod tests {
             name: "totally_unknown_tool_xyz".into(),
             arguments_json: "{}".into(),
         };
-        match ToolRepairPipeline::repair(&raw, ToolCatalog::global()).0 {
+        let (catalog, semantics) = enclave_repair_env();
+        match ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics).0 {
             RepairOutcome::Reject {
                 error_json_for_model,
             } => {
                 let v: Value = serde_json::from_str(&error_json_for_model).unwrap();
                 assert!(v.get("error").is_some());
                 let tools = v.get("available_tools").and_then(|t| t.as_array()).unwrap();
-                assert_eq!(tools.len(), ToolCatalog::global().all().len());
+                assert_eq!(tools.len(), catalog.all().len());
             }
             o => panic!("expected Reject {o:?}"),
         }
@@ -187,7 +199,8 @@ mod tests {
             name: "web_search".into(),
             arguments_json: "```json\n{\"query\":\"x\"}\n```".into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
@@ -204,7 +217,8 @@ mod tests {
             name: "append_blocks".into(),
             arguments_json: r#"{"artifactId":"a","blocks":[]}"#.into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
@@ -221,7 +235,8 @@ mod tests {
             name: "append_blocks".into(),
             arguments_json: r#"{"artifactId":"a","blocks":[],"complete":true}"#.into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
@@ -238,7 +253,8 @@ mod tests {
             name: "append_blocks".into(),
             arguments_json: r#"{"artifactId":"a","blocks":[],"isComplete":"true"}"#.into(),
         };
-        let (out, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
             RepairOutcome::Repaired(rec) => {
                 let v: Value = serde_json::from_str(&rec.arguments_json).unwrap();
@@ -250,9 +266,9 @@ mod tests {
 
     #[test]
     fn fuzzy_score_below_cutoff_rejects() {
-        let cat = ToolCatalog::global();
+        let (cat, semantics) = enclave_repair_env();
         let needle = "zzzzz_no_real_match_yyyyy";
-        let (_, score) = best_catalog_match(needle, cat).unwrap();
+        let (_, score) = best_catalog_match(needle, &cat).unwrap();
         assert!(
             score < FUZZY_AUTO_ACCEPT,
             "needle should score below cutoff, got {score}"
@@ -263,7 +279,7 @@ mod tests {
             arguments_json: "{}".into(),
         };
         assert!(matches!(
-            ToolRepairPipeline::repair(&raw, cat).0,
+            ToolRepairPipeline::repair_with_semantics(&raw, &cat, &semantics).0,
             RepairOutcome::Reject { .. }
         ));
     }

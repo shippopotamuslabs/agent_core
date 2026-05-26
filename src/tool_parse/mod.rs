@@ -9,8 +9,8 @@ pub mod schema_coerce;
 pub use envelope_error::envelope_failure_json;
 
 use crate::canonicalize::{
-    canonicalize_raw_arguments, canonicalize_raw_arguments_with_semantics, canonicalize_tool_call,
-    canonicalize_tool_call_with_semantics, CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
+    canonicalize_raw_arguments_with_semantics, canonicalize_tool_call_with_semantics,
+    CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
 };
 use crate::catalog::{ToolCatalog, ToolSchemaHint};
 use crate::tool_semantics::ToolSemanticsConfig;
@@ -23,26 +23,6 @@ pub use result::{ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolP
 pub use schema_coerce::coerce_to_schema;
 use serde_json::Value;
 use std::collections::HashSet;
-
-/// Run the full pipeline: normalize → envelope extract → json_repair →
-/// catalog resolve → schema_coerce → emit [`ToolParseBatch`].
-pub fn parse_tool_calls(raw: &str) -> ToolParseBatch {
-    let normalized = normalize_model_text(raw);
-    match extract_envelopes(&normalized) {
-        Ok(extracted) if extracted.is_empty() => ToolParseBatch::empty(raw),
-        Ok(extracted) => build_batch(raw, extracted),
-        Err(error) => ToolParseBatch {
-            successes: Vec::new(),
-            failures: vec![ToolParseFailure {
-                reason: ToolParseFailureReason::MalformedEnvelope,
-                original: raw.to_string(),
-                format_hint: error.format.and_then(format_hint),
-            }],
-            visible_prefix: String::new(),
-            visible_suffix: String::new(),
-        },
-    }
-}
 
 pub fn parse_tool_calls_with_semantics(
     raw: &str,
@@ -62,46 +42,6 @@ pub fn parse_tool_calls_with_semantics(
             }],
             visible_prefix: String::new(),
             visible_suffix: String::new(),
-        },
-    }
-}
-
-/// Coerce already-extracted provider arguments through `repair_json` and
-/// `coerce_to_schema`.
-pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseField {
-    let raw = RawToolCall {
-        id: None,
-        name: tool_name.to_string(),
-        arguments_json: args_json.to_string(),
-    };
-    match canonicalize_tool_call(
-        &raw,
-        ToolCatalog::global(),
-        ToolCallCanonicalizeMode::ProviderIngress,
-    )
-    .0
-    {
-        CanonicalizeToolCallOutcome::Ok(call) => ToolParseField {
-            tool_name: call.resolved_name,
-            arguments_json: call.arguments_json,
-            repaired: call.repair_metadata.is_some() || !call.argument_repairs.is_empty(),
-            repairs: call.argument_repairs,
-        },
-        CanonicalizeToolCallOutcome::Reject {
-            error_json_for_model,
-        } => ToolParseField {
-            tool_name: tool_name.to_string(),
-            arguments_json: args_json.to_string(),
-            repaired: true,
-            repairs: vec![format!(
-                "provider argument canonicalization failed: {error_json_for_model}"
-            )],
-        },
-        CanonicalizeToolCallOutcome::Suggest { .. } => ToolParseField {
-            tool_name: tool_name.to_string(),
-            arguments_json: args_json.to_string(),
-            repaired: false,
-            repairs: Vec::new(),
         },
     }
 }
@@ -150,9 +90,8 @@ pub fn coerce_provider_arguments_with_semantics(
     }
 }
 
-/// True iff `system_prompt` contains a local-tool marker AND names a tool
-/// registered in `ToolCatalog::global()`.
-pub fn has_local_tool_contract(system_prompt: &str) -> bool {
+/// True iff `system_prompt` contains a local-tool marker AND names a catalog tool.
+pub fn has_local_tool_contract(system_prompt: &str, catalog: &ToolCatalog) -> bool {
     let has_marker = [
         "<tool_call",
         "{\"name\"",
@@ -162,42 +101,7 @@ pub fn has_local_tool_contract(system_prompt: &str) -> bool {
     ]
     .iter()
     .any(|marker| system_prompt.contains(marker));
-    has_marker
-        && ToolCatalog::global()
-            .all()
-            .iter()
-            .any(|tool| system_prompt.contains(&tool.name))
-}
-
-fn build_batch(raw: &str, extracted: Vec<ExtractedEnvelope>) -> ToolParseBatch {
-    let visible_prefix = extracted
-        .first()
-        .map(|env| env.visible_prefix.clone())
-        .unwrap_or_default();
-    let visible_suffix = extracted
-        .last()
-        .map(|env| env.visible_suffix.clone())
-        .unwrap_or_default();
-    let mut successes = Vec::new();
-    let mut failures = Vec::new();
-
-    for envelope in extracted {
-        match parse_extracted_envelope(&envelope) {
-            Ok(field) => successes.push(field),
-            Err(reason) => failures.push(ToolParseFailure {
-                reason,
-                original: raw.to_string(),
-                format_hint: format_hint(envelope.format),
-            }),
-        }
-    }
-
-    ToolParseBatch {
-        successes,
-        failures,
-        visible_prefix,
-        visible_suffix,
-    }
+    has_marker && catalog.all().iter().any(|tool| system_prompt.contains(&tool.name))
 }
 
 fn build_batch_with_semantics(
@@ -244,35 +148,6 @@ fn parse_extracted_envelope_with_semantics(
     let canonical_name = catalog
         .resolve(&envelope.tool_name)
         .map(|spec| spec.name.clone())
-        .unwrap_or_else(|| envelope.tool_name.clone());
-    let mut repairs = Vec::new();
-    repairs.extend(envelope.repair_hints.clone());
-    collect_repairs(&envelope.arguments_raw, &mut repairs);
-
-    let canonicalized = canonicalize_raw_arguments_with_semantics(
-        &canonical_name,
-        &envelope.arguments_raw,
-        catalog,
-        semantics,
-        ToolCallCanonicalizeMode::ProviderIngress,
-    )
-    .map_err(|error| map_canonicalize_error(&canonical_name, &error.to_string()))?;
-
-    repairs.extend(canonicalized.repairs);
-    Ok(ToolParseField {
-        tool_name: canonical_name,
-        arguments_json: canonicalized.arguments_json,
-        repaired: canonicalized.repaired || !repairs.is_empty(),
-        repairs,
-    })
-}
-
-fn parse_extracted_envelope(
-    envelope: &ExtractedEnvelope,
-) -> Result<ToolParseField, ToolParseFailureReason> {
-    let canonical_name = ToolCatalog::global()
-        .resolve(&envelope.tool_name)
-        .map(|spec| spec.name.clone())
         .ok_or_else(|| ToolParseFailureReason::UnknownTool {
             name: envelope.tool_name.clone(),
         })?;
@@ -286,30 +161,126 @@ fn parse_extracted_envelope(
         );
     }
 
-    let canonicalized = canonicalize_raw_arguments(
+    let canonicalized = canonicalize_raw_arguments_with_semantics(
         &canonical_name,
         &envelope.arguments_raw,
-        ToolCatalog::global(),
+        catalog,
+        semantics,
         ToolCallCanonicalizeMode::ProviderIngress,
     )
     .map_err(|error| map_canonicalize_error(&canonical_name, &error.to_string()))?;
 
     repairs.extend(canonicalized.repairs);
-    validate_unknown_and_duplicate(&canonical_name, &canonicalized.value)?;
-    if ToolCatalog::global()
-        .resolve(&canonical_name)
-        .and_then(|spec| spec.schema_hint.as_ref())
-        .is_none()
-    {
-        validate_required(&canonical_name, &canonicalized.value)?;
-    }
+    validate_unknown_and_duplicate(&canonical_name, &canonicalized.value, catalog)?;
+    validate_required(&canonical_name, &canonicalized.value, catalog, semantics)?;
 
     Ok(ToolParseField {
-        tool_name: canonical_name.clone(),
+        tool_name: canonical_name,
         arguments_json: canonicalized.arguments_json,
         repaired: canonicalized.repaired || !repairs.is_empty(),
         repairs,
     })
+}
+
+fn validate_unknown_and_duplicate(
+    tool: &str,
+    value: &Value,
+    catalog: &ToolCatalog,
+) -> Result<(), ToolParseFailureReason> {
+    if let Some(duplicate) = value
+        .as_str()
+        .and_then(|s| s.strip_prefix("__duplicate__:"))
+    {
+        return Err(ToolParseFailureReason::DuplicateParameter {
+            tool: tool.to_string(),
+            param: duplicate.to_string(),
+        });
+    }
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let allowed = allowed_parameters(tool, catalog);
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    for key in object.keys() {
+        if !allowed.contains(key) {
+            return Err(ToolParseFailureReason::UnknownParameter {
+                tool: tool.to_string(),
+                param: key.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_required(
+    tool: &str,
+    value: &Value,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+) -> Result<(), ToolParseFailureReason> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for required in required_parameters(tool, catalog) {
+        let missing = if semantics.artifact.as_ref().is_some_and(|artifact| {
+            artifact.append_tool_name == tool && required == artifact.append_blocks_field
+        }) {
+            object.get(&required).is_none()
+        } else {
+            object.get(&required).is_none_or(is_missing_value)
+        };
+        if missing {
+            return Err(ToolParseFailureReason::MissingRequiredParameter {
+                tool: tool.to_string(),
+                param: required.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_missing_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn allowed_parameters(tool: &str, catalog: &ToolCatalog) -> HashSet<String> {
+    let Some(spec) = catalog.resolve(tool) else {
+        return HashSet::new();
+    };
+    spec.schema_hint
+        .as_ref()
+        .map(schema_parameter_names)
+        .unwrap_or_default()
+}
+
+fn required_parameters(tool: &str, catalog: &ToolCatalog) -> Vec<String> {
+    let Some(spec) = catalog.resolve(tool) else {
+        return Vec::new();
+    };
+    spec.schema_hint
+        .as_ref()
+        .map(|hint| {
+            hint.required_fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn schema_parameter_names(hint: &ToolSchemaHint) -> HashSet<String> {
+    hint.required_fields
+        .iter()
+        .map(|field| field.name.clone())
+        .chain(hint.defaults.keys().cloned())
+        .collect()
 }
 
 fn map_canonicalize_error(tool: &str, detail: &str) -> ToolParseFailureReason {
@@ -651,161 +622,6 @@ fn dsml_parameter_value(raw: &str, is_json: bool) -> Value {
         repair_json(raw).unwrap_or_else(|_| Value::String(unescape_json_string(raw)))
     } else {
         Value::String(unescape_json_string(raw))
-    }
-}
-
-fn validate_unknown_and_duplicate(tool: &str, value: &Value) -> Result<(), ToolParseFailureReason> {
-    if let Some(duplicate) = value
-        .as_str()
-        .and_then(|s| s.strip_prefix("__duplicate__:"))
-    {
-        return Err(ToolParseFailureReason::DuplicateParameter {
-            tool: tool.to_string(),
-            param: duplicate.to_string(),
-        });
-    }
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-    let allowed = allowed_parameters(tool);
-    for key in object.keys() {
-        if !allowed.contains(key) {
-            return Err(ToolParseFailureReason::UnknownParameter {
-                tool: tool.to_string(),
-                param: key.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_required(tool: &str, value: &Value) -> Result<(), ToolParseFailureReason> {
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-    for required in required_parameters(tool) {
-        let missing = if tool == "append_blocks" && required == "blocks" {
-            object.get(&required).is_none()
-        } else {
-            object.get(&required).is_none_or(is_missing_value)
-        };
-        if missing {
-            return Err(ToolParseFailureReason::MissingRequiredParameter {
-                tool: tool.to_string(),
-                param: required.to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn is_missing_value(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::String(s) => s.trim().is_empty(),
-        Value::Array(items) => items.is_empty(),
-        _ => false,
-    }
-}
-
-fn allowed_parameters(tool: &str) -> HashSet<String> {
-    let Some(spec) = ToolCatalog::global().resolve(tool) else {
-        return HashSet::new();
-    };
-    let mut names: HashSet<String> = spec
-        .schema_hint
-        .as_ref()
-        .map(schema_parameter_names)
-        .unwrap_or_default();
-    names.extend(
-        explicit_catalog_parameter_names(&spec.name)
-            .into_iter()
-            .map(str::to_string),
-    );
-    names
-}
-
-fn required_parameters(tool: &str) -> Vec<String> {
-    let Some(spec) = ToolCatalog::global().resolve(tool) else {
-        return Vec::new();
-    };
-    spec.schema_hint
-        .as_ref()
-        .map(|hint| {
-            hint.required_fields
-                .iter()
-                .map(|field| field.name.clone())
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            explicit_required_parameter_names(&spec.name)
-                .into_iter()
-                .map(str::to_string)
-                .collect()
-        })
-}
-
-fn schema_parameter_names(hint: &ToolSchemaHint) -> HashSet<String> {
-    hint.required_fields
-        .iter()
-        .map(|field| field.name.clone())
-        .chain(hint.defaults.keys().cloned())
-        .collect()
-}
-
-fn explicit_catalog_parameter_names(tool: &str) -> Vec<&'static str> {
-    match tool {
-        "web_search" => vec!["query"],
-        "web_extract" => vec!["urls", "extract_depth", "format"],
-        "attached_image_inspect" => vec!["question"],
-        "search_chat_history" => vec!["query", "queries"],
-        "search_chat" => vec!["chat_id", "query"],
-        "get_message_context" => vec!["message_id", "before", "after"],
-        "search_current_artifact" => vec!["artifactId", "query"],
-        "search_x_recent" => vec![
-            "keywords",
-            "any_keywords",
-            "exclude_keywords",
-            "phrases",
-            "hashtags",
-            "mentions",
-            "from_user",
-            "to_user",
-            "has_geo",
-            "has_media",
-            "place_country",
-            "has_images",
-            "has_videos",
-            "has_links",
-            "language",
-            "sort_order",
-            "query",
-        ],
-        "generate_image" => vec!["prompt", "aspect_ratio", "quality", "count"],
-        "generate_video" => vec![
-            "prompt",
-            "aspect_ratio",
-            "quality",
-            "duration",
-            "resolution",
-        ],
-        "generate_music" => vec!["prompt", "duration"],
-        _ => Vec::new(),
-    }
-}
-
-fn explicit_required_parameter_names(tool: &str) -> Vec<&'static str> {
-    match tool {
-        "web_search" => vec!["query"],
-        "web_extract" => vec!["urls"],
-        "attached_image_inspect" => vec!["question"],
-        "search_chat_history" => vec!["queries"],
-        "search_chat" => vec!["chat_id", "query"],
-        "get_message_context" => vec!["message_id"],
-        "search_current_artifact" => vec!["artifactId", "query"],
-        "search_x_recent" => Vec::new(),
-        "generate_image" | "generate_video" | "generate_music" => vec!["prompt"],
-        _ => Vec::new(),
     }
 }
 

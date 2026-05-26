@@ -16,8 +16,7 @@ use serde_json::json;
 use crate::action::AgentAction;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::artifact_finalize::{
-    record_artifact_progress, record_artifact_progress_with_semantics, synthetic_finalize_calls,
-    synthetic_finalize_calls_with_semantics,
+    record_artifact_progress_with_semantics, synthetic_finalize_calls_with_semantics,
 };
 use crate::budget::{
     effective_threshold_tokens, effective_tool_result_budget_for_window,
@@ -118,7 +117,7 @@ fn inject_tool_budget_after_batch(
 ) {
     let meta = session.guardrails.tool_budget_snapshot(
         &session.config,
-        session.last_model_response_had_append_blocks,
+        &session.last_model_response_greedy_tool_names,
     );
     inject_tool_budget_into_session(
         &mut session.session,
@@ -174,6 +173,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
     ) -> SessionHandle {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
+        config.prepare_tool_semantics(&io);
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -226,7 +226,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 turn_index: 0,
                 cancelled: false,
                 terminal_action: None,
-                last_model_response_had_append_blocks: false,
+                last_model_response_greedy_tool_names: Vec::new(),
                 pending_artifact_ids: HashSet::new(),
                 tools_blocked_nudges_this_turn: 0,
                 pending_tool_turn_request_order: Vec::new(),
@@ -296,10 +296,15 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             .unwrap_or(true);
         g.pending_call_model = None;
 
+        let semantics = g.config.tool_semantics.clone();
+        let catalog = ToolCatalog::from_semantics(&semantics)
+            .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
         let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
             response.assistant_text.as_deref(),
             &response.tool_calls,
             allow_tool_call,
+            &catalog,
+            &semantics,
         );
         let (assistant_content, ingest_metadata) = match &ingest_outcome {
             EnvelopeIngestOutcome::NoMarkers => {
@@ -471,19 +476,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             });
         }
 
-        g.last_model_response_had_append_blocks = merged_tool_calls.iter().any(|c| {
-            let normalized = normalize_tool_name_hint(&c.name);
-            g.config
-                .tool_semantics
-                .greedy_extension_tools
-                .iter()
-                .any(|tool| tool.tool_name == normalized)
-                || (g.config.greedy_append_blocks
-                    && ToolCatalog::global()
-                        .resolve(&normalized)
-                        .map(|s| s.name.as_str())
-                        == Some("append_blocks"))
-        });
+        g.last_model_response_greedy_tool_names = merged_tool_calls
+            .iter()
+            .map(|c| normalize_tool_name_hint(&c.name))
+            .collect();
 
         if merged_tool_calls.is_empty() {
             g.finish_after_model_stop(response.finish_reason);
@@ -546,24 +542,19 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 continue;
             }
             let semantics = g.config.tool_semantics.clone();
-            let semantics_catalog = ToolCatalog::from_semantics(&semantics).ok();
-            let (outcome, evs) = if semantics.catalog.tools.is_empty() {
-                (
-                    RepairOutcome::Repaired(ToolCallRecord {
-                        call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
-                        name: normalize_tool_name_hint(&raw.name),
-                        arguments_json: raw.arguments_json.clone(),
-                        attempt_metadata: None,
-                        repair_metadata: None,
-                    }),
+            let (outcome, evs) = match ToolCatalog::from_semantics(&semantics) {
+                Ok(catalog) => {
+                    ToolRepairPipeline::repair_with_semantics(raw, &catalog, &semantics)
+                }
+                Err(_) => (
+                    RepairOutcome::Reject {
+                        error_json_for_model: serde_json::json!({
+                            "error": format!("Tool '{}' is not configured.", raw.name),
+                        })
+                        .to_string(),
+                    },
                     Vec::new(),
-                )
-            } else {
-                ToolRepairPipeline::repair_with_semantics(
-                    raw,
-                    semantics_catalog.as_ref().unwrap_or_else(|| ToolCatalog::global()),
-                    &semantics,
-                )
+                ),
             };
             for ev in evs {
                 g.emit(ev);
@@ -617,7 +608,15 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     });
                     let err = serde_json::json!({
                         "error": format!("Ambiguous tool '{original}' (closest '{closest_name}')"),
-                        "available_tools": ToolCatalog::global().all().iter().map(|t| &t.name).collect::<Vec<_>>(),
+                        "available_tools": ToolCatalog::from_semantics(&g.config.tool_semantics)
+                            .map(|catalog| {
+                                catalog
+                                    .all()
+                                    .iter()
+                                    .map(|tool| tool.name.clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
                     })
                     .to_string();
                     let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
@@ -650,7 +649,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 && crate::long_loop_policy::should_stop_tool_rounds(
                     &g.config,
                     g.guardrails.tool_calls_executed,
-                    false,
+                    &g.last_model_response_greedy_tool_names,
                 )
             {
                 g.set_terminal(AgentAction::Failed(AgentError::GuardrailExceeded {
@@ -1018,14 +1017,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         if finalize_after_tool_stop {
-            let synth = if g.config.tool_semantics.artifact.is_some() {
-                synthetic_finalize_calls_with_semantics(
-                    &g.pending_artifact_ids,
-                    &g.config.tool_semantics,
-                )
-            } else {
-                synthetic_finalize_calls(&g.pending_artifact_ids)
-            };
+            let synth = synthetic_finalize_calls_with_semantics(
+                &g.pending_artifact_ids,
+                &g.config.tool_semantics,
+            );
             if !synth.is_empty() {
                 g.pending_execute = Some(synth);
                 g.pending_execute_skip_guardrail_count = true;
@@ -1314,7 +1309,10 @@ impl InnerSession {
     }
 
     fn persist_artifact_state_if_present(&mut self) {
-        let Some(anchor) = extract_artifact_anchor(&self.session.messages) else {
+        let Some(squash) = self.config.tool_semantics.compaction.artifact_squash.as_ref() else {
+            return;
+        };
+        let Some(anchor) = extract_artifact_anchor(&self.session.messages, squash) else {
             return;
         };
         if self.config.enable_context_store {
@@ -1678,7 +1676,7 @@ impl InnerSession {
         self.destructive_tiers_this_turn = 0;
         let allow = self
             .guardrails
-            .allow_tool_call(&self.config, self.last_model_response_had_append_blocks);
+            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
 
         self.emit(AgentEvent::TurnStarted {
             turn_index: self.turn_index,
@@ -1736,14 +1734,10 @@ impl InnerSession {
             }
         }
 
-        let synth = if self.config.tool_semantics.artifact.is_some() {
-            synthetic_finalize_calls_with_semantics(
-                &self.pending_artifact_ids,
-                &self.config.tool_semantics,
-            )
-        } else {
-            synthetic_finalize_calls(&self.pending_artifact_ids)
-        };
+        let synth = synthetic_finalize_calls_with_semantics(
+            &self.pending_artifact_ids,
+            &self.config.tool_semantics,
+        );
         if !synth.is_empty() {
             self.pending_execute = Some(synth);
             self.pending_execute_skip_guardrail_count = true;
@@ -1816,7 +1810,7 @@ impl InnerSession {
         }
         let allow = self
             .guardrails
-            .allow_tool_call(&self.config, self.last_model_response_had_append_blocks);
+            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
         let request = self.build_model_request(allow, vec![]);
         self.pending_call_model = Some(request.clone());
         self.model_requests_this_turn += 1;
@@ -2069,7 +2063,7 @@ mod tests {
         let hosted = eng.create_session(
             vec![],
             AgentConfig {
-                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
                 ..AgentConfig::default()
             },
             SessionCapabilities {
@@ -2087,7 +2081,7 @@ mod tests {
         let fixed_kv = eng.create_session(
             vec![],
             AgentConfig {
-                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
                 ..AgentConfig::default()
             },
             SessionCapabilities {
@@ -2253,7 +2247,7 @@ mod tests {
                 metadata: serde_json::Value::Null,
             }],
             AgentConfig {
-                tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
                 ..AgentConfig::default()
             },
             SessionCapabilities {
@@ -2488,7 +2482,10 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::enclave_compat(),
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                ..AgentConfig::default()
+            },
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2580,7 +2577,10 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::enclave_compat(),
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                ..AgentConfig::default()
+            },
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2685,7 +2685,10 @@ mod tests {
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
             }],
-            AgentConfig::enclave_compat(),
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                ..AgentConfig::default()
+            },
             SessionCapabilities {
                 summarization_allowed: false,
                 kv_fixed: false,
@@ -2695,7 +2698,7 @@ mod tests {
             serde_json::Value::Null,
             io_large_window(),
         );
-        h.integration_test_seed_guardrails(3, 0, 0, false);
+        h.integration_test_seed_guardrails(3, 0, 0, vec![]);
         let _ = eng.next_action(&h);
         eng.submit_model_response(
             &h,
