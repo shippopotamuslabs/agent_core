@@ -34,8 +34,13 @@ pub struct AgentToolBudgetMeta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InjectOutcome {
-    MergedIntoExistingObject { message_index: usize },
-    AppendedSynthetic { message_id: String },
+    /// Legacy variant — injection no longer mutates tool payloads in place.
+    MergedIntoExistingObject {
+        message_index: usize,
+    },
+    AppendedSynthetic {
+        message_id: String,
+    },
     SkippedNoToolMessages,
 }
 
@@ -58,22 +63,13 @@ pub fn resolve_shutdown_reason(
 /// Builds the `_agent` JSON object for embedding in tool message content.
 pub fn agent_object_from_meta(meta: &AgentToolBudgetMeta) -> Value {
     let mut agent = Map::new();
-    agent.insert(
-        "tool_calls_used".into(),
-        json!(meta.tool_calls_used),
-    );
-    agent.insert(
-        "tool_calls_limit".into(),
-        json!(meta.tool_calls_limit),
-    );
+    agent.insert("tool_calls_used".into(), json!(meta.tool_calls_used));
+    agent.insert("tool_calls_limit".into(), json!(meta.tool_calls_limit));
     agent.insert(
         "tool_calls_remaining".into(),
         json!(meta.tool_calls_remaining),
     );
-    agent.insert(
-        "allow_tool_call".into(),
-        json!(meta.allow_tool_call),
-    );
+    agent.insert("allow_tool_call".into(), json!(meta.allow_tool_call));
     if let Some(reason) = meta.reason {
         agent.insert("reason".into(), json!(reason.as_json_str()));
     }
@@ -82,8 +78,8 @@ pub fn agent_object_from_meta(meta: &AgentToolBudgetMeta) -> Value {
 
 /// Merges budget fields into an existing tool result JSON object string.
 pub fn merge_budget_into_tool_content(content: &str, meta: &AgentToolBudgetMeta) -> String {
-    let mut root = serde_json::from_str::<Value>(content)
-        .unwrap_or_else(|_| Value::Object(Map::new()));
+    let mut root =
+        serde_json::from_str::<Value>(content).unwrap_or_else(|_| Value::Object(Map::new()));
     let Some(obj) = root.as_object_mut() else {
         return content.to_string();
     };
@@ -106,9 +102,16 @@ pub fn merge_budget_into_tool_content(content: &str, meta: &AgentToolBudgetMeta)
 }
 
 /// Builds a synthetic tool message containing only `{"_agent":{...}}`.
-pub fn build_synthetic_budget_message(turn_index: u32, meta: &AgentToolBudgetMeta) -> AgentMessage {
+///
+/// [seq] disambiguates multiple tool batches in the same user turn so each inject appends
+/// a new message instead of rewriting a prior slot (prompt-cache prefix stability).
+pub fn build_synthetic_budget_message(
+    turn_index: u32,
+    seq: u32,
+    meta: &AgentToolBudgetMeta,
+) -> AgentMessage {
     AgentMessage {
-        id: format!("tool-agent-budget-{turn_index}"),
+        id: format!("tool-agent-budget-{turn_index}-{seq}"),
         role: AgentRole::Tool,
         content: serde_json::to_string(&json!({ "_agent": agent_object_from_meta(meta) }))
             .unwrap_or_else(|_| "{}".into()),
@@ -116,33 +119,34 @@ pub fn build_synthetic_budget_message(turn_index: u32, meta: &AgentToolBudgetMet
     }
 }
 
-/// Merges budget metadata into the session after a tool batch.
+/// Delivers budget metadata after a tool batch without mutating committed tool result bytes.
+///
+/// In-place merge into tool JSON broke xAI/OpenAI prompt-cache prefix stability: the same
+/// tool message index changed between consecutive `CallModel` actions. Budget is appended
+/// as a dedicated synthetic tool row (Kotlin maps it to an engine-internal system sidecar).
 pub fn inject_tool_budget_into_session(
     session: &mut AgentSession,
     turn_index: u32,
     meta: &AgentToolBudgetMeta,
     last_batch_tool_message_index: Option<usize>,
 ) -> InjectOutcome {
-    let Some(index) = last_batch_tool_message_index else {
-        return InjectOutcome::SkippedNoToolMessages;
-    };
-    if index >= session.messages.len() {
+    if last_batch_tool_message_index.is_none() {
         return InjectOutcome::SkippedNoToolMessages;
     }
-
-    let content = session.messages[index].content.clone();
-    if serde_json::from_str::<Value>(&content)
-        .ok()
-        .is_some_and(|value| value.is_object())
-    {
-        session.messages[index].content = merge_budget_into_tool_content(&content, meta);
-        InjectOutcome::MergedIntoExistingObject { message_index: index }
-    } else {
-        let synthetic = build_synthetic_budget_message(turn_index, meta);
-        let message_id = synthetic.id.clone();
-        session.messages.push(synthetic);
-        InjectOutcome::AppendedSynthetic { message_id }
-    }
+    let seq = session
+        .messages
+        .iter()
+        .filter(|m| {
+            m.metadata
+                .get("agent_tool_budget")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .count() as u32;
+    let synthetic = build_synthetic_budget_message(turn_index, seq, meta);
+    let message_id = synthetic.id.clone();
+    session.messages.push(synthetic);
+    InjectOutcome::AppendedSynthetic { message_id }
 }
 
 #[cfg(test)]
@@ -172,7 +176,12 @@ mod tests {
     /// TB-04 — budget exhausted → reason `tool_call_budget_exhausted`.
     #[test]
     fn tb_04_budget_exhausted_reason() {
-        let snapshot = meta(1, 1, false, Some(ToolBudgetShutdownReason::ToolCallBudgetExhausted));
+        let snapshot = meta(
+            1,
+            1,
+            false,
+            Some(ToolBudgetShutdownReason::ToolCallBudgetExhausted),
+        );
         let agent = agent_json(&snapshot);
         assert_eq!(agent["tool_calls_used"], 1, "TB-04 used");
         assert_eq!(agent["tool_calls_limit"], 1, "TB-04 limit");
@@ -253,7 +262,10 @@ mod tests {
         );
         assert_eq!(parsed["_agent"]["tool_calls_used"], 1, "MD-06 used");
         assert_eq!(parsed["_agent"]["tool_calls_limit"], 20, "MD-06 limit");
-        assert_eq!(parsed["_agent"]["tool_calls_remaining"], 19, "MD-06 remaining");
+        assert_eq!(
+            parsed["_agent"]["tool_calls_remaining"], 19,
+            "MD-06 remaining"
+        );
         assert_eq!(parsed["_agent"]["allow_tool_call"], true, "MD-06 allow");
         assert!(parsed.get("results").is_some(), "MD-06 results present");
     }

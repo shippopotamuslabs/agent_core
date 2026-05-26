@@ -1,6 +1,6 @@
 [package]
 name = "agent_core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.78"
 
@@ -17,6 +17,10 @@ tiktoken-rs = "0.6"
 once_cell = "1.19"
 regex = "1"
 uniffi = { version = "0.29.0", default-features = true, features = ["cli"] }
+uuid = { version = "1.8", features = ["v4"] }
+
+[features]
+lalr-harness = []
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
@@ -92,6 +96,46 @@ path = "tests/executed_tool_call_replay_test.rs"
 [[test]]
 name = "tool_budget_agent_meta_test"
 path = "tests/tool_budget_agent_meta_test.rs"
+
+[[test]]
+name = "long_agent_loop_test"
+path = "tests/long_agent_loop_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "transcript_revision_test"
+path = "tests/transcript_revision_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "sidecar_budget_test"
+path = "tests/sidecar_budget_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "compaction_boundary_test"
+path = "tests/compaction_boundary_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "long_loop_policy_test"
+path = "tests/long_loop_policy_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "adaptive_thresholds_test"
+path = "tests/adaptive_thresholds_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "pending_work_reminder_path_test"
+path = "tests/pending_work_reminder_path_test.rs"
+required-features = ["lalr-harness"]
+
+[[test]]
+name = "prefix_stability_test"
+path = "tests/prefix_stability_test.rs"
+required-features = ["lalr-harness"]
 
 [[example]]
 name = "mock_desktop_loop"

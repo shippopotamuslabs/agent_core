@@ -7,11 +7,13 @@ pub use fuzzy::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 use serde::{Deserialize, Serialize};
 
 use crate::canonicalize::{
-    canonicalize_tool_call, CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
+    canonicalize_tool_call, canonicalize_tool_call_with_semantics, CanonicalizeToolCallOutcome,
+    ToolCallCanonicalizeMode,
 };
 use crate::catalog::ToolCatalog;
 use crate::events::AgentEvent;
 use crate::message::ToolCallRecord;
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,41 @@ impl ToolRepairPipeline {
     pub fn repair(raw: &RawToolCall, catalog: &ToolCatalog) -> (RepairOutcome, Vec<AgentEvent>) {
         let (outcome, events) =
             canonicalize_tool_call(raw, catalog, ToolCallCanonicalizeMode::ExecutionStrict);
+        let outcome = match outcome {
+            CanonicalizeToolCallOutcome::Ok(call) => RepairOutcome::Repaired(ToolCallRecord {
+                call_id: raw.id.clone().unwrap_or_else(|| "call".into()),
+                name: call.resolved_name,
+                arguments_json: call.arguments_json,
+                attempt_metadata: None,
+                repair_metadata: call.repair_metadata,
+            }),
+            CanonicalizeToolCallOutcome::Reject {
+                error_json_for_model,
+            } => RepairOutcome::Reject {
+                error_json_for_model,
+            },
+            CanonicalizeToolCallOutcome::Suggest {
+                original,
+                closest_name,
+            } => RepairOutcome::Suggest {
+                original,
+                closest_name,
+            },
+        };
+        (outcome, events)
+    }
+
+    pub fn repair_with_semantics(
+        raw: &RawToolCall,
+        catalog: &ToolCatalog,
+        semantics: &ToolSemanticsConfig,
+    ) -> (RepairOutcome, Vec<AgentEvent>) {
+        let (outcome, events) = canonicalize_tool_call_with_semantics(
+            raw,
+            catalog,
+            semantics,
+            ToolCallCanonicalizeMode::ExecutionStrict,
+        );
         let outcome = match outcome {
             CanonicalizeToolCallOutcome::Ok(call) => RepairOutcome::Repaired(ToolCallRecord {
                 call_id: raw.id.clone().unwrap_or_else(|| "call".into()),

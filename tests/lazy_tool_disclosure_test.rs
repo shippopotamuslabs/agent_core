@@ -60,7 +60,7 @@ fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
 fn config(enable_deferral: bool) -> AgentConfig {
     AgentConfig {
         enable_tool_schema_deferral: enable_deferral,
-        ..AgentConfig::default()
+        ..AgentConfig::enclave_compat()
     }
 }
 
@@ -255,7 +255,14 @@ fn ltd_10_direct_call_to_deferred_tool_fails_closed_before_disclosure() {
         .messages
         .iter()
         .rev()
-        .find(|message| message.role == AgentRole::Tool)
+        .find(|message| {
+            message.role == AgentRole::Tool
+                && !message
+                    .metadata
+                    .get("agent_tool_budget")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        })
         .expect("deferred tool rejection must be stored as a tool message");
     let payload: serde_json::Value =
         serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
@@ -311,7 +318,9 @@ fn ltd_11_disclose_tool_schemas_passes_repair_after_deferred_rejection() {
     let action = eng.next_action(&handle);
     let calls = match action {
         AgentAction::ExecuteTools(calls) => calls,
-        other => panic!("disclose_tool_schemas must reach host execution after repair, got {other:?}"),
+        other => {
+            panic!("disclose_tool_schemas must reach host execution after repair, got {other:?}")
+        }
     };
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "disclose_tool_schemas");

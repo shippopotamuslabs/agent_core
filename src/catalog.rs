@@ -2,6 +2,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::tool_semantics::{ToolSemanticsConfig, ToolSemanticsError};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldHint {
     pub name: String,
@@ -55,6 +57,11 @@ impl ToolCatalog {
         &CATALOG
     }
 
+    pub fn from_semantics(config: &ToolSemanticsConfig) -> Result<ToolCatalog, ToolSemanticsError> {
+        config.validate()?;
+        Ok(ToolCatalog::from_specs(config.catalog.tools.clone()))
+    }
+
     /// Returns the canonical `ToolSpec` for `name` or any registered alias.
     pub fn resolve(&self, name: &str) -> Option<&ToolSpec> {
         self.index.get(&normalize(name)).map(|&i| &self.tools[i])
@@ -80,14 +87,15 @@ mod tests {
 
     #[test]
     fn disclose_tool_schemas_in_global_catalog() {
-        let spec = ToolCatalog::global().resolve("disclose_tool_schemas").unwrap();
+        let spec = ToolCatalog::global()
+            .resolve("disclose_tool_schemas")
+            .unwrap();
         assert!(spec.reproducible);
         let hint = spec.schema_hint.as_ref().unwrap();
-        assert!(
-            hint.required_fields
-                .iter()
-                .any(|field| field.name == "tool_names")
-        );
+        assert!(hint
+            .required_fields
+            .iter()
+            .any(|field| field.name == "tool_names"));
     }
 
     #[test]
@@ -182,8 +190,14 @@ mod tests {
         let cat = ToolCatalog::global();
         let spec = cat.resolve("search_x_recent").unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
-        assert_eq!(hint.defaults.get("has_geo"), Some(&serde_json::Value::Bool(false)));
-        assert_eq!(hint.defaults.get("has_media"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            hint.defaults.get("has_geo"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            hint.defaults.get("has_media"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 
     #[test]

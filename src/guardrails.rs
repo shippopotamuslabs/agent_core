@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::agent_tool_budget::AgentToolBudgetMeta;
 use crate::session::AgentConfig;
+use crate::tool_semantics::ToolSemanticsConfig;
 use log::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,39 @@ impl GuardrailState {
     ) -> bool {
         self.tool_calls_executed
             < self.effective_max_tool_calls(config, last_model_response_had_append_blocks)
+            && self.consecutive_soft_failure_turns < config.tool_retry_limit
+            && self.consecutive_envelope_parse_failures < config.tool_retry_limit
+    }
+
+    pub fn effective_max_tool_calls_with_semantics(
+        &self,
+        config: &AgentConfig,
+        semantics: &ToolSemanticsConfig,
+        last_model_response_tool_names: &[String],
+    ) -> u32 {
+        let mut cap = config.max_turns;
+        for last in last_model_response_tool_names {
+            for greedy in &semantics.greedy_extension_tools {
+                if greedy.tool_name == *last {
+                    cap = cap.max(self.tool_calls_executed.saturating_add(greedy.extra_turns));
+                }
+            }
+        }
+        cap
+    }
+
+    pub fn allow_tool_call_with_semantics(
+        &self,
+        config: &AgentConfig,
+        semantics: &ToolSemanticsConfig,
+        last_model_response_tool_names: &[String],
+    ) -> bool {
+        self.tool_calls_executed
+            < self.effective_max_tool_calls_with_semantics(
+                config,
+                semantics,
+                last_model_response_tool_names,
+            )
             && self.consecutive_soft_failure_turns < config.tool_retry_limit
             && self.consecutive_envelope_parse_failures < config.tool_retry_limit
     }
@@ -155,6 +189,14 @@ mod tests {
         AgentConfig::default()
     }
 
+    fn enclave_cfg() -> AgentConfig {
+        AgentConfig {
+            greedy_append_blocks: true,
+            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
+            ..AgentConfig::default()
+        }
+    }
+
     #[test]
     fn allow_true_under_limit_false_at_limit() {
         let mut g = GuardrailState::default();
@@ -218,7 +260,7 @@ mod tests {
     fn greedy_append_blocks_extends_cap() {
         let mut g = GuardrailState::default();
         g.count_tool_executed(15);
-        let mut c = cfg();
+        let mut c = enclave_cfg();
         c.max_turns = 20;
         // 15 < 20 → allow; effective cap after append = max(20, 15+20)=35
         assert!(g.allow_tool_call(&c, true));
@@ -296,7 +338,7 @@ mod tests {
             tool_calls_executed: 21,
             ..GuardrailState::default()
         };
-        let c = cfg();
+        let c = enclave_cfg();
         let snapshot = g.tool_budget_snapshot(&c, true);
         assert_eq!(snapshot.tool_calls_limit, 41, "TB-09 limit");
         assert_eq!(snapshot.tool_calls_used, 21, "TB-09 used");

@@ -1,5 +1,5 @@
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::{should_compact_at, TokenLedger};
+use crate::budget::{effective_threshold_tokens, should_compact_at_token_threshold, TokenLedger};
 use crate::compact::policy::{threshold_ratio_for_trigger, CompactionPlan};
 use crate::events::CompactionEvent;
 use crate::session::{AgentConfig, AgentSession};
@@ -35,7 +35,9 @@ impl CompactionPipeline {
         );
 
         let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
-        if !should_compact_at(&pressure, threshold_ratio) {
+        let threshold_tokens =
+            effective_threshold_tokens(config, ctx.context_window_tokens, threshold_ratio, None);
+        if !should_compact_at_token_threshold(&pressure, threshold_tokens) {
             return CompactionOutcome::NotApplicable;
         }
 
@@ -62,7 +64,7 @@ impl CompactionPipeline {
                         &ctx.tools_schema_json,
                     );
 
-                    let under = !should_compact_at(&new_pressure, threshold_ratio);
+                    let under = !should_compact_at_token_threshold(&new_pressure, threshold_tokens);
                     last_event = Some(event);
 
                     if under {
@@ -93,7 +95,7 @@ impl CompactionPipeline {
             &ctx.tools_schema_json,
         );
 
-        if !should_compact_at(&pressure, plan.threshold_ratio) {
+        if !should_compact_at_token_threshold(&pressure, plan.threshold_tokens) {
             return CompactionOutcome::NotApplicable;
         }
 
@@ -116,7 +118,8 @@ impl CompactionPipeline {
                         ctx.context_window_tokens,
                         &ctx.tools_schema_json,
                     );
-                    let under = !should_compact_at(&new_pressure, plan.threshold_ratio);
+                    let under =
+                        !should_compact_at_token_threshold(&new_pressure, plan.threshold_tokens);
                     last_event = Some(event);
                     if under {
                         break;

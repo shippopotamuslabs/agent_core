@@ -137,6 +137,28 @@ fn count_agent_bearing_tool_messages(messages: &[AgentMessage]) -> usize {
         .count()
 }
 
+fn is_agent_tool_budget_message(message: &AgentMessage) -> bool {
+    message.role == AgentRole::Tool
+        && message
+            .metadata
+            .get("agent_tool_budget")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
+fn synthetic_budget_messages<'a>(messages: &'a [AgentMessage]) -> Vec<&'a AgentMessage> {
+    messages
+        .iter()
+        .filter(|m| is_agent_tool_budget_message(m))
+        .collect()
+}
+
+fn latest_synthetic_budget_message(messages: &[AgentMessage]) -> &AgentMessage {
+    synthetic_budget_messages(messages)
+        .last()
+        .expect("synthetic budget message")
+}
+
 fn drive_model_tool_batch(
     eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
     handle: &agent_core::engine::SessionHandle,
@@ -185,7 +207,7 @@ fn drive_model_tool_batch(
     );
 }
 
-/// TB-01 — single object result merges `_agent` mid-loop.
+/// TB-01 — single object result keeps tool bytes stable; budget on synthetic row.
 #[test]
 fn tb_01_single_tool_result_merges_agent_mid_loop() {
     let eng = AgentEngine::new(
@@ -204,16 +226,20 @@ fn tb_01_single_tool_result_merges_agent_mid_loop() {
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     let parsed = parse_json(&tool_msg.content);
     assert!(parsed.is_object(), "TB-01 content is object");
-    let agent = agent_block(&tool_msg.content);
+    assert!(
+        !parsed.as_object().is_some_and(|o| o.contains_key("_agent")),
+        "TB-01 tool payload must not be mutated for prompt-cache stability"
+    );
+    assert!(parsed.get("results").is_some(), "TB-01 results present");
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 17, "TB-01 used");
     assert_eq!(agent["tool_calls_limit"], 20, "TB-01 limit");
     assert_eq!(agent["tool_calls_remaining"], 3, "TB-01 remaining");
     assert_eq!(agent["allow_tool_call"], true, "TB-01 allow");
     assert!(agent.get("reason").is_none(), "TB-01 reason absent");
-    assert!(parsed.get("results").is_some(), "TB-01 results present");
 }
 
-/// TB-02 — parallel batch injects `_agent` only on last tool message.
+/// TB-02 — parallel batch leaves tool payloads clean; one synthetic budget row.
 #[test]
 fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
     let eng = AgentEngine::new(
@@ -265,7 +291,18 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
             .is_some_and(|o| o.contains_key("_agent")),
         "TB-02 c2 no _agent"
     );
-    let agent = agent_block(&c3.content);
+    assert!(
+        !parse_json(&c3.content)
+            .as_object()
+            .is_some_and(|o| o.contains_key("_agent")),
+        "TB-02 c3 no _agent"
+    );
+    assert_eq!(
+        synthetic_budget_messages(&snapshot.messages).len(),
+        1,
+        "TB-02 one synthetic budget row per batch"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 3, "TB-02 used");
     assert_eq!(agent["tool_calls_remaining"], 17, "TB-02 remaining");
     assert_eq!(agent["tool_calls_limit"], 20, "TB-02 limit");
@@ -288,7 +325,11 @@ fn tb_03_first_tool_call_reports_full_remaining_budget() {
 
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let agent = agent_block(&tool_msg.content);
+    assert!(
+        !tool_msg.content.contains("_agent"),
+        "TB-03 tool payload must stay unmerged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 1, "TB-03 used");
     assert_eq!(agent["tool_calls_limit"], 20, "TB-03 limit");
     assert_eq!(agent["tool_calls_remaining"], 19, "TB-03 remaining");
@@ -315,7 +356,11 @@ fn tb_04_budget_exhausted_disables_tools_with_reason() {
 
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let agent = agent_block(&tool_msg.content);
+    assert!(
+        !tool_msg.content.contains("_agent"),
+        "TB-04 tool payload unmerged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 1, "TB-04 used");
     assert_eq!(agent["tool_calls_limit"], 1, "TB-04 limit");
     assert_eq!(agent["tool_calls_remaining"], 0, "TB-04 remaining");
@@ -350,7 +395,11 @@ fn tb_05_soft_failure_streak_sets_reason() {
 
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let agent = agent_block(&tool_msg.content);
+    assert!(
+        !tool_msg.content.contains("_agent"),
+        "TB-05 tool payload unmerged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["allow_tool_call"], false, "TB-05 allow");
     assert_eq!(
         agent["reason"].as_str(),
@@ -390,13 +439,7 @@ fn tb_06_envelope_parse_streak_sets_reason() {
     );
 
     let snapshot = h.integration_test_snapshot();
-    let last_tool = snapshot
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == AgentRole::Tool)
-        .expect("TB-06 tool message");
-    let agent = agent_block(&last_tool.content);
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["allow_tool_call"], false, "TB-06 allow");
     assert_eq!(
         agent["reason"].as_str(),
@@ -426,18 +469,8 @@ fn tb_07_non_json_tool_result_appends_synthetic_budget_message() {
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     assert_eq!(tool_msg.content, "OK: 3 files", "TB-07 original content");
 
-    let synthetic = snapshot
-        .messages
-        .iter()
-        .find(|m| {
-            m.role == AgentRole::Tool
-                && m.metadata
-                    .get("agent_tool_budget")
-                    .and_then(|v| v.as_bool())
-                    == Some(true)
-        })
-        .expect("TB-07 synthetic budget message");
-    assert_eq!(synthetic.id, "tool-agent-budget-1", "TB-07 synthetic id");
+    let synthetic = latest_synthetic_budget_message(&snapshot.messages);
+    assert_eq!(synthetic.id, "tool-agent-budget-1-0", "TB-07 synthetic id");
     let agent = agent_block(&synthetic.content);
     assert_eq!(agent["tool_calls_used"], 1, "TB-07 used");
     assert_eq!(agent["tool_calls_limit"], 20, "TB-07 limit");
@@ -464,19 +497,12 @@ fn tb_08_json_array_result_appends_synthetic_budget_message() {
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     assert_eq!(tool_msg.content, "[1,2,3]", "TB-08 original array content");
 
-    let synthetics: Vec<_> = snapshot
-        .messages
-        .iter()
-        .filter(|m| {
-            m.role == AgentRole::Tool
-                && m.metadata
-                    .get("agent_tool_budget")
-                    .and_then(|v| v.as_bool())
-                    == Some(true)
-        })
-        .collect();
-    assert_eq!(synthetics.len(), 1, "TB-08 one synthetic message");
-    let agent = agent_block(&synthetics[0].content);
+    assert_eq!(
+        synthetic_budget_messages(&snapshot.messages).len(),
+        1,
+        "TB-08 one synthetic message"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 1, "TB-08 used");
     assert_eq!(agent["allow_tool_call"], true, "TB-08 allow");
     assert!(agent.get("reason").is_none(), "TB-08 reason absent");
@@ -492,7 +518,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::default());
+    let h = new_session(&eng, AgentConfig::enclave_compat());
     h.integration_test_seed_guardrails(20, 0, 0, true);
 
     let _ = eng.next_action(&h);
@@ -529,7 +555,11 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
 
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let agent = agent_block(&tool_msg.content);
+    assert!(
+        !tool_msg.content.contains("_agent"),
+        "TB-09 tool payload unmerged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_limit"], 41, "TB-09 limit");
     assert_eq!(agent["tool_calls_used"], 21, "TB-09 used");
     assert_eq!(agent["tool_calls_remaining"], 20, "TB-09 remaining");
@@ -546,7 +576,7 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::default());
+    let h = new_session(&eng, AgentConfig::enclave_compat());
 
     // Reach executed=4 via one normal tool batch from seeded 3.
     h.integration_test_seed_guardrails(3, 0, 0, false);
@@ -711,7 +741,7 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::default());
+    let h = new_session(&eng, AgentConfig::enclave_compat());
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -729,19 +759,26 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
     };
 
     let snapshot = h.integration_test_snapshot();
-    let last_tool = snapshot
+    let reject_tool = snapshot
         .messages
         .iter()
-        .rev()
-        .find(|m| m.role == AgentRole::Tool)
-        .expect("TB-12 last tool message");
-    let parsed = parse_json(&last_tool.content);
+        .find(|m| {
+            m.role == AgentRole::Tool
+                && !is_agent_tool_budget_message(m)
+                && m.content.contains("Unknown tool")
+        })
+        .expect("TB-12 reject tool message");
+    let parsed = parse_json(&reject_tool.content);
     assert_eq!(
         parsed["error"].as_str(),
         expected_error["error"].as_str(),
         "TB-12 error"
     );
-    let agent = agent_block(&last_tool.content);
+    assert!(
+        !reject_tool.content.contains("_agent"),
+        "TB-12 reject payload must not be merged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
     assert_eq!(agent["tool_calls_used"], 1, "TB-12 used");
     assert_eq!(agent["tool_calls_limit"], 20, "TB-12 limit");
     assert_eq!(agent["tool_calls_remaining"], 19, "TB-12 remaining");
@@ -874,7 +911,12 @@ fn md_03_merge_keeps_original_tool_keys() {
     let parsed = parse_json(&tool_msg.content);
     assert_eq!(parsed["results"][0]["title"], "A", "MD-03 title");
     assert_eq!(parsed["status"], "success", "MD-03 status");
-    assert_eq!(parsed["_agent"]["tool_calls_used"], 1, "MD-03 used");
+    assert!(
+        !parsed.as_object().is_some_and(|o| o.contains_key("_agent")),
+        "MD-03 tool payload unmerged"
+    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(agent["tool_calls_used"], 1, "MD-03 used");
 }
 
 /// MD-04 — reason key absent when allow_tool_call true.
@@ -892,13 +934,9 @@ fn md_04_reason_key_absent_when_allow_tool_call_true() {
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"results":[]}"#]);
 
     let snapshot = h.integration_test_snapshot();
-    let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
-    let parsed = parse_json(&tool_msg.content);
-    assert_eq!(parsed["_agent"]["allow_tool_call"], true, "MD-04 allow");
-    assert!(
-        parsed["_agent"].get("reason").is_none(),
-        "MD-04 reason absent"
-    );
+    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(agent["allow_tool_call"], true, "MD-04 allow");
+    assert!(agent.get("reason").is_none(), "MD-04 reason absent");
 }
 
 /// MD-05 — budget injection only on submit paths, not from next_action alone.
@@ -958,14 +996,12 @@ fn md_06_merge_preserves_executor_provided_agent_fields() {
     assert_eq!(
         parsed["_agent"]["source"].as_str(),
         Some("executor"),
-        "MD-06 source"
+        "MD-06 executor source preserved in tool payload"
     );
-    assert_eq!(parsed["_agent"]["tool_calls_used"], 1, "MD-06 used");
-    assert_eq!(parsed["_agent"]["tool_calls_limit"], 20, "MD-06 limit");
-    assert_eq!(
-        parsed["_agent"]["tool_calls_remaining"], 19,
-        "MD-06 remaining"
-    );
-    assert_eq!(parsed["_agent"]["allow_tool_call"], true, "MD-06 allow");
     assert!(parsed.get("results").is_some(), "MD-06 results present");
+    let synth = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(synth["tool_calls_used"], 1, "MD-06 used");
+    assert_eq!(synth["tool_calls_limit"], 20, "MD-06 limit");
+    assert_eq!(synth["tool_calls_remaining"], 19, "MD-06 remaining");
+    assert_eq!(synth["allow_tool_call"], true, "MD-06 allow");
 }

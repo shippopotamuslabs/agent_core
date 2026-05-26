@@ -18,12 +18,12 @@ pub use stream_gate::{
 };
 pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,
-    FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger, FfiContextPolicyTier,
-    FfiContextReference, FfiContextReferenceKind, FfiFinishReason, FfiManualCompactRequest,
-    FfiManualCompactResult, FfiModelRequest, FfiModelResponse, FfiRawToolCall,
-    FfiSessionCapabilities, FfiSessionIoParams, FfiSummaryRequest, FfiSummaryResult,
-    FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason,
-    FfiToolParseField, FfiToolResultRecord,
+    FfiCompactionBoundary, FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger,
+    FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind, FfiFinishReason,
+    FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
+    FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams,
+    FfiSummaryRequest, FfiSummaryResult, FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure,
+    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
 };
 
 use std::sync::Arc;

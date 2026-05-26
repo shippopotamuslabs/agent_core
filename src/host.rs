@@ -88,6 +88,10 @@ mod tests {
             tool_context_index: None,
             file_context_index: None,
             cache_hints: vec![],
+            provider_context: Default::default(),
+            state_ledger_delta_json: None,
+            tool_context_index_delta_json: None,
+            file_context_index_delta_json: None,
         };
         let resp = transport.complete_model_turn(req).unwrap();
         assert_eq!(resp.assistant_text.as_deref(), Some("hello"));

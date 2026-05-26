@@ -9,10 +9,11 @@ pub mod schema_coerce;
 pub use envelope_error::envelope_failure_json;
 
 use crate::canonicalize::{
-    canonicalize_raw_arguments, canonicalize_tool_call, CanonicalizeToolCallOutcome,
-    ToolCallCanonicalizeMode,
+    canonicalize_raw_arguments, canonicalize_raw_arguments_with_semantics, canonicalize_tool_call,
+    canonicalize_tool_call_with_semantics, CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
 };
 use crate::catalog::{ToolCatalog, ToolSchemaHint};
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::tool_stream_gate::normalize_spaced_dsml;
 use crate::turn_io::RawToolCall;
 pub use envelope::{EnvelopeError, EnvelopeFormat, ExtractedEnvelope};
@@ -43,6 +44,28 @@ pub fn parse_tool_calls(raw: &str) -> ToolParseBatch {
     }
 }
 
+pub fn parse_tool_calls_with_semantics(
+    raw: &str,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+) -> ToolParseBatch {
+    let normalized = normalize_model_text(raw);
+    match extract_envelopes(&normalized) {
+        Ok(extracted) if extracted.is_empty() => ToolParseBatch::empty(raw),
+        Ok(extracted) => build_batch_with_semantics(raw, extracted, catalog, semantics),
+        Err(error) => ToolParseBatch {
+            successes: Vec::new(),
+            failures: vec![ToolParseFailure {
+                reason: ToolParseFailureReason::MalformedEnvelope,
+                original: raw.to_string(),
+                format_hint: error.format.and_then(format_hint),
+            }],
+            visible_prefix: String::new(),
+            visible_suffix: String::new(),
+        },
+    }
+}
+
 /// Coerce already-extracted provider arguments through `repair_json` and
 /// `coerce_to_schema`.
 pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseField {
@@ -54,6 +77,50 @@ pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> ToolParseF
     match canonicalize_tool_call(
         &raw,
         ToolCatalog::global(),
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .0
+    {
+        CanonicalizeToolCallOutcome::Ok(call) => ToolParseField {
+            tool_name: call.resolved_name,
+            arguments_json: call.arguments_json,
+            repaired: call.repair_metadata.is_some() || !call.argument_repairs.is_empty(),
+            repairs: call.argument_repairs,
+        },
+        CanonicalizeToolCallOutcome::Reject {
+            error_json_for_model,
+        } => ToolParseField {
+            tool_name: tool_name.to_string(),
+            arguments_json: args_json.to_string(),
+            repaired: true,
+            repairs: vec![format!(
+                "provider argument canonicalization failed: {error_json_for_model}"
+            )],
+        },
+        CanonicalizeToolCallOutcome::Suggest { .. } => ToolParseField {
+            tool_name: tool_name.to_string(),
+            arguments_json: args_json.to_string(),
+            repaired: false,
+            repairs: Vec::new(),
+        },
+    }
+}
+
+pub fn coerce_provider_arguments_with_semantics(
+    tool_name: &str,
+    args_json: &str,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+) -> ToolParseField {
+    let raw = RawToolCall {
+        id: None,
+        name: tool_name.to_string(),
+        arguments_json: args_json.to_string(),
+    };
+    match canonicalize_tool_call_with_semantics(
+        &raw,
+        catalog,
+        semantics,
         ToolCallCanonicalizeMode::ProviderIngress,
     )
     .0
@@ -131,6 +198,73 @@ fn build_batch(raw: &str, extracted: Vec<ExtractedEnvelope>) -> ToolParseBatch {
         visible_prefix,
         visible_suffix,
     }
+}
+
+fn build_batch_with_semantics(
+    raw: &str,
+    extracted: Vec<ExtractedEnvelope>,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+) -> ToolParseBatch {
+    let visible_prefix = extracted
+        .first()
+        .map(|env| env.visible_prefix.clone())
+        .unwrap_or_default();
+    let visible_suffix = extracted
+        .last()
+        .map(|env| env.visible_suffix.clone())
+        .unwrap_or_default();
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+
+    for envelope in extracted {
+        match parse_extracted_envelope_with_semantics(&envelope, catalog, semantics) {
+            Ok(field) => successes.push(field),
+            Err(reason) => failures.push(ToolParseFailure {
+                reason,
+                original: raw.to_string(),
+                format_hint: format_hint(envelope.format),
+            }),
+        }
+    }
+
+    ToolParseBatch {
+        successes,
+        failures,
+        visible_prefix,
+        visible_suffix,
+    }
+}
+
+fn parse_extracted_envelope_with_semantics(
+    envelope: &ExtractedEnvelope,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
+) -> Result<ToolParseField, ToolParseFailureReason> {
+    let canonical_name = catalog
+        .resolve(&envelope.tool_name)
+        .map(|spec| spec.name.clone())
+        .unwrap_or_else(|| envelope.tool_name.clone());
+    let mut repairs = Vec::new();
+    repairs.extend(envelope.repair_hints.clone());
+    collect_repairs(&envelope.arguments_raw, &mut repairs);
+
+    let canonicalized = canonicalize_raw_arguments_with_semantics(
+        &canonical_name,
+        &envelope.arguments_raw,
+        catalog,
+        semantics,
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .map_err(|error| map_canonicalize_error(&canonical_name, &error.to_string()))?;
+
+    repairs.extend(canonicalized.repairs);
+    Ok(ToolParseField {
+        tool_name: canonical_name,
+        arguments_json: canonicalized.arguments_json,
+        repaired: canonicalized.repaired || !repairs.is_empty(),
+        repairs,
+    })
 }
 
 fn parse_extracted_envelope(

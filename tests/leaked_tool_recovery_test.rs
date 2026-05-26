@@ -99,7 +99,10 @@ fn cl_tr_04_prose_json_flushes_verbatim() {
 fn cl_tr_05_allow_false_still_detects_and_strips_tool_markers() {
     let buffered = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
     let resolution = resolve_model_turn_text(buffered, &[], false);
-    assert_eq!(resolution.visible_assistant_text, "", "CL-TR-05 visible text");
+    assert_eq!(
+        resolution.visible_assistant_text, "",
+        "CL-TR-05 visible text"
+    );
     assert!(resolution.had_strong_tool_marker, "CL-TR-05 had marker");
     assert!(
         resolution.recovered_tool_calls.is_empty(),

@@ -339,7 +339,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
 
 #[test]
 fn s5_artifact_squash_is_preferred_over_fifo() {
-    let mut cfg = AgentConfig::default();
+    let mut cfg = AgentConfig::enclave_compat();
     cfg.post_tool_result_threshold_ratio = 0.85;
     cfg.allow_fifo_on_post_tool_result = false;
     let caps = SessionCapabilities {
@@ -924,4 +924,67 @@ fn m3_tool_spillover_must_preserve_full_raw_output() {
         .get(&reference.id)
         .expect("stored entry must be retrievable");
     assert_eq!(entry.content, full);
+}
+
+// ── FEAT-long-agent-loop-robustness (TDD Red) ────────────────────────────────
+
+use agent_core::long_loop_policy::{long_loop_plan_includes_summary, should_compact_for_long_loop};
+
+#[test]
+fn lalr_07_summary_eligible_at_turn_12() {
+    let mut config = AgentConfig::default();
+    config.long_loop.summarize_after_tool_turns = 12;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        ..Default::default()
+    };
+    let tool_round_index = 12;
+
+    assert!(should_compact_for_long_loop(
+        &config,
+        &caps,
+        tool_round_index,
+        CompactionTrigger::Preflight,
+    ));
+    assert!(long_loop_plan_includes_summary(&caps));
+}
+
+#[test]
+fn lalr_08_preflight_at_turn_4() {
+    let mut config = AgentConfig::default();
+    config.long_loop.compact_every_n_tool_turns = 4;
+    let caps = SessionCapabilities::default();
+    let tool_round_index = 4;
+
+    assert!(should_compact_for_long_loop(
+        &config,
+        &caps,
+        tool_round_index,
+        CompactionTrigger::Preflight,
+    ));
+}
+
+#[test]
+fn summarize_after_tool_turns_zero_does_not_disable_summary_for_pressure_trigger() {
+    let mut config = AgentConfig::default();
+    config.long_loop.summarize_after_tool_turns = 0;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        ..Default::default()
+    };
+
+    assert!(long_loop_plan_includes_summary(&caps));
+}
+
+#[test]
+fn default_compact_every_n_tool_turns_zero_does_not_fire_periodic() {
+    let config = AgentConfig::for_policy_tier(agent_core::policy::ContextPolicyTier::HostedMutable);
+    let caps = SessionCapabilities::default();
+
+    assert!(!should_compact_for_long_loop(
+        &config,
+        &caps,
+        4,
+        CompactionTrigger::Preflight,
+    ));
 }

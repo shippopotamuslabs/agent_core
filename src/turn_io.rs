@@ -1,4 +1,5 @@
 use crate::message::AgentMessage;
+use crate::sidecar_builder::ProviderContextSnapshot;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,35 @@ pub struct ModelRequest {
     pub file_context_index: Option<crate::file_context::FileContextIndex>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_hints: Vec<String>,
+    #[serde(default)]
+    pub provider_context: ProviderContextSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_ledger_delta_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context_index_delta_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_context_index_delta_json: Option<String>,
+}
+
+impl Default for ModelRequest {
+    fn default() -> Self {
+        Self {
+            session_messages: vec![],
+            system_prompt: String::new(),
+            tools_schema_json: "[]".into(),
+            rendered_tool_catalog_json: String::new(),
+            allow_tool_call: true,
+            context_references: vec![],
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: vec![],
+            provider_context: ProviderContextSnapshot::default(),
+            state_ledger_delta_json: None,
+            tool_context_index_delta_json: None,
+            file_context_index_delta_json: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +212,10 @@ mod tests {
             tool_context_index: None,
             file_context_index: None,
             cache_hints: vec![],
+            provider_context: Default::default(),
+            state_ledger_delta_json: None,
+            tool_context_index_delta_json: None,
+            file_context_index_delta_json: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ModelRequest = serde_json::from_str(&json).unwrap();

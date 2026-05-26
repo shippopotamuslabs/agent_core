@@ -8,11 +8,12 @@
 //! assistant turns are never touched. `append_blocks` is explicitly excluded here (tier 3 squashes it).
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::TokenLedger;
+use crate::budget::{effective_micro_keep_recent, TokenLedger};
 use crate::catalog::ToolCatalog;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
 use crate::session::{AgentConfig, AgentSession};
+use crate::transcript_revision::replace_message_content;
 
 const PLACEHOLDER: &str = "[Previous tool output cleared]";
 
@@ -59,7 +60,7 @@ impl CompactionTier for MicroCompactionTier {
         )
         .total_tokens;
 
-        let keep = config.micro_keep_recent as usize;
+        let keep = effective_micro_keep_recent(config, ctx.context_window_tokens) as usize;
 
         // Per-canonical-tool-name, indices of Tool messages (chronological).
         let mut per_tool: std::collections::HashMap<String, Vec<usize>> =
@@ -67,6 +68,14 @@ impl CompactionTier for MicroCompactionTier {
 
         for (idx, msg) in session.messages.iter().enumerate() {
             if msg.role != AgentRole::Tool {
+                continue;
+            }
+            if msg
+                .metadata
+                .get("superseded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let Some(raw_name) = tool_name_from_message(&msg.metadata) else {
@@ -108,9 +117,15 @@ impl CompactionTier for MicroCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
-        for idx in replace {
-            if let Some(msg) = session.messages.get_mut(idx) {
-                msg.content = PLACEHOLDER.into();
+        let ids: Vec<String> = replace
+            .iter()
+            .filter_map(|&idx| session.messages.get(idx).map(|m| m.id.clone()))
+            .collect();
+        for id in ids {
+            if let Err(err) =
+                replace_message_content(&mut session, &id, PLACEHOLDER.into(), TierEnum::Micro)
+            {
+                return CompactionOutcome::Failed(err);
             }
         }
 
@@ -191,9 +206,29 @@ mod tests {
                     TokenLedger::estimate(&s, &cfg, "anthropic", 200_000, "[]").total_tokens;
                 assert_eq!(after, ev.tokens_after);
                 assert!(after < before);
-                assert_eq!(s.messages[0].content, PLACEHOLDER);
-                assert!(!s.messages[1].content.contains(PLACEHOLDER));
-                assert!(!s.messages[2].content.contains(PLACEHOLDER));
+                assert!(s
+                    .messages
+                    .iter()
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
+                assert_eq!(s.messages[0].metadata["superseded"], json!(true));
+                assert!(
+                    s.messages
+                        .iter()
+                        .filter(|m| {
+                            !m.metadata
+                                .get("superseded")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                        })
+                        .filter(|m| m.content.contains(PLACEHOLDER))
+                        .count()
+                        == 1
+                );
+                assert!(s
+                    .messages
+                    .iter()
+                    .filter(|m| m.id == "t2" || m.id == "t3")
+                    .all(|m| !m.content.contains(PLACEHOLDER)));
             }
             o => panic!("expected Applied, got {o:?}"),
         }
@@ -233,8 +268,13 @@ mod tests {
         match outcome {
             CompactionOutcome::Applied(s, ev) => {
                 assert_eq!(ev.tier, TierEnum::Micro);
-                assert_eq!(s.messages[0].content, PLACEHOLDER);
-                assert_eq!(s.messages[1].content, PLACEHOLDER);
+                assert!(
+                    s.messages
+                        .iter()
+                        .filter(|m| m.content == PLACEHOLDER)
+                        .count()
+                        >= 2
+                );
             }
             o => panic!("expected Applied, got {o:?}"),
         }
@@ -257,8 +297,11 @@ mod tests {
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::Preflight));
         match outcome {
             CompactionOutcome::Applied(s, _) => {
-                assert_eq!(s.messages[0].content, PLACEHOLDER);
-                assert_eq!(s.messages[1].content, "new");
+                assert!(s
+                    .messages
+                    .iter()
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
+                assert!(s.messages.iter().any(|m| m.content == "new"));
             }
             o => panic!("expected Applied, got {o:?}"),
         }

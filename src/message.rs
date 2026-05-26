@@ -17,6 +17,11 @@ pub struct AgentMessage {
     pub content: String,
     /// Opaque host-provided metadata (e.g. vision asset refs, turn tags).
     /// Defaults to JSON null; no required keys.
+    ///
+    /// ## Compaction Metadata Conventions:
+    /// - `rewrite_of`: ID of the original message that this message replaces/rewrites.
+    /// - `compaction_tier`: Name of the compaction tier that performed the rewrite (e.g. "micro").
+    /// - `superseded`: Boolean flag set to `true` on the original message after it is rewritten.
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
