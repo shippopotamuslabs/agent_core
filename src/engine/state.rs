@@ -65,7 +65,7 @@ pub(crate) struct InnerSession {
     pub(super) turn_index: u32,
     pub(super) cancelled: bool,
     pub(super) terminal_action: Option<AgentAction>,
-    pub(super) last_model_response_had_append_blocks: bool,
+    pub(super) last_model_response_greedy_tool_names: Vec<String>,
     pub(super) pending_artifact_ids: HashSet<String>,
     pub(super) tools_blocked_nudges_this_turn: u32,
     /// Model-requested tool calls for the in-flight turn, in provider order.
@@ -188,12 +188,12 @@ impl SessionHandle {
         tool_calls_executed: u32,
         consecutive_soft_failure_turns: u32,
         consecutive_envelope_parse_failures: u32,
-        last_model_response_had_append_blocks: bool,
+        last_model_response_greedy_tool_names: Vec<String>,
     ) {
         let mut inner = self.lock_inner();
         inner.guardrails.tool_calls_executed = tool_calls_executed;
         inner.guardrails.consecutive_soft_failure_turns = consecutive_soft_failure_turns;
         inner.guardrails.consecutive_envelope_parse_failures = consecutive_envelope_parse_failures;
-        inner.last_model_response_had_append_blocks = last_model_response_had_append_blocks;
+        inner.last_model_response_greedy_tool_names = last_model_response_greedy_tool_names;
     }
 }

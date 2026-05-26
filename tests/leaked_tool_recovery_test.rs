@@ -1,7 +1,21 @@
 //! centralized-leaked-tool-call-recovery — turn resolver scenarios CL-TR-*.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use agent_core::engine::resolve_model_turn_text;
 use agent_core::turn_io::RawToolCall;
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
+
+fn resolve_enclave(
+    buffered: &str,
+    native: &[RawToolCall],
+    allow_tool_call: bool,
+) -> agent_core::engine::ModelTurnTextResolution {
+    let catalog = enclave_test_catalog();
+    let semantics = enclave_test_semantics();
+    resolve_model_turn_text(buffered, native, allow_tool_call, &catalog, &semantics)
+}
 
 const APPEND_BLOCKS_TOOL_CALL: &str = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-99","blocks":[],"isComplete":false}}</tool_call>"#;
 
@@ -11,7 +25,7 @@ const SPACED_DSML_WEB_SEARCH: &str = r#"< | DSML | tool_calls>< | DSML | invoke 
 
 #[test]
 fn cl_tr_01_recover_append_blocks_without_native_tools() {
-    let resolution = resolve_model_turn_text(APPEND_BLOCKS_TOOL_CALL, &[], true);
+    let resolution = resolve_enclave(APPEND_BLOCKS_TOOL_CALL, &[], true);
     assert_eq!(
         resolution.recovered_tool_calls.len(),
         1,
@@ -44,7 +58,7 @@ fn cl_tr_02_native_preferred_over_leaked_dsml() {
         name: "web_search".into(),
         arguments_json: r#"{"query":"kotlin"}"#.into(),
     }];
-    let resolution = resolve_model_turn_text(&buffered, &native, true);
+    let resolution = resolve_enclave(&buffered, &native, true);
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-02 recovered must be empty"
@@ -62,7 +76,7 @@ fn cl_tr_02_native_preferred_over_leaked_dsml() {
 
 #[test]
 fn cl_tr_03_spaced_dsml_recovers_web_search() {
-    let resolution = resolve_model_turn_text(SPACED_DSML_WEB_SEARCH, &[], true);
+    let resolution = resolve_enclave(SPACED_DSML_WEB_SEARCH, &[], true);
     assert_eq!(
         resolution.recovered_tool_calls.len(),
         1,
@@ -84,7 +98,7 @@ fn cl_tr_03_spaced_dsml_recovers_web_search() {
 #[test]
 fn cl_tr_04_prose_json_flushes_verbatim() {
     let buffered = r#"Configure {"name":"value","enabled":true} carefully."#;
-    let resolution = resolve_model_turn_text(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true);
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-04 recovered must be empty"
@@ -98,7 +112,7 @@ fn cl_tr_04_prose_json_flushes_verbatim() {
 #[test]
 fn cl_tr_05_allow_false_still_detects_and_strips_tool_markers() {
     let buffered = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
-    let resolution = resolve_model_turn_text(buffered, &[], false);
+    let resolution = resolve_enclave(buffered, &[], false);
     assert_eq!(
         resolution.visible_assistant_text, "",
         "CL-TR-05 visible text"

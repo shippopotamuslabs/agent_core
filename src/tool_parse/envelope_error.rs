@@ -24,9 +24,9 @@ Answer the user in plain text using what you already know."
 }
 
 /// Same top-level shape as repair reject payloads: `error` + `available_tools`.
-pub fn envelope_failure_json(failure: &ToolParseFailure) -> String {
+pub fn envelope_failure_json(failure: &ToolParseFailure, catalog: &ToolCatalog) -> String {
     let message = envelope_failure_message(failure);
-    let tools: Vec<&str> = ToolCatalog::global()
+    let tools: Vec<&str> = catalog
         .all()
         .iter()
         .map(|spec| spec.name.as_str())

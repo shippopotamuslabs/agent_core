@@ -753,7 +753,8 @@ pub struct FfiAgentConfig {
     pub threshold_ratio: f32,
     pub micro_keep_recent: u32,
     pub tool_retry_limit: u32,
-    pub greedy_append_blocks: bool,
+    /// JSON-serialized [`crate::tool_semantics::ToolSemanticsConfig`]; catalog tools may be empty and merged from session IO.
+    pub tool_semantics_json: String,
     pub tool_result_budget_cloud_bytes: u64,
     pub tool_result_budget_relaxed_bytes: u64,
     pub tool_result_truncation_pressure_ratio: f32,
@@ -796,7 +797,7 @@ impl Default for FfiAgentConfig {
             threshold_ratio: c.threshold_ratio,
             micro_keep_recent: c.micro_keep_recent,
             tool_retry_limit: c.tool_retry_limit,
-            greedy_append_blocks: c.greedy_append_blocks,
+            tool_semantics_json: serde_json::to_string(&c.tool_semantics).unwrap_or_else(|_| "{}".into()),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
             tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,
@@ -840,7 +841,6 @@ impl From<FfiAgentConfig> for AgentConfig {
             threshold_ratio: f.threshold_ratio,
             micro_keep_recent: f.micro_keep_recent,
             tool_retry_limit: f.tool_retry_limit,
-            greedy_append_blocks: f.greedy_append_blocks,
             tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
             tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
             tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
@@ -881,7 +881,10 @@ impl From<FfiAgentConfig> for AgentConfig {
             require_read_before_edit: false,
             default_tool_timeout_ms: None,
             long_loop: LongLoopPolicy::from(f.long_loop),
-            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::agnostic(),
+            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::from_json(
+                &f.tool_semantics_json,
+            )
+            .unwrap_or_else(|_| crate::tool_semantics::ToolSemanticsConfig::agnostic()),
         }
     }
 }

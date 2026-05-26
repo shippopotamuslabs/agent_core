@@ -1,6 +1,8 @@
 //! Centralized turn-end leaked tool-call resolution (centralized-leaked-tool-call-recovery).
 
-use crate::tool_parse::parse_tool_calls;
+use crate::catalog::ToolCatalog;
+use crate::tool_parse::parse_tool_calls_with_semantics;
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::tool_stream_gate::{first_strong_tool_marker_start, normalize_spaced_dsml};
 use crate::turn_io::RawToolCall;
 
@@ -18,6 +20,8 @@ pub fn resolve_model_turn_text(
     buffered_text: &str,
     native_tool_calls: &[RawToolCall],
     allow_tool_call: bool,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
 ) -> ModelTurnTextResolution {
     let normalized = normalize_spaced_dsml(buffered_text);
     let text_markers = first_strong_tool_marker_start(&normalized).is_some();
@@ -33,11 +37,15 @@ pub fn resolve_model_turn_text(
         };
     }
 
-    let batch = parse_tool_calls(if text_markers {
-        &normalized
-    } else {
-        buffered_text
-    });
+    let batch = parse_tool_calls_with_semantics(
+        if text_markers {
+            &normalized
+        } else {
+            buffered_text
+        },
+        catalog,
+        semantics,
+    );
     let visible_assistant_text = if text_markers {
         if !batch.successes.is_empty() {
             visible_text_from_batch(&batch, buffered_text)

@@ -309,7 +309,7 @@ fn ts_026_micro_compaction_preserves_configured_tool() {
         ..AgentConfig::default()
     };
 
-    let outcome = MicroCompactionTier::global().apply(session, &config, &compaction_ctx());
+    let outcome = MicroCompactionTier::default().apply(session, &config, &compaction_ctx());
 
     assert!(matches!(outcome, CompactionOutcome::NotApplicable));
 }

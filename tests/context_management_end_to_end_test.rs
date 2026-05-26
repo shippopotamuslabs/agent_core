@@ -1,5 +1,9 @@
 //! TDD Red — end-to-end (S19).
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::Arc;
 
 use agent_core::action::AgentAction;
@@ -45,7 +49,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
 
     // 2) Drive file-backed context through session_context so the engine-owned
     //    ContextStore is the source surfaced in the ModelRequest.
-    let mut cfg = AgentConfig::enclave_compat();
+    let mut cfg = enclave_test_agent_config();
     cfg.enable_state_ledger = true;
     cfg.enable_context_store = true;
     cfg.enable_file_condensation = true;

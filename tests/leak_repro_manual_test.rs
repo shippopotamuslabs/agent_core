@@ -1,7 +1,11 @@
 //! Regression for user-reported DSML leak (Qwen 3.7 Max / OpenRouter).
 
+#[path = "support/mod.rs"]
+mod support;
+
 use agent_core::engine::resolve_model_turn_text;
-use agent_core::tool_parse::parse_tool_calls;
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
+use support::enclave_test_semantics::parse_enclave_tool_calls;
 use agent_core::tool_stream_gate::{
     first_strong_tool_marker_start, normalize_spaced_dsml, ToolStreamGate,
 };
@@ -29,10 +33,12 @@ fn double_pipe_dsml_is_normalized_recovered_and_hidden_from_stream() {
     assert_eq!(finish.trailing_flush, "");
     assert!(finish.has_tool_marker);
 
-    let batch = parse_tool_calls(&normalize_spaced_dsml(LEAKED_DOUBLE_PIPE));
+    let batch = parse_enclave_tool_calls(&normalize_spaced_dsml(LEAKED_DOUBLE_PIPE));
     assert_eq!(batch.successes.len(), 2);
 
-    let resolution = resolve_model_turn_text(LEAKED_DOUBLE_PIPE, &[], true);
+    let catalog = enclave_test_catalog();
+    let semantics = enclave_test_semantics();
+    let resolution = resolve_model_turn_text(LEAKED_DOUBLE_PIPE, &[], true, &catalog, &semantics);
     assert_eq!(resolution.recovered_tool_calls.len(), 2);
     assert_eq!(resolution.visible_assistant_text, "");
 }

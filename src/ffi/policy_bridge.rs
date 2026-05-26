@@ -5,6 +5,7 @@ use crate::catalog::ToolCatalog;
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
 use crate::tool_parse;
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
 
@@ -19,13 +20,23 @@ pub struct RepairResult {
 }
 
 #[uniffi::export]
-pub fn repair_tool(name: &str, args_json: &str) -> RepairResult {
+pub fn repair_tool(
+    name: &str,
+    args_json: &str,
+    tool_semantics_json: &str,
+    tool_catalog_json: &str,
+) -> RepairResult {
+    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
+        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
+    let _ = semantics.merge_catalog_json(tool_catalog_json);
+    let catalog = ToolCatalog::from_semantics(&semantics)
+        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
     let raw = RawToolCall {
         id: Some("policy".into()),
         name: name.to_string(),
         arguments_json: args_json.to_string(),
     };
-    let (outcome, _) = ToolRepairPipeline::repair(&raw, ToolCatalog::global());
+    let (outcome, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
     match outcome {
         crate::repair::RepairOutcome::Repaired(rec) => RepairResult {
             repaired: rec.repair_metadata.is_some()
@@ -60,7 +71,6 @@ pub fn truncate_result(json: &str, budget_bytes: u64) -> String {
     s
 }
 
-/// Mirrors Kotlin soft-failure streak guard (`consecutiveSoftFailureTurns < tool_retry_limit`).
 #[uniffi::export]
 pub fn should_allow_tool(soft_failure_streak: u32, max_streak: u32) -> bool {
     soft_failure_streak < max_streak
@@ -72,35 +82,40 @@ pub fn result_json_looks_soft_failure(json: &str) -> bool {
 }
 
 #[uniffi::export]
-pub fn parse_tool_calls(raw: &str) -> FfiToolParseBatch {
-    tool_parse::parse_tool_calls(raw).into()
+pub fn parse_tool_calls(
+    raw: &str,
+    tool_semantics_json: &str,
+    tool_catalog_json: &str,
+) -> FfiToolParseBatch {
+    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
+        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
+    let _ = semantics.merge_catalog_json(tool_catalog_json);
+    let catalog = ToolCatalog::from_semantics(&semantics)
+        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    tool_parse::parse_tool_calls_with_semantics(raw, &catalog, &semantics).into()
 }
 
 #[uniffi::export]
-pub fn coerce_provider_arguments(tool_name: &str, args_json: &str) -> FfiToolParseField {
-    tool_parse::coerce_provider_arguments(tool_name, args_json).into()
+pub fn has_local_tool_contract(system_prompt: &str, tool_catalog_json: &str) -> bool {
+    let mut semantics = ToolSemanticsConfig::agnostic();
+    let _ = semantics.merge_catalog_json(tool_catalog_json);
+    let catalog = ToolCatalog::from_semantics(&semantics)
+        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    tool_parse::has_local_tool_contract(system_prompt, &catalog)
 }
 
 #[uniffi::export]
-pub fn has_local_tool_contract(system_prompt: &str) -> bool {
-    tool_parse::has_local_tool_contract(system_prompt)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repair_tool_fuzzy() {
-        let r = repair_tool("web_seach", r#"{"query":"x"}"#);
-        assert_eq!(r.resolved_name, "web_search");
-        assert!(r.repaired);
-    }
-
-    #[test]
-    fn truncate_result_shortens() {
-        let long = "x".repeat(20_000);
-        let out = truncate_result(&long, 100u64);
-        assert!(out.len() <= long.len());
-    }
+pub fn coerce_provider_arguments(
+    tool_name: &str,
+    args_json: &str,
+    tool_semantics_json: &str,
+    tool_catalog_json: &str,
+) -> FfiToolParseField {
+    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
+        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
+    let _ = semantics.merge_catalog_json(tool_catalog_json);
+    let catalog = ToolCatalog::from_semantics(&semantics)
+        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    tool_parse::coerce_provider_arguments_with_semantics(tool_name, args_json, &catalog, &semantics)
+        .into()
 }

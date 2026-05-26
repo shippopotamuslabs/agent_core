@@ -3,7 +3,9 @@
 use crate::engine::leaked_tool_recovery::resolve_model_turn_text;
 use crate::tool_parse::envelope_error::{tools_blocked_nudge_json, TOOLS_BLOCKED_USER_FALLBACK};
 use crate::tool_parse::envelope_failure_json;
-use crate::tool_parse::parse_tool_calls;
+use crate::catalog::ToolCatalog;
+use crate::tool_parse::parse_tool_calls_with_semantics;
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
 #[derive(Debug, Clone)]
@@ -30,9 +32,12 @@ pub fn ingest_model_response_envelopes(
     assistant_text: Option<&str>,
     native_tool_calls: &[RawToolCall],
     allow_tool_call: bool,
+    catalog: &ToolCatalog,
+    semantics: &ToolSemanticsConfig,
 ) -> (EnvelopeIngestOutcome, Vec<RawToolCall>) {
     let text = assistant_text.unwrap_or("");
-    let resolution = resolve_model_turn_text(text, native_tool_calls, allow_tool_call);
+    let resolution =
+        resolve_model_turn_text(text, native_tool_calls, allow_tool_call, catalog, semantics);
 
     if !allow_tool_call {
         if resolution.had_strong_tool_marker {
@@ -59,11 +64,11 @@ pub fn ingest_model_response_envelopes(
     };
 
     if execution_tools.is_empty() {
-        let batch = parse_tool_calls(text);
+        let batch = parse_tool_calls_with_semantics(text, catalog, semantics);
         if let Some(failure) = batch.failures.first() {
             return (
                 EnvelopeIngestOutcome::ParseFailed {
-                    error_json_for_model: envelope_failure_json(failure),
+                    error_json_for_model: envelope_failure_json(failure, catalog),
                     visible_assistant_text: resolution.visible_assistant_text,
                 },
                 native_tool_calls.to_vec(),

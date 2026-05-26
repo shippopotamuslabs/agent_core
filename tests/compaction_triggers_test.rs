@@ -1,5 +1,9 @@
 //! TDD Red — compaction trigger tests (S1–S7, S16, E1, E2, E3, M1, M2, M3).
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::Arc;
 
 use agent_core::action::AgentAction;
@@ -339,7 +343,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
 
 #[test]
 fn s5_artifact_squash_is_preferred_over_fifo() {
-    let mut cfg = AgentConfig::enclave_compat();
+    let mut cfg = enclave_test_agent_config();
     cfg.post_tool_result_threshold_ratio = 0.85;
     cfg.allow_fifo_on_post_tool_result = false;
     let caps = SessionCapabilities {

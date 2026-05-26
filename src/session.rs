@@ -22,9 +22,6 @@ pub struct AgentConfig {
     /// Consecutive all-soft-failure turns before `allow_tool_call` is set false.
     #[serde(default = "default_tool_retry_limit")]
     pub tool_retry_limit: u32,
-    /// When true: extend max_turns by +20 if last turn contained an `append_blocks` call.
-    #[serde(default = "default_true")]
-    pub greedy_append_blocks: bool,
     /// Per-result byte budget for cloud providers when context pressure is high.
     #[serde(default = "default_tool_result_budget_cloud_bytes")]
     pub tool_result_budget_cloud_bytes: usize,
@@ -201,7 +198,6 @@ impl Default for AgentConfig {
             threshold_ratio: default_threshold_ratio(),
             micro_keep_recent: default_micro_keep_recent(),
             tool_retry_limit: default_tool_retry_limit(),
-            greedy_append_blocks: false,
             tool_result_budget_cloud_bytes: default_tool_result_budget_cloud_bytes(),
             tool_result_budget_relaxed_bytes: default_tool_result_budget_relaxed_bytes(),
             tool_result_truncation_pressure_ratio: default_tool_result_truncation_pressure_ratio(),
@@ -248,12 +244,11 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// Enclave/Pocket Crew compatibility: catalog, disclosure, artifact, and repair semantics.
-    pub fn enclave_compat() -> Self {
-        let mut config = Self::default();
-        config.tool_semantics = ToolSemanticsConfig::enclave_compat();
-        config.greedy_append_blocks = true;
-        config
+    /// Applies host IO payloads to [`tool_semantics`] (catalog JSON merge).
+    pub fn prepare_tool_semantics(&mut self, io: &crate::engine::SessionIoParams) {
+        let _ = self
+            .tool_semantics
+            .merge_catalog_json(&io.tool_catalog_json);
     }
 
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
@@ -543,7 +538,7 @@ mod tests {
         assert_eq!(cfg.threshold_ratio, 0.80);
         assert_eq!(cfg.micro_keep_recent, 4);
         assert_eq!(cfg.tool_retry_limit, 3);
-        assert!(!cfg.greedy_append_blocks);
+        assert!(cfg.tool_semantics.greedy_extension_tools.is_empty());
         assert_eq!(cfg.tool_result_budget_cloud_bytes, 16_384);
         assert_eq!(cfg.tool_result_budget_relaxed_bytes, 131_072);
         assert_eq!(cfg.tool_result_truncation_pressure_ratio, 0.85);

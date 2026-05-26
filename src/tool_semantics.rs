@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
+use crate::catalog::{ToolSchemaHint, ToolSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSemanticsConfig {
@@ -31,120 +31,37 @@ impl ToolSemanticsConfig {
         }
     }
 
-    pub fn enclave_compat() -> Self {
-        let raw = include_str!("../resources/tool_catalog.json");
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Merges host-provided catalog JSON into `catalog.tools` when the config catalog is empty.
+    pub fn merge_catalog_json(&mut self, catalog_json: &str) -> Result<(), ToolSemanticsError> {
+        let trimmed = catalog_json.trim();
+        if trimmed.is_empty() || trimmed == "[]" {
+            return Ok(());
+        }
         #[derive(Deserialize)]
         struct CatalogFile {
             tools: Vec<ToolSpec>,
         }
-        let catalog = serde_json::from_str::<CatalogFile>(raw)
-            .map(|file| ToolCatalogConfig { tools: file.tools })
-            .unwrap_or_else(|_| ToolCatalogConfig { tools: Vec::new() });
-        Self {
-            catalog,
-            disclosure: Some(ToolDisclosureSemantics {
-                tool_name: "disclose_tool_schemas".into(),
-                request_field_name: "tool_names".into(),
-                always_callable: true,
-            }),
-            artifact: Some(ArtifactToolSemantics {
-                start_tool_name: "start_artifact".into(),
-                append_tool_name: "append_blocks".into(),
-                id_field: "artifactId".into(),
-                append_blocks_field: "blocks".into(),
-                completion_field: "isComplete".into(),
-                status_field: "status".into(),
-                success_status_value: "success".into(),
-                synthetic_call_id_prefix: "auto-finalize-".into(),
-                empty_append_payload_value: serde_json::json!([]),
-            }),
-            argument_repairs: vec![
-                ToolArgumentRepairRule {
-                    tool_name: "append_blocks".into(),
-                    aliases: vec![
-                        ParameterAlias {
-                            alias: "artifact_id".into(),
-                            canonical: "artifactId".into(),
-                        },
-                        ParameterAlias {
-                            alias: "is_complete".into(),
-                            canonical: "isComplete".into(),
-                        },
-                        ParameterAlias {
-                            alias: "complete".into(),
-                            canonical: "isComplete".into(),
-                        },
-                    ],
-                    special_values: vec![SpecialValueRepair::ValidateStringifiedJsonArray {
-                        field: "blocks".into(),
-                    }],
-                },
-                ToolArgumentRepairRule {
-                    tool_name: "search_current_artifact".into(),
-                    aliases: vec![ParameterAlias {
-                        alias: "artifact_id".into(),
-                        canonical: "artifactId".into(),
-                    }],
-                    special_values: Vec::new(),
-                },
-                ToolArgumentRepairRule {
-                    tool_name: "search_chat_history".into(),
-                    aliases: Vec::new(),
-                    special_values: vec![SpecialValueRepair::ScalarToArray {
-                        source: "query".into(),
-                        target: "queries".into(),
-                    }],
-                },
-                ToolArgumentRepairRule {
-                    tool_name: "web_extract".into(),
-                    aliases: Vec::new(),
-                    special_values: vec![SpecialValueRepair::StripLeadingBracketFromArrayStrings {
-                        field: "urls".into(),
-                    }],
-                },
-            ],
-            canonical_shapes: vec![
-                ToolCanonicalShape {
-                    tool_name: "web_search".into(),
-                    ordered_fields: vec!["query".into()],
-                },
-                ToolCanonicalShape {
-                    tool_name: "web_extract".into(),
-                    ordered_fields: vec!["urls".into(), "extract_depth".into(), "format".into()],
-                },
-                ToolCanonicalShape {
-                    tool_name: "search_chat_history".into(),
-                    ordered_fields: vec!["queries".into()],
-                },
-                ToolCanonicalShape {
-                    tool_name: "append_blocks".into(),
-                    ordered_fields: vec!["artifactId".into(), "blocks".into(), "isComplete".into()],
-                },
-            ],
-            result_policies: vec![ToolResultPolicy {
-                tool_name: "append_blocks".into(),
-                spill_stored_copy_only: true,
-                skip_result_truncation: true,
-                preserve_in_micro_compaction: true,
-            }],
-            compaction: ToolCompactionSemantics {
-                artifact_squash: Some(ArtifactSquashSemantics {
-                    append_tool_name: "append_blocks".into(),
-                    id_field: "artifactId".into(),
-                    blocks_field: "blocks".into(),
-                    total_blocks_result_field: "totalBlocks".into(),
-                    status_field: "status".into(),
-                    success_status_value: "success".into(),
-                    summary_template: "Artifact generation in progress. {total} blocks written so far. Last block: `{snippet}`. Continue appending.".into(),
-                    continuation_instruction: "Continue appending.".into(),
-                    snippet_max_chars: 200,
-                }),
-            },
-            greedy_extension_tools: vec![ToolGreedyExtensionSemantics {
-                tool_name: "append_blocks".into(),
-                extra_turns: 20,
-            }],
+        let tools = if trimmed.starts_with('[') {
+            serde_json::from_str(trimmed).map_err(|error| {
+                ToolSemanticsError::InvalidResultPolicy {
+                    message: format!("invalid tool catalog json: {error}"),
+                }
+            })?
+        } else {
+            serde_json::from_str::<CatalogFile>(trimmed)
+                .map_err(|error| ToolSemanticsError::InvalidResultPolicy {
+                    message: format!("invalid tool catalog json: {error}"),
+                })?
+                .tools
+        };
+        if self.catalog.tools.is_empty() {
+            self.catalog.tools = tools;
         }
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<(), ToolSemanticsError> {
@@ -332,6 +249,24 @@ pub(crate) fn normalize_tool_name(s: &str) -> String {
     s.to_lowercase().replace(['-', ' '], "_")
 }
 
+#[cfg(test)]
+pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
+    let mut semantics: ToolSemanticsConfig = serde_json::from_str(include_str!(
+        "../tests/support/enclave_tool_semantics.json"
+    ))
+    .expect("enclave_tool_semantics.json");
+    let raw = include_str!("../resources/tool_catalog.json");
+    #[derive(Deserialize)]
+    struct CatalogFile {
+        tools: Vec<ToolSpec>,
+    }
+    let catalog = serde_json::from_str::<CatalogFile>(raw).expect("tool_catalog.json");
+    semantics.catalog = ToolCatalogConfig {
+        tools: catalog.tools,
+    };
+    semantics
+}
+
 pub(crate) fn schema_hint_for_semantics(
     tool_name: &str,
     config: &ToolSemanticsConfig,
@@ -342,38 +277,6 @@ pub(crate) fn schema_hint_for_semantics(
         .iter()
         .find(|tool| normalize_tool_name(&tool.name) == normalize_tool_name(tool_name))
         .and_then(|tool| tool.schema_hint.clone())
-        .or_else(|| {
-            if tool_name == "web_extract" {
-                let mut defaults = HashMap::new();
-                defaults.insert(
-                    "extract_depth".to_string(),
-                    serde_json::Value::String("basic".to_string()),
-                );
-                defaults.insert(
-                    "format".to_string(),
-                    serde_json::Value::String("markdown".to_string()),
-                );
-                Some(ToolSchemaHint {
-                    required_fields: vec![FieldHint {
-                        name: "urls".to_string(),
-                        ty: "array".to_string(),
-                        description: "URLs to extract".to_string(),
-                    }],
-                    defaults,
-                })
-            } else if tool_name == "search_chat_history" {
-                Some(ToolSchemaHint {
-                    required_fields: vec![FieldHint {
-                        name: "queries".to_string(),
-                        ty: "array".to_string(),
-                        description: "Queries to search".to_string(),
-                    }],
-                    defaults: HashMap::new(),
-                })
-            } else {
-                None
-            }
-        })
 }
 
 pub(crate) fn result_policy_for<'a>(

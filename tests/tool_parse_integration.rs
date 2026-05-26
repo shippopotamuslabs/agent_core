@@ -3,12 +3,15 @@
 //! See `plans/TOOL-PARSE-001/test_spec.md` for the scenario catalog.
 //! Each `#[test]` is named after its scenario ID (e.g. `r_01_…`).
 
+#[path = "support/mod.rs"]
+mod support;
+
 use agent_core::catalog::{FieldHint, ToolSchemaHint};
 use agent_core::tool_parse::json_repair::repair_json;
-use agent_core::tool_parse::parse_tool_calls;
+use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_calls;
 use agent_core::tool_parse::result::ToolParseFailureReason;
 use agent_core::tool_parse::schema_coerce::coerce_to_schema;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[test]
@@ -290,10 +293,10 @@ fn r_13_dsml_string_true_mismatched_with_array_schema() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(
-        batch.successes[0].arguments_json,
-        r#"{"urls":["https://example.com"],"extract_depth":"basic","format":"markdown"}"#
-    );
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(args["urls"], json!(["https://example.com"]));
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["format"], "markdown");
     assert!(batch.successes[0].repaired);
 }
 
@@ -306,10 +309,10 @@ fn r_14_dsml_malformed_bracket_prefixed_url() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(
-        batch.successes[0].arguments_json,
-        r#"{"urls":["https://example.com"],"extract_depth":"basic","format":"markdown"}"#
-    );
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(args["urls"], json!(["https://example.com"]));
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["format"], "markdown");
     assert!(batch.successes[0].repaired);
     assert!(batch.successes[0]
         .repairs
@@ -326,10 +329,10 @@ fn r_15_dsml_trailing_comma_inside_json_like_parameter() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(
-        batch.successes[0].arguments_json,
-        r#"{"urls":["https://example.com"],"extract_depth":"basic","format":"markdown"}"#
-    );
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(args["urls"], json!(["https://example.com"]));
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["format"], "markdown");
     // With string="false" the body is parsed as JSON directly, so the trailing
     // comma is repaired inside repair_json before collect_repairs sees the
     // arguments_raw — the structural-level repair hint is not emitted, but the
@@ -527,10 +530,10 @@ fn r_30_mutation_defense_string_true_on_urls_plus_catalog_defaults() {
                </｜｜DSML｜｜tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(
-        batch.successes[0].arguments_json,
-        r#"{"urls":["https://example.com"],"extract_depth":"basic","format":"markdown"}"#
-    );
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
+    assert_eq!(args["urls"], json!(["https://example.com"]));
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["format"], "markdown");
     assert!(batch.successes[0].repaired);
 }
 
@@ -868,10 +871,13 @@ fn r_47_dsml_string_false_parses_json_directly_without_coercion() {
         batch.failures
     );
     assert_eq!(batch.successes.len(), 1);
+    let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(
-        batch.successes[0].arguments_json,
-        r#"{"urls":["https://example.com","https://example.org"],"extract_depth":"basic","format":"markdown"}"#
+        args["urls"],
+        json!(["https://example.com", "https://example.org"])
     );
+    assert_eq!(args["extract_depth"], "basic");
+    assert_eq!(args["format"], "markdown");
     // Repairs list must be empty: the URLs arrived as a valid JSON array via
     // string="false", so no bracket stripping or comma removal was needed.
     assert!(

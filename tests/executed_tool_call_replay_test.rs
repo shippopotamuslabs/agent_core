@@ -1,6 +1,10 @@
 //! FEAT-executed-tool-call-replay: provider-facing `raw_tool_calls` metadata scenarios
 //! ETR-R-01 … ETR-R-09, ETR-M-01 … ETR-M-03.
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::{Arc, Mutex};
 
 use agent_core::action::AgentAction;
@@ -76,7 +80,7 @@ fn new_session(
 ) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
-        AgentConfig::enclave_compat(),
+        enclave_test_agent_config(),
         SessionCapabilities {
             summarization_allowed: false,
             kv_fixed: false,

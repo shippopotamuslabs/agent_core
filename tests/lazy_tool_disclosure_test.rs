@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
@@ -60,7 +64,7 @@ fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
 fn config(enable_deferral: bool) -> AgentConfig {
     AgentConfig {
         enable_tool_schema_deferral: enable_deferral,
-        ..AgentConfig::enclave_compat()
+        ..enclave_test_agent_config()
     }
 }
 

@@ -19,13 +19,34 @@
       "name": "web_search",
       "aliases": ["websearch"],
       "reproducible": true,
-      "schema_hint": null
+      "schema_hint": {
+        "required_fields": [
+          {
+            "name": "query",
+            "ty": "string",
+            "description": "Search query"
+          }
+        ],
+        "defaults": {}
+      }
     },
     {
       "name": "web_extract",
       "aliases": ["web_fetch"],
       "reproducible": true,
-      "schema_hint": null
+      "schema_hint": {
+        "required_fields": [
+          {
+            "name": "urls",
+            "ty": "array",
+            "description": "URLs to extract"
+          }
+        ],
+        "defaults": {
+          "extract_depth": "basic",
+          "format": "markdown"
+        }
+      }
     },
     {
       "name": "attached_image_inspect",
@@ -64,6 +85,13 @@
       "schema_hint": {
         "required_fields": [],
         "defaults": {
+          "keywords": [],
+          "any_keywords": [],
+          "exclude_keywords": [],
+          "phrases": [],
+          "hashtags": [],
+          "mentions": [],
+          "query": "",
           "has_geo": false,
           "has_media": false,
           "has_images": false,

@@ -1,11 +1,9 @@
-//! Tool-loop guardrails: max turn count, soft-failure streak, greedy `append_blocks` cap
-//! (AGENT-015). Mirrors `LlmToolingOrchestrator` bookkeeping.
+//! Tool-loop guardrails: max turn count, soft-failure streak, configurable greedy extension.
 
 use serde_json::Value;
 
 use crate::agent_tool_budget::AgentToolBudgetMeta;
 use crate::session::AgentConfig;
-use crate::tool_semantics::ToolSemanticsConfig;
 use log::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,40 +45,14 @@ pub struct GuardrailState {
 }
 
 impl GuardrailState {
-    /// Effective recursion cap, including greedy expansion for `append_blocks` turns.
     pub fn effective_max_tool_calls(
         &self,
         config: &AgentConfig,
-        last_model_response_had_append_blocks: bool,
-    ) -> u32 {
-        let mut cap = config.max_turns;
-        if config.greedy_append_blocks && last_model_response_had_append_blocks {
-            cap = cap.max(self.tool_calls_executed.saturating_add(20));
-        }
-        cap
-    }
-
-    /// `allow_tool_call` bit passed into [`crate::turn_io::ModelRequest`] (Kotlin: `allowToolCall`).
-    pub fn allow_tool_call(
-        &self,
-        config: &AgentConfig,
-        last_model_response_had_append_blocks: bool,
-    ) -> bool {
-        self.tool_calls_executed
-            < self.effective_max_tool_calls(config, last_model_response_had_append_blocks)
-            && self.consecutive_soft_failure_turns < config.tool_retry_limit
-            && self.consecutive_envelope_parse_failures < config.tool_retry_limit
-    }
-
-    pub fn effective_max_tool_calls_with_semantics(
-        &self,
-        config: &AgentConfig,
-        semantics: &ToolSemanticsConfig,
         last_model_response_tool_names: &[String],
     ) -> u32 {
         let mut cap = config.max_turns;
         for last in last_model_response_tool_names {
-            for greedy in &semantics.greedy_extension_tools {
+            for greedy in &config.tool_semantics.greedy_extension_tools {
                 if greedy.tool_name == *last {
                     cap = cap.max(self.tool_calls_executed.saturating_add(greedy.extra_turns));
                 }
@@ -89,18 +61,13 @@ impl GuardrailState {
         cap
     }
 
-    pub fn allow_tool_call_with_semantics(
+    pub fn allow_tool_call(
         &self,
         config: &AgentConfig,
-        semantics: &ToolSemanticsConfig,
         last_model_response_tool_names: &[String],
     ) -> bool {
         self.tool_calls_executed
-            < self.effective_max_tool_calls_with_semantics(
-                config,
-                semantics,
-                last_model_response_tool_names,
-            )
+            < self.effective_max_tool_calls(config, last_model_response_tool_names)
             && self.consecutive_soft_failure_turns < config.tool_retry_limit
             && self.consecutive_envelope_parse_failures < config.tool_retry_limit
     }
@@ -114,27 +81,25 @@ impl GuardrailState {
             self.consecutive_envelope_parse_failures.saturating_add(1);
     }
 
-    /// Increment after each tool execution attempt (success, soft error payload, or synthetic limit error).
     pub fn count_tool_executed(&mut self, n: u32) {
         self.tool_calls_executed = self.tool_calls_executed.saturating_add(n);
     }
 
-    /// Snapshot of proactive `_agent` budget metadata for tool message injection.
     pub fn tool_budget_snapshot(
         &self,
         config: &AgentConfig,
-        last_model_response_had_append_blocks: bool,
+        last_model_response_tool_names: &[String],
     ) -> AgentToolBudgetMeta {
-        let limit = self.effective_max_tool_calls(config, last_model_response_had_append_blocks);
+        let limit = self.effective_max_tool_calls(config, last_model_response_tool_names);
         let used = self.tool_calls_executed;
-        let allow = self.allow_tool_call(config, last_model_response_had_append_blocks);
+        let allow = self.allow_tool_call(config, last_model_response_tool_names);
         let reason = if allow {
             None
         } else {
             Some(crate::agent_tool_budget::resolve_shutdown_reason(
                 self,
                 config,
-                last_model_response_had_append_blocks,
+                last_model_response_tool_names,
             ))
         };
         AgentToolBudgetMeta {
@@ -146,9 +111,6 @@ impl GuardrailState {
         }
     }
 
-    /// End-of-turn accounting after all parallel tools in the model response are handled.
-    ///
-    /// `parallel_tool_calls` is the number of tools requested in the single model response.
     pub fn on_tool_turn_finished(
         &mut self,
         config: &AgentConfig,
@@ -184,47 +146,49 @@ impl GuardrailState {
 mod tests {
     use super::*;
     use crate::session::AgentConfig;
+    use crate::tool_semantics::ToolGreedyExtensionSemantics;
 
     fn cfg() -> AgentConfig {
         AgentConfig::default()
     }
 
-    fn enclave_cfg() -> AgentConfig {
-        AgentConfig {
-            greedy_append_blocks: true,
-            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::enclave_compat(),
-            ..AgentConfig::default()
-        }
+    fn greedy_cfg() -> AgentConfig {
+        let mut config = AgentConfig::default();
+        config.tool_semantics.greedy_extension_tools =
+            vec![ToolGreedyExtensionSemantics {
+                tool_name: "append_blocks".into(),
+                extra_turns: 20,
+            }];
+        config
     }
 
     #[test]
     fn allow_true_under_limit_false_at_limit() {
         let mut g = GuardrailState::default();
         let c = cfg();
-        assert!(g.allow_tool_call(&c, false));
+        assert!(g.allow_tool_call(&c, &[]));
         g.count_tool_executed(c.max_turns);
-        assert!(!g.allow_tool_call(&c, false));
+        assert!(!g.allow_tool_call(&c, &[]));
     }
 
     #[test]
     fn three_turn_all_soft_failure_disables_tools() {
         let mut g = GuardrailState::default();
         let c = cfg();
-        assert!(g.allow_tool_call(&c, false));
-
-        // Turn 1 — two parallel tools, both soft failure
-        g.count_tool_executed(2);
-        g.on_tool_turn_finished(&c, 2, true, false, false, "t");
+        assert!(g.allow_tool_call(&c, &[]));
 
         g.count_tool_executed(2);
         g.on_tool_turn_finished(&c, 2, true, false, false, "t");
 
-        assert!(g.allow_tool_call(&c, false));
+        g.count_tool_executed(2);
+        g.on_tool_turn_finished(&c, 2, true, false, false, "t");
+
+        assert!(g.allow_tool_call(&c, &[]));
 
         g.count_tool_executed(2);
         let r = g.on_tool_turn_finished(&c, 2, true, false, false, "t");
         assert!(r.validation_retry_exhaustion_logged);
-        assert!(!g.allow_tool_call(&c, false));
+        assert!(!g.allow_tool_call(&c, &[]));
     }
 
     #[test]
@@ -238,10 +202,10 @@ mod tests {
         g.on_tool_turn_finished(&c, 1, true, false, false, "t");
 
         g.count_tool_executed(1);
-        g.on_tool_turn_finished(&c, 1, true, true, false, "t"); // hard failure
+        g.on_tool_turn_finished(&c, 1, true, true, false, "t");
 
         assert_eq!(g.consecutive_soft_failure_turns, 0);
-        assert!(g.allow_tool_call(&c, false));
+        assert!(g.allow_tool_call(&c, &[]));
     }
 
     #[test]
@@ -253,21 +217,19 @@ mod tests {
         g.count_tool_executed(1);
         g.on_tool_turn_finished(&c, 1, true, false, true, "t");
         assert_eq!(g.consecutive_soft_failure_turns, 0);
-        assert!(g.allow_tool_call(&c, false));
+        assert!(g.allow_tool_call(&c, &[]));
     }
 
     #[test]
-    fn greedy_append_blocks_extends_cap() {
+    fn greedy_extension_extends_cap() {
         let mut g = GuardrailState::default();
         g.count_tool_executed(15);
-        let mut c = enclave_cfg();
+        let mut c = greedy_cfg();
         c.max_turns = 20;
-        // 15 < 20 → allow; effective cap after append = max(20, 15+20)=35
-        assert!(g.allow_tool_call(&c, true));
-        // consume up to default cap using synthetic count
-        g.count_tool_executed(5); // total 20 — at base limit
-        assert!(!g.allow_tool_call(&c, false));
-        assert!(g.allow_tool_call(&c, true)); // greedy reopen window until 35
+        assert!(g.allow_tool_call(&c, &["append_blocks".into()]));
+        g.count_tool_executed(5);
+        assert!(!g.allow_tool_call(&c, &[]));
+        assert!(g.allow_tool_call(&c, &["append_blocks".into()]));
     }
 
     #[test]
@@ -276,7 +238,7 @@ mod tests {
         let c = cfg();
         g.count_tool_executed(3);
         assert_eq!(g.tool_calls_executed, 3);
-        assert!(g.allow_tool_call(&c, false));
+        assert!(g.allow_tool_call(&c, &[]));
     }
 
     #[test]
@@ -284,7 +246,7 @@ mod tests {
         let mut g = GuardrailState::default();
         let c = cfg();
         g.count_tool_executed(c.max_turns);
-        assert!(!g.allow_tool_call(&c, false));
+        assert!(!g.allow_tool_call(&c, &[]));
     }
 
     #[test]
@@ -299,24 +261,21 @@ mod tests {
         ));
     }
 
-    /// TB-01 — snapshot after mid-loop guardrail accounting (used=17, remaining=3).
     #[test]
     fn tb_01_tool_budget_snapshot_mid_loop() {
-        let mut g = GuardrailState {
+        let g = GuardrailState {
             tool_calls_executed: 17,
             ..GuardrailState::default()
         };
         let c = cfg();
-        let snapshot = g.tool_budget_snapshot(&c, false);
-        assert_eq!(snapshot.tool_calls_used, 17, "TB-01 used");
-        assert_eq!(snapshot.tool_calls_limit, 20, "TB-01 limit");
-        assert_eq!(snapshot.tool_calls_remaining, 3, "TB-01 remaining");
-        assert!(snapshot.allow_tool_call, "TB-01 allow");
-        assert!(snapshot.reason.is_none(), "TB-01 reason absent");
-        let _ = &mut g;
+        let snapshot = g.tool_budget_snapshot(&c, &[]);
+        assert_eq!(snapshot.tool_calls_used, 17);
+        assert_eq!(snapshot.tool_calls_limit, 20);
+        assert_eq!(snapshot.tool_calls_remaining, 3);
+        assert!(snapshot.allow_tool_call);
+        assert!(snapshot.reason.is_none());
     }
 
-    /// TB-03 — first tool call reports used=1 remaining=19.
     #[test]
     fn tb_03_tool_budget_snapshot_first_tool() {
         let g = GuardrailState {
@@ -324,38 +283,33 @@ mod tests {
             ..GuardrailState::default()
         };
         let c = cfg();
-        let snapshot = g.tool_budget_snapshot(&c, false);
-        assert_eq!(snapshot.tool_calls_used, 1, "TB-03 used");
-        assert_eq!(snapshot.tool_calls_limit, 20, "TB-03 limit");
-        assert_eq!(snapshot.tool_calls_remaining, 19, "TB-03 remaining");
-        assert!(snapshot.allow_tool_call, "TB-03 allow");
+        let snapshot = g.tool_budget_snapshot(&c, &[]);
+        assert_eq!(snapshot.tool_calls_used, 1);
+        assert_eq!(snapshot.tool_calls_limit, 20);
+        assert_eq!(snapshot.tool_calls_remaining, 19);
+        assert!(snapshot.allow_tool_call);
     }
 
-    /// TB-09 — greedy append_blocks raises effective limit to 35.
     #[test]
-    fn tb_09_tool_budget_snapshot_greedy_append_blocks() {
+    fn tb_09_tool_budget_snapshot_greedy_extension() {
         let g = GuardrailState {
             tool_calls_executed: 21,
             ..GuardrailState::default()
         };
-        let c = enclave_cfg();
-        let snapshot = g.tool_budget_snapshot(&c, true);
-        assert_eq!(snapshot.tool_calls_limit, 41, "TB-09 limit");
-        assert_eq!(snapshot.tool_calls_used, 21, "TB-09 used");
-        assert_eq!(snapshot.tool_calls_remaining, 20, "TB-09 remaining");
-        assert!(snapshot.allow_tool_call, "TB-09 allow");
+        let c = greedy_cfg();
+        let snapshot = g.tool_budget_snapshot(&c, &["append_blocks".into()]);
+        assert_eq!(snapshot.tool_calls_limit, 41);
+        assert_eq!(snapshot.tool_calls_used, 21);
+        assert_eq!(snapshot.tool_calls_remaining, 20);
+        assert!(snapshot.allow_tool_call);
     }
 
-    /// TOOL-PARSE-002 E-06 — envelope streak must disable `allow_tool_call` at retry limit.
     #[test]
     fn envelope_parse_streak_disables_allow_tool_call_at_limit() {
         let mut g = GuardrailState::default();
         let c = cfg();
-        assert!(g.allow_tool_call(&c, false));
+        assert!(g.allow_tool_call(&c, &[]));
         g.consecutive_envelope_parse_failures = c.tool_retry_limit;
-        assert!(
-            !g.allow_tool_call(&c, false),
-            "E-06: third envelope failure must set allow_tool_call false"
-        );
+        assert!(!g.allow_tool_call(&c, &[]));
     }
 }

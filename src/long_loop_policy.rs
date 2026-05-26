@@ -94,7 +94,7 @@ pub fn effective_max_tool_turns(config: &AgentConfig) -> u32 {
 pub fn should_stop_tool_rounds(
     config: &AgentConfig,
     tool_round_index: u32,
-    last_model_response_had_append_blocks: bool,
+    last_model_response_greedy_tool_names: &[String],
 ) -> bool {
     let long_loop_cap = effective_max_tool_turns(config);
     if long_loop_cap < config.max_turns {
@@ -105,7 +105,7 @@ pub fn should_stop_tool_rounds(
         ..Default::default()
     };
     tool_round_index
-        >= guard.effective_max_tool_calls(config, last_model_response_had_append_blocks)
+        >= guard.effective_max_tool_calls(config, last_model_response_greedy_tool_names)
 }
 
 /// Long-loop compaction trigger evaluation (preflight / periodic / summarize).

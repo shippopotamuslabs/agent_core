@@ -5,7 +5,7 @@
 //! when mapping provider-native tool messages into [`crate::message::AgentMessage`].
 //!
 //! Non-reproducible tools (per [`crate::catalog::ToolCatalog`]) are never modified. User and
-//! assistant turns are never touched. `append_blocks` is explicitly excluded here (tier 3 squashes it).
+//! assistant turns are never touched. Tools with `preserve_in_micro_compaction` are excluded.
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::{effective_micro_keep_recent, TokenLedger};
@@ -13,27 +13,16 @@ use crate::catalog::ToolCatalog;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
 use crate::session::{AgentConfig, AgentSession};
+use crate::tool_semantics::result_policy_for;
 use crate::transcript_revision::replace_message_content;
 
 const PLACEHOLDER: &str = "[Previous tool output cleared]";
 
-pub struct MicroCompactionTier {
-    catalog: &'static ToolCatalog,
-}
-
-impl MicroCompactionTier {
-    pub fn new(catalog: &'static ToolCatalog) -> Self {
-        Self { catalog }
-    }
-
-    pub fn global() -> Self {
-        Self::new(ToolCatalog::global())
-    }
-}
+pub struct MicroCompactionTier;
 
 impl Default for MicroCompactionTier {
     fn default() -> Self {
-        Self::global()
+        Self
     }
 }
 
@@ -61,6 +50,10 @@ impl CompactionTier for MicroCompactionTier {
         .total_tokens;
 
         let keep = effective_micro_keep_recent(config, ctx.context_window_tokens) as usize;
+        let catalog = match ToolCatalog::from_semantics(&config.tool_semantics) {
+            Ok(catalog) => catalog,
+            Err(_) => return CompactionOutcome::NotApplicable,
+        };
 
         // Per-canonical-tool-name, indices of Tool messages (chronological).
         let mut per_tool: std::collections::HashMap<String, Vec<usize>> =
@@ -81,14 +74,20 @@ impl CompactionTier for MicroCompactionTier {
             let Some(raw_name) = tool_name_from_message(&msg.metadata) else {
                 continue;
             };
-            let Some(spec) = self.catalog.resolve(&raw_name) else {
+            let Some(spec) = catalog.resolve(&raw_name) else {
                 continue;
             };
             if !spec.reproducible {
                 continue;
             }
-            // Explicit guard: append_blocks / artifact tools must not be micro-cleared.
-            if spec.name == "append_blocks" || spec.name == "start_artifact" {
+            if result_policy_for(&config.tool_semantics, &spec.name)
+                .is_some_and(|policy| policy.preserve_in_micro_compaction)
+            {
+                continue;
+            }
+            if config.tool_semantics.artifact.as_ref().is_some_and(|artifact| {
+                spec.name == artifact.start_tool_name || spec.name == artifact.append_tool_name
+            }) {
                 continue;
             }
             per_tool.entry(spec.name.clone()).or_default().push(idx);
@@ -184,6 +183,7 @@ mod tests {
     #[test]
     fn clears_old_web_search_keeps_recent_two() {
         let mut cfg = AgentConfig::default();
+        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
         cfg.micro_keep_recent = 2;
 
         let session = AgentSession::new(
@@ -196,7 +196,7 @@ mod tests {
         );
 
         let before = TokenLedger::estimate(&session, &cfg, "anthropic", 200_000, "[]").total_tokens;
-        let tier = MicroCompactionTier::global();
+        let tier = MicroCompactionTier::default();
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::MidTurn));
         match outcome {
             CompactionOutcome::Applied(s, ev) => {
@@ -237,6 +237,7 @@ mod tests {
     #[test]
     fn append_blocks_never_cleared() {
         let mut cfg = AgentConfig::default();
+        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
         cfg.micro_keep_recent = 0;
 
         let big = "B".repeat(400);
@@ -245,7 +246,7 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::global();
+        let tier = MicroCompactionTier::default();
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::MidTurn));
         assert!(matches!(outcome, CompactionOutcome::NotApplicable));
     }
@@ -253,6 +254,7 @@ mod tests {
     #[test]
     fn micro_keep_recent_zero_clears_all_reproducible() {
         let mut cfg = AgentConfig::default();
+        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
         cfg.micro_keep_recent = 0;
 
         let session = AgentSession::new(
@@ -263,7 +265,7 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::global();
+        let tier = MicroCompactionTier::default();
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::PostToolResult));
         match outcome {
             CompactionOutcome::Applied(s, ev) => {
@@ -283,6 +285,7 @@ mod tests {
     #[test]
     fn search_x_recent_respects_keep_window() {
         let mut cfg = AgentConfig::default();
+        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
         cfg.micro_keep_recent = 1;
 
         let session = AgentSession::new(
@@ -293,7 +296,7 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::global();
+        let tier = MicroCompactionTier::default();
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::Preflight));
         match outcome {
             CompactionOutcome::Applied(s, _) => {

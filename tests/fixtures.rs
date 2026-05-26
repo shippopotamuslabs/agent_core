@@ -12,9 +12,13 @@ use agent_core::events::{AgentError, AgentEvent};
 use agent_core::host::{AgentToolExecutor, AgentTransport};
 use agent_core::message::{AgentMessage, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::tool_semantics::ToolSemanticsConfig;
 use agent_core::turn_io::{ModelRequest, ModelResponse};
 use serde::Deserialize;
+
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_semantics::enclave_test_semantics;
 
 #[derive(Debug, Deserialize)]
 struct FixtureFile {
@@ -144,8 +148,8 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
         system_prompt: f.io.system_prompt.clone(),
     };
     let mut config = f.initial_session.config.clone();
-    if config.greedy_append_blocks && config.tool_semantics.catalog.tools.is_empty() {
-        config.tool_semantics = ToolSemanticsConfig::enclave_compat();
+    if config.tool_semantics.catalog.tools.is_empty() {
+        config.tool_semantics = enclave_test_semantics();
     }
     let handle = eng.create_session(
         f.initial_session.messages.clone(),

@@ -1,0 +1,87 @@
+{
+  "catalog": { "tools": [] },
+  "disclosure": {
+    "tool_name": "disclose_tool_schemas",
+    "request_field_name": "tool_names",
+    "always_callable": true
+  },
+  "artifact": {
+    "start_tool_name": "start_artifact",
+    "append_tool_name": "append_blocks",
+    "id_field": "artifactId",
+    "append_blocks_field": "blocks",
+    "completion_field": "isComplete",
+    "status_field": "status",
+    "success_status_value": "success",
+    "synthetic_call_id_prefix": "auto-finalize-",
+    "empty_append_payload_value": []
+  },
+  "argument_repairs": [
+    {
+      "tool_name": "append_blocks",
+      "aliases": [
+        { "alias": "artifact_id", "canonical": "artifactId" },
+        { "alias": "is_complete", "canonical": "isComplete" },
+        { "alias": "complete", "canonical": "isComplete" }
+      ],
+      "special_values": [
+        { "type": "validate_stringified_json_array", "field": "blocks" }
+      ]
+    },
+    {
+      "tool_name": "search_current_artifact",
+      "aliases": [{ "alias": "artifact_id", "canonical": "artifactId" }],
+      "special_values": []
+    },
+    {
+      "tool_name": "search_chat_history",
+      "aliases": [],
+      "special_values": [
+        { "type": "scalar_to_array", "source": "query", "target": "queries" }
+      ]
+    },
+    {
+      "tool_name": "web_extract",
+      "aliases": [],
+      "special_values": [
+        { "type": "strip_leading_bracket_from_array_strings", "field": "urls" }
+      ]
+    }
+  ],
+  "canonical_shapes": [
+    { "tool_name": "web_search", "ordered_fields": ["query"] },
+    {
+      "tool_name": "web_extract",
+      "ordered_fields": ["urls", "extract_depth", "format"]
+    },
+    { "tool_name": "search_chat_history", "ordered_fields": ["queries"] },
+    {
+      "tool_name": "append_blocks",
+      "ordered_fields": ["artifactId", "blocks", "isComplete"]
+    }
+  ],
+  "result_policies": [
+    {
+      "tool_name": "append_blocks",
+      "spill_stored_copy_only": true,
+      "skip_result_truncation": true,
+      "preserve_in_micro_compaction": true
+    }
+  ],
+  "compaction": {
+    "artifact_squash": {
+      "append_tool_name": "append_blocks",
+      "id_field": "artifactId",
+      "blocks_field": "blocks",
+      "total_blocks_result_field": "totalBlocks",
+      "status_field": "status",
+      "success_status_value": "success",
+      "summary_template": "Artifact generation in progress. {total} blocks written so far. Last block: `{snippet}`. Continue appending.",
+      "continuation_instruction": "Continue appending.",
+      "snippet_max_chars": 200
+    }
+  },
+  "greedy_extension_tools": [
+    { "tool_name": "append_blocks", "extra_turns": 20 }
+  ]
+}

@@ -1,5 +1,10 @@
 //! FEAT-tool-budget-agent-meta — integration scenarios TB-01 … TB-12, MD-01 … MD-06.
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -218,7 +223,7 @@ fn tb_01_single_tool_result_merges_agent_mid_loop() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
-    h.integration_test_seed_guardrails(16, 0, 0, false);
+    h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"results":[]}"#]);
 
@@ -341,7 +346,6 @@ fn tb_03_first_tool_call_reports_full_remaining_budget() {
 fn tb_04_budget_exhausted_disables_tools_with_reason() {
     let mut cfg = AgentConfig::default();
     cfg.max_turns = 1;
-    cfg.greedy_append_blocks = false;
 
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
@@ -389,7 +393,7 @@ fn tb_05_soft_failure_streak_sets_reason() {
     );
     let h = new_session(&eng, AgentConfig::default());
     // Streak 2: allow still true for the model tool request; becomes 3 after soft-failure result.
-    h.integration_test_seed_guardrails(5, 2, 0, false);
+    h.integration_test_seed_guardrails(5, 2, 0, vec![]);
 
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"error":"validation failed"}"#]);
 
@@ -423,7 +427,7 @@ fn tb_06_envelope_parse_streak_sets_reason() {
     );
     let h = new_session(&eng, AgentConfig::default());
     // Envelope streak 2: allow true for CallModel; hits limit after parse failure.
-    h.integration_test_seed_guardrails(2, 0, 2, false);
+    h.integration_test_seed_guardrails(2, 0, 2, vec![]);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -518,8 +522,8 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::enclave_compat());
-    h.integration_test_seed_guardrails(20, 0, 0, true);
+    let h = new_session(&eng, enclave_test_agent_config());
+    h.integration_test_seed_guardrails(20, 0, 0, vec!["append_blocks".into()]);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -536,7 +540,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         },
     );
     // Non-append tool responses clear greedy flag; re-seed before budget injection.
-    h.integration_test_seed_guardrails(20, 0, 0, true);
+    h.integration_test_seed_guardrails(20, 0, 0, vec!["append_blocks".into()]);
     match eng.next_action(&h) {
         AgentAction::ExecuteTools(_) => {}
         other => panic!("TB-09 expected ExecuteTools, got {other:?}"),
@@ -576,10 +580,10 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::enclave_compat());
+    let h = new_session(&eng, enclave_test_agent_config());
 
     // Reach executed=4 via one normal tool batch from seeded 3.
-    h.integration_test_seed_guardrails(3, 0, 0, false);
+    h.integration_test_seed_guardrails(3, 0, 0, vec![]);
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"results":[]}"#]);
 
     // Artifact + append_blocks stop path → auto-finalize with skip_count.
@@ -727,7 +731,11 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
             error_json_for_model,
         },
         _,
-    ) = ToolRepairPipeline::repair(&reject_raw, ToolCatalog::global())
+    ) = ToolRepairPipeline::repair_with_semantics(
+        &reject_raw,
+        &enclave_test_catalog(),
+        &enclave_test_semantics(),
+    )
     else {
         panic!("TB-12 harness must use a repair Reject path");
     };
@@ -741,7 +749,7 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
         }),
         Arc::new(NoOpSummarizer),
     );
-    let h = new_session(&eng, AgentConfig::enclave_compat());
+    let h = new_session(&eng, enclave_test_agent_config());
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
