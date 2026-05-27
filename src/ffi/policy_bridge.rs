@@ -1,11 +1,10 @@
 //! LiteRT / Kotlin policy helpers (AGENT-034) — small UniFFI surface separate from the session engine.
 
-use super::types::{FfiToolParseBatch, FfiToolParseField};
-use crate::catalog::ToolCatalog;
+use super::types::{FfiToolParseBatch, FfiToolParseField, FfiToolParseFailure, FfiToolParseFailureReason};
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
 use crate::tool_parse;
-use crate::tool_semantics::ToolSemanticsConfig;
+use crate::tool_semantics::{load_semantics_with_session_catalog, ToolSemanticsConfig};
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
 
@@ -19,6 +18,16 @@ pub struct RepairResult {
     pub repaired: bool,
 }
 
+fn load_policy_semantics(
+    tool_semantics_json: &str,
+    tool_catalog_json: &str,
+) -> Result<(ToolSemanticsConfig, crate::catalog::ToolCatalog), String> {
+    load_semantics_with_session_catalog(tool_semantics_json, tool_catalog_json).map_err(|error| {
+        eprintln!("agent_core: {error}");
+        error
+    })
+}
+
 #[uniffi::export]
 pub fn repair_tool(
     name: &str,
@@ -26,11 +35,16 @@ pub fn repair_tool(
     tool_semantics_json: &str,
     tool_catalog_json: &str,
 ) -> RepairResult {
-    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
-        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
-    let _ = semantics.merge_catalog_json(tool_catalog_json);
-    let catalog = ToolCatalog::from_semantics(&semantics)
-        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return RepairResult {
+                resolved_name: name.to_string(),
+                arguments_json: format!(r#"{{"error":"{error}"}}"#),
+                repaired: false,
+            };
+        }
+    };
     let raw = RawToolCall {
         id: Some("policy".into()),
         name: name.to_string(),
@@ -87,20 +101,41 @@ pub fn parse_tool_calls(
     tool_semantics_json: &str,
     tool_catalog_json: &str,
 ) -> FfiToolParseBatch {
-    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
-        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
-    let _ = semantics.merge_catalog_json(tool_catalog_json);
-    let catalog = ToolCatalog::from_semantics(&semantics)
-        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json)
+    {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return FfiToolParseBatch {
+                successes: Vec::new(),
+                failures: vec![FfiToolParseFailure {
+                    reason: FfiToolParseFailureReason::InvalidJson {
+                        detail: error.clone(),
+                    },
+                    original: raw.to_string(),
+                    format_hint: Some("tool catalog merge failed".into()),
+                }],
+                visible_prefix: String::new(),
+                visible_suffix: String::new(),
+            };
+        }
+    };
     tool_parse::parse_tool_calls_with_semantics(raw, &catalog, &semantics).into()
 }
 
 #[uniffi::export]
 pub fn has_local_tool_contract(system_prompt: &str, tool_catalog_json: &str) -> bool {
     let mut semantics = ToolSemanticsConfig::agnostic();
-    let _ = semantics.merge_catalog_json(tool_catalog_json);
-    let catalog = ToolCatalog::from_semantics(&semantics)
-        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    if let Err(error) = semantics.merge_catalog_json(tool_catalog_json) {
+        eprintln!("agent_core: tool catalog merge failed: {error:?}");
+        return false;
+    }
+    let catalog = match crate::catalog::ToolCatalog::from_semantics(&semantics) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            eprintln!("agent_core: invalid merged tool catalog: {error:?}");
+            return false;
+        }
+    };
     tool_parse::has_local_tool_contract(system_prompt, &catalog)
 }
 
@@ -111,11 +146,18 @@ pub fn coerce_provider_arguments(
     tool_semantics_json: &str,
     tool_catalog_json: &str,
 ) -> FfiToolParseField {
-    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
-        .unwrap_or_else(|_| ToolSemanticsConfig::agnostic());
-    let _ = semantics.merge_catalog_json(tool_catalog_json);
-    let catalog = ToolCatalog::from_semantics(&semantics)
-        .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json)
+    {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return FfiToolParseField {
+                tool_name: tool_name.to_string(),
+                arguments_json: format!(r#"{{"error":"{error}"}}"#),
+                repaired: false,
+                repairs: Vec::new(),
+            };
+        }
+    };
     tool_parse::coerce_provider_arguments_with_semantics(tool_name, args_json, &catalog, &semantics)
         .into()
 }

@@ -246,9 +246,9 @@ impl Default for AgentConfig {
 impl AgentConfig {
     /// Applies host IO payloads to [`tool_semantics`] (catalog JSON merge).
     pub fn prepare_tool_semantics(&mut self, io: &crate::engine::SessionIoParams) {
-        let _ = self
-            .tool_semantics
-            .merge_catalog_json(&io.tool_catalog_json);
+        if let Err(error) = self.tool_semantics.merge_catalog_json(&io.tool_catalog_json) {
+            eprintln!("agent_core: tool catalog merge failed: {error:?}");
+        }
     }
 
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
