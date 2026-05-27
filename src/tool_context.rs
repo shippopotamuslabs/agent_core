@@ -93,10 +93,16 @@ pub fn build_tool_context_index_with_registry(
     let seq = store.next_sequence();
     let id = format!("tool-schema-{seq}");
     let preview = make_preview(&stash_content);
+    let tool_names = get_tool_names(&stash_content);
+    let title = if tool_names.is_empty() {
+        "tool_schema_full".to_string()
+    } else {
+        format!("tool_schema: {}", tool_names.join(", "))
+    };
     let reference = ContextReference {
         id: id.clone(),
         kind: ContextReferenceKind::ToolSchema,
-        title: "tool_schema_full".into(),
+        title,
         byte_len: stash_content.len() as u64,
         token_estimate: (stash_content.len() / 4) as u32,
         preview,
@@ -133,3 +139,10 @@ pub fn build_tool_context_index_with_registry(
         advertised_tools: summaries,
     })
 }
+
+fn get_tool_names(json_str: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<SchemaEntry>>(json_str)
+        .map(|entries| entries.into_iter().map(|e| e.name).collect())
+        .unwrap_or_default()
+}
+
