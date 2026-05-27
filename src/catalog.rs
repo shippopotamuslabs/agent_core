@@ -74,7 +74,6 @@ mod tests {
         let file: CatalogFile = serde_json::from_str(raw).expect("tool_catalog.json");
         ToolCatalog::from_specs(file.tools)
     }
-
     #[test]
     fn catalog_loads_19_tools() {
         assert_eq!(fixture_catalog().all().len(), 19);

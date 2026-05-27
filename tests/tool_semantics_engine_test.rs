@@ -67,7 +67,12 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
         SessionIoParams {
             provider: "anthropic".to_string(),
             context_window_tokens: 200_000,
-            tool_catalog_json: r#"[{"name":"open_tools"},{"name":"search_web"},{"name":"write_doc"},{"name":"lookup_memory"}]"#.to_string(),
+            tool_catalog_json: r#"[
+              {"name":"open_tools","aliases":[],"reproducible":true,"schema_hint":null},
+              {"name":"search_web","aliases":[],"reproducible":true,"schema_hint":null},
+              {"name":"write_doc","aliases":[],"reproducible":false,"schema_hint":null},
+              {"name":"lookup_memory","aliases":[],"reproducible":true,"schema_hint":null}
+            ]"#.to_string(),
             tool_schema_registry_json: r#"[{"name":"open_tools"},{"name":"search_web"},{"name":"write_doc"},{"name":"lookup_memory"}]"#.to_string(),
             tools_schema_json: active_schema.to_string(),
             system_prompt: "sys".to_string(),

@@ -14,12 +14,12 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 
 const CATALOG_JSON: &str = r#"[
-  {"name":"disclose_tool_schemas","description":"Disclose tools","disclosureMode":"PRELOADED"},
-  {"name":"web_search","description":"Search web","disclosureMode":"PRELOADED"},
-  {"name":"web_extract","description":"Extract pages","disclosureMode":"PRELOADED"},
-  {"name":"search_chat_history","description":"Search history","disclosureMode":"DISCLOSE_ON_DEMAND"},
-  {"name":"append_blocks","description":"Append blocks","disclosureMode":"DISCLOSE_ON_DEMAND"},
-  {"name":"search_current_artifact","description":"Search artifact","disclosureMode":"DISCLOSE_ON_DEMAND"}
+  {"name":"disclose_tool_schemas","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"tool_names","ty":"array","description":"tool names"}],"defaults":{}}},
+  {"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
+  {"name":"web_extract","aliases":["web_fetch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"urls","ty":"array","description":"urls"}],"defaults":{}}},
+  {"name":"search_chat_history","aliases":[],"reproducible":true,"schema_hint":null},
+  {"name":"append_blocks","aliases":[],"reproducible":false,"schema_hint":{"required_fields":[{"name":"artifactId","ty":"string","description":"id"},{"name":"blocks","ty":"array","description":"blocks"}],"defaults":{"isComplete":false}}},
+  {"name":"search_current_artifact","aliases":[],"reproducible":true,"schema_hint":null}
 ]"#;
 
 const ACTIVE_SCHEMA_JSON: &str = r#"[

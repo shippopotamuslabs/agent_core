@@ -884,7 +884,10 @@ impl From<FfiAgentConfig> for AgentConfig {
             tool_semantics: crate::tool_semantics::ToolSemanticsConfig::from_json(
                 &f.tool_semantics_json,
             )
-            .unwrap_or_else(|_| crate::tool_semantics::ToolSemanticsConfig::agnostic()),
+            .unwrap_or_else(|error| {
+                eprintln!("agent_core: invalid tool_semantics_json on FfiAgentConfig: {error}");
+                crate::tool_semantics::ToolSemanticsConfig::agnostic()
+            }),
         }
     }
 }
