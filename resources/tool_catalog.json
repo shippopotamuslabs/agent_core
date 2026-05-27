@@ -16,6 +16,21 @@
       }
     },
     {
+      "name": "read_context_reference",
+      "aliases": [],
+      "reproducible": true,
+      "schema_hint": {
+        "required_fields": [
+          {
+            "name": "reference_id",
+            "ty": "string",
+            "description": "ID of the context reference to retrieve"
+          }
+        ],
+        "defaults": {}
+      }
+    },
+    {
       "name": "web_search",
       "aliases": ["websearch"],
       "reproducible": true,

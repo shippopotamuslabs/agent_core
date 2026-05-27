@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
 
+#[cfg(test)]
 const SNIPPET_MAX_CHARS: usize = 200;
 
 fn tail_chars(s: &str, max_chars: usize) -> String {
@@ -183,7 +184,7 @@ impl Default for ArtifactSquashCompactionTier {
 impl CompactionTier for ArtifactSquashCompactionTier {
     fn apply(
         &self,
-        mut session: AgentSession,
+        session: AgentSession,
         config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {

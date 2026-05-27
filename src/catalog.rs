@@ -25,6 +25,7 @@ pub struct ToolSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct CatalogFile {
     tools: Vec<ToolSpec>,
 }
@@ -75,8 +76,8 @@ mod tests {
         ToolCatalog::from_specs(file.tools)
     }
     #[test]
-    fn catalog_loads_19_tools() {
-        assert_eq!(fixture_catalog().all().len(), 19);
+    fn catalog_loads_20_tools() {
+        assert_eq!(fixture_catalog().all().len(), 20);
     }
 
     #[test]
