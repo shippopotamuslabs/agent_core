@@ -90,32 +90,46 @@ pub fn build_tool_context_index_with_registry(
     } else {
         tools_schema_json.to_string()
     };
-    let seq = store.next_sequence();
-    let id = format!("tool-schema-{seq}");
-    let preview = make_preview(&stash_content);
-    let tool_names = get_tool_names(&stash_content);
-    let title = if tool_names.is_empty() {
-        "tool_schema_full".to_string()
-    } else {
-        format!("tool_schema: {}", tool_names.join(", "))
+    let existing_ref = store.entries().find(|entry| {
+        entry.reference.kind == ContextReferenceKind::ToolSchema && entry.content == stash_content
+    }).map(|entry| entry.reference.clone());
+
+    let stored = match existing_ref {
+        Some(r) => r,
+        None => {
+            let seq = store.next_sequence();
+            let id = format!("tool-schema-{seq}");
+            let preview = make_preview(&stash_content);
+            let tool_names = get_tool_names(&stash_content);
+            let title = if tool_names.is_empty() {
+                "tool_schema_full".to_string()
+            } else if tool_names.len() <= 3 {
+                format!("tool_schema: {}", tool_names.join(", "))
+            } else {
+                let first_three = tool_names[..3].join(", ");
+                let last = tool_names.last().unwrap();
+                let count = tool_names.len();
+                format!("tool_schema ({count} tools): {first_three}, ... {last}")
+            };
+            let reference = ContextReference {
+                id: id.clone(),
+                kind: ContextReferenceKind::ToolSchema,
+                title,
+                byte_len: stash_content.len() as u64,
+                token_estimate: (stash_content.len() / 4) as u32,
+                preview,
+                retrieval_hint: format!("read_context_reference(\"{id}\")"),
+            };
+            let entry = ContextStoreEntry {
+                reference: reference.clone(),
+                content: stash_content,
+                source_message_ids: vec![],
+                created_turn_index: 0,
+                expires_after_turn: None,
+            };
+            store.insert_entry(entry)
+        }
     };
-    let reference = ContextReference {
-        id: id.clone(),
-        kind: ContextReferenceKind::ToolSchema,
-        title,
-        byte_len: stash_content.len() as u64,
-        token_estimate: (stash_content.len() / 4) as u32,
-        preview,
-        retrieval_hint: format!("read_context_reference(\"{id}\")"),
-    };
-    let entry = ContextStoreEntry {
-        reference: reference.clone(),
-        content: stash_content,
-        source_message_ids: vec![],
-        created_turn_index: 0,
-        expires_after_turn: None,
-    };
-    let stored = store.insert_entry(entry);
 
     let advertised_source = if catalog_entries.is_empty() {
         fallback_entries
