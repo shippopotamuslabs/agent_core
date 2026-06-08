@@ -31,7 +31,10 @@ use crate::compact::{
     compaction_pipeline_for_plan, default_compaction_pipeline, estimate_session_pressure,
     history_snapshot::snapshot_history_range,
     policy::build_compaction_plan,
-    tool_spill::{spill_tool_messages_in_session, spill_tool_result_if_needed},
+    tool_spill::{
+        activation_tools_from_retrieval_hint, spill_tool_messages_in_session,
+        spill_tool_result_if_needed,
+    },
     CompactionContext, CompactionOutcome, CompactionPipeline, CompactionTier as _,
 };
 use crate::context_store::{insert_terminal_output, ContextReference, ContextStore};
@@ -67,6 +70,34 @@ fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
             | CompactionTier::Summary
             | CompactionTier::TextTruncate
     )
+}
+
+fn merge_active_tool_names(active_tool_names: &mut Vec<String>, names: impl IntoIterator<Item = String>) {
+    for name in names {
+        if !active_tool_names.iter().any(|existing| existing == &name) {
+            active_tool_names.push(name);
+        }
+    }
+}
+
+fn is_companion_callable_tool(
+    discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
+    tool_name: &str,
+) -> bool {
+    discovery
+        .as_ref()
+        .map(|d| d.companion_callable_tools.iter().any(|n| n == tool_name))
+        .unwrap_or(false)
+}
+
+fn activate_tools_for_spill_reference(
+    active_tool_names: &mut Vec<String>,
+    result: &mut ToolResultRecord,
+    reference: &ContextReference,
+) {
+    let hinted = activation_tools_from_retrieval_hint(&reference.retrieval_hint);
+    merge_active_tool_names(active_tool_names, hinted.iter().cloned());
+    merge_active_tool_names(&mut result.activated_tool_names, hinted);
 }
 
 fn parse_tool_names_from_schema(schema_json: &str) -> Vec<String> {
@@ -507,9 +538,14 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 .as_ref()
                 .map(|d| d.always_callable && raw.name == d.tool_name)
                 .unwrap_or(false);
+            let companion_callable = is_companion_callable_tool(&discovery, &raw.name);
+            if companion_callable {
+                merge_active_tool_names(&mut g.active_tool_names, [raw.name.clone()]);
+            }
             let callable_now = !g.active_tool_names.is_empty()
                 && (g.active_tool_names.iter().any(|n| n == &raw.name)
-                    || discovery_always_callable);
+                    || discovery_always_callable
+                    || companion_callable);
             if !g.active_tool_names.is_empty() && !callable_now {
                 let ti = g.turn_index;
                 g.emit(AgentEvent::ToolSoftFailure {
@@ -738,13 +774,9 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
 
         let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
         let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
-        // Merge any search_tools-activated names into the active set in first-seen order, deduped.
+        // Merge any host-reported activations into the active set in first-seen order, deduped.
         for res in &results {
-            for name in &res.activated_tool_names {
-                if !g.active_tool_names.iter().any(|existing| existing == name) {
-                    g.active_tool_names.push(name.clone());
-                }
-            }
+            merge_active_tool_names(&mut g.active_tool_names, res.activated_tool_names.iter().cloned());
         }
 
         let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> = calls
@@ -848,6 +880,13 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             if g.config.enable_state_ledger {
                 g.state_ledger.observe_tool_result(&res);
             }
+            if let Some(reference) = spilled.as_ref() {
+                activate_tools_for_spill_reference(
+                    &mut g.active_tool_names,
+                    &mut res,
+                    reference,
+                );
+            }
             if spilled.is_some() && !spill_stored_copy_only {
                 let spill_tokens_after =
                     g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
@@ -927,6 +966,13 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
                 g.state_ledger.observe_tool_result(&res);
+            }
+            if let Some(reference) = spilled.as_ref() {
+                activate_tools_for_spill_reference(
+                    &mut g.active_tool_names,
+                    &mut res,
+                    reference,
+                );
             }
             if spilled.is_some() && !spill_stored_copy_only {
                 let spill_tokens_after =

@@ -3,7 +3,8 @@
   "discovery": {
     "tool_name": "search_tools",
     "request_field_name": "query",
-    "always_callable": true
+    "always_callable": true,
+    "companion_callable_tools": ["read_context_reference"]
   },
   "artifact": {
     "start_tool_name": "start_artifact",
