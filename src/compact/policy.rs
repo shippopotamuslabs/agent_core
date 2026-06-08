@@ -2,8 +2,9 @@
 //!
 //! See `plans/PLAN-agent-core-context-management/spec.md` — task 3.
 
+use crate::budget::effective_hard_prompt_ceiling_tokens;
 use crate::events::{CompactionTier, CompactionTrigger};
-use crate::policy::{effective_compaction_threshold_ratio, ContextPolicy};
+use crate::policy::{effective_compaction_threshold_ratio, ContextPolicy, ContextPolicyTier};
 use crate::session::{AgentConfig, SessionCapabilities};
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,11 @@ pub fn build_compaction_plan(
             if fifo_allowed {
                 ordered.push(CompactionTier::Fifo);
             }
+            if history_rewrite_allowed
+                && text_truncate_allowed(policy.tier, context_window_tokens)
+            {
+                ordered.push(CompactionTier::TextTruncate);
+            }
         }
         CompactionTrigger::Manual => {
             ordered.push(CompactionTier::HistorySnapshot);
@@ -88,6 +94,11 @@ pub fn build_compaction_plan(
                 ordered.push(CompactionTier::Summary);
             } else if history_rewrite_allowed {
                 ordered.push(CompactionTier::Fifo);
+            }
+            if history_rewrite_allowed
+                && text_truncate_allowed(policy.tier, context_window_tokens)
+            {
+                ordered.push(CompactionTier::TextTruncate);
             }
         }
     }
@@ -99,6 +110,16 @@ pub fn build_compaction_plan(
         ordered_tiers: ordered,
         allow_history_rewrite: history_rewrite_allowed,
         require_snapshot_before_destructive_drop: config.require_snapshot_before_fifo,
-        max_prompt_tokens_after_plan: 0,
+        max_prompt_tokens_after_plan: effective_hard_prompt_ceiling_tokens(
+            config,
+            context_window_tokens,
+        ),
     }
+}
+
+fn text_truncate_allowed(tier: ContextPolicyTier, context_window_tokens: u32) -> bool {
+    matches!(
+        tier,
+        ContextPolicyTier::FixedKv | ContextPolicyTier::SmallContext | ContextPolicyTier::LocalMutable
+    ) || context_window_tokens < 8_000
 }

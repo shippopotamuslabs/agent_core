@@ -1,6 +1,15 @@
-//! Tool-result truncation before messages hit session history (AGENT-019).
+//! Tool-result and message-content truncation before prompts hit providers (AGENT-019).
+
+use once_cell::sync::Lazy;
+use tiktoken_rs::CoreBPE;
+
+use crate::budget::count_tokens;
 
 const TRUNCATION_NOTE: &str = "\n[Result truncated to fit context budget]";
+pub const MESSAGE_TRUNCATION_NOTE: &str = "\n[... earlier content truncated to fit context ...]";
+
+static ENCODER: Lazy<CoreBPE> =
+    Lazy::new(|| tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load"));
 
 /// Truncate UTF-8 `json` to fit within `budget_bytes`, preserving character boundaries.
 /// Appends [`TRUNCATION_NOTE`] when truncated.
@@ -23,11 +32,30 @@ pub fn truncate_tool_result_json(json: &str, budget_bytes: usize) -> (String, bo
     (out, true)
 }
 
+/// Truncate UTF-8 `text` to at most `max_tokens` using the shared tiktoken encoder.
+pub fn truncate_message_content_to_tokens(text: &str, max_tokens: u32) -> (String, bool) {
+    if max_tokens == 0 {
+        return (MESSAGE_TRUNCATION_NOTE.trim_start().to_string(), true);
+    }
+    let tokens = ENCODER.encode_with_special_tokens(text);
+    if tokens.len() <= max_tokens as usize {
+        return (text.to_string(), false);
+    }
+    let note_tokens = count_tokens(MESSAGE_TRUNCATION_NOTE);
+    let keep = max_tokens.saturating_sub(note_tokens).max(1) as usize;
+    let truncated_tokens = tokens[..keep.min(tokens.len())].to_vec();
+    let decoded = ENCODER
+        .decode(truncated_tokens)
+        .unwrap_or_else(|_| text.chars().take(keep.saturating_mul(4)).collect());
+    let mut out = decoded;
+    out.push_str(MESSAGE_TRUNCATION_NOTE);
+    (out, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::truncate_budget_per_result;
-    use crate::budget::TokenLedger;
+    use crate::budget::{truncate_budget_per_result, PromptBudgetParts, TokenLedger};
     use crate::message::{AgentMessage, AgentRole};
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 
@@ -89,11 +117,27 @@ mod tests {
             serde_json::Value::Null,
         );
         let cfg = AgentConfig::default();
-        let t_tokens =
-            TokenLedger::estimate(&session_trunc, &cfg, "anthropic", 100_000, "[]").total_tokens;
-        let f_tokens =
-            TokenLedger::estimate(&session_full, &cfg, "anthropic", 100_000, "[]").total_tokens;
+        let parts = PromptBudgetParts::from_legacy("anthropic", 100_000, "[]");
+        let t_tokens = TokenLedger::estimate(&session_trunc, &cfg, &parts).total_tokens;
+        let f_tokens = TokenLedger::estimate(&session_full, &cfg, &parts).total_tokens;
         assert!(t_tokens < f_tokens);
+    }
+
+    #[test]
+    fn message_truncation_preserves_head_and_note() {
+        let body = "alpha ".repeat(400);
+        let (truncated, changed) = truncate_message_content_to_tokens(&body, 32);
+        assert!(changed);
+        assert!(truncated.contains(MESSAGE_TRUNCATION_NOTE.trim()));
+        assert!(count_tokens(&truncated) <= 32);
+    }
+
+    #[test]
+    fn message_truncation_under_budget_unchanged() {
+        let text = "short message";
+        let (out, changed) = truncate_message_content_to_tokens(text, 64);
+        assert!(!changed);
+        assert_eq!(out, text);
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod micro;
 pub mod pipeline;
 pub mod policy;
 pub mod summary;
+pub mod text_truncate;
 pub mod tool_spill;
 
 pub use artifact_squash::ArtifactSquashCompactionTier;
@@ -14,7 +15,10 @@ pub use history_snapshot::HistorySnapshotCompactionTier;
 pub use micro::MicroCompactionTier;
 pub use pipeline::CompactionPipeline;
 pub use summary::{apply_summary_result, SummaryCompactionTier, SUMMARY_INSTRUCTION};
+pub use text_truncate::TextTruncateCompactionTier;
 pub use tool_spill::ToolSpillCompactionTier;
+
+use crate::budget::{PromptBudgetParts, TokenLedger};
 
 use crate::events::{
     AgentError, CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger,
@@ -29,12 +33,36 @@ pub struct CompactionContext {
     pub provider: String,
     /// Model's total context-window size in tokens.
     pub context_window_tokens: u32,
-    /// Raw tools-schema JSON from `ModelRequest`; used for token reservation.
+    /// Raw tools-schema JSON from `ModelRequest`; included in prompt budget.
     pub tools_schema_json: String,
+    /// Stable system prompt shipped separately from `session.messages`.
+    pub system_prompt: String,
+    /// Projected Kotlin context sidecars (empty uses conservative budget estimate).
+    pub context_sidecars_estimate: String,
     /// Host/session capabilities (e.g. whether LLM summarization is allowed).
     pub capabilities: SessionCapabilities,
     /// Which phase of the turn loop triggered this compaction pass.
     pub trigger: CompactionTrigger,
+}
+
+/// Full projected prompt pressure for compaction tiers and engine preflight checks.
+pub fn estimate_session_pressure(
+    session: &AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+) -> crate::session::Pressure {
+    let parts = PromptBudgetParts {
+        provider: &ctx.provider,
+        context_window_tokens: ctx.context_window_tokens,
+        tools_schema_json: &ctx.tools_schema_json,
+        system_prompt: &ctx.system_prompt,
+        context_sidecars: if ctx.context_sidecars_estimate.is_empty() {
+            ""
+        } else {
+            &ctx.context_sidecars_estimate
+        },
+    };
+    TokenLedger::estimate(session, config, &parts)
 }
 
 /// Result of a single compaction tier (or whole pipeline) run.
@@ -107,6 +135,9 @@ pub fn compaction_pipeline_for_plan(plan: &policy::CompactionPlan) -> Compaction
             CompactionTierKind::HistorySnapshot => {
                 Some(Box::new(HistorySnapshotCompactionTier) as Box<dyn CompactionTier>)
             }
+            CompactionTierKind::TextTruncate => {
+                Some(Box::new(TextTruncateCompactionTier::default()) as Box<dyn CompactionTier>)
+            }
         })
         .collect();
     CompactionPipeline::new(tiers)
@@ -122,6 +153,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: SessionCapabilities {
                 summarization_allowed: true,
                 kv_fixed: false,

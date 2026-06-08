@@ -274,6 +274,8 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
         provider: "anthropic".into(),
         context_window_tokens: 256,
         tools_schema_json: "[]".into(),
+        system_prompt: String::new(),
+        context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities {
             summarization_allowed: true,
             kv_fixed: false,

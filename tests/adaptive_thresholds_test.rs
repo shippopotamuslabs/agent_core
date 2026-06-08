@@ -39,6 +39,8 @@ fn at_4k_window_summary_tier_is_not_applicable() {
         provider: "anthropic".into(),
         context_window_tokens: 4096,
         tools_schema_json: "[]".into(),
+        system_prompt: String::new(),
+        context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities {
             summarization_allowed: true,
             context_policy_tier: ContextPolicyTier::SmallContext,

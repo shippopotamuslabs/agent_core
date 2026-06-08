@@ -38,6 +38,8 @@ fn compaction_ctx(trigger: CompactionTrigger) -> CompactionContext {
         provider: "anthropic".into(),
         context_window_tokens: 200_000,
         tools_schema_json: "[]".into(),
+        system_prompt: String::new(),
+        context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities {
             summarization_allowed: true,
             ..Default::default()

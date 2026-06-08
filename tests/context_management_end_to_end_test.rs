@@ -125,9 +125,21 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
 
     // 4) Inspect the next ModelRequest and assert every context channel is
     //    surfaced through the engine-owned request.
-    let req = match eng.next_action(&handle) {
-        AgentAction::CallModel(req) => req,
-        other => panic!("expected CallModel, got {other:?}"),
+    let req = loop {
+        match eng.next_action(&handle) {
+            AgentAction::CallModel(req) => break req,
+            AgentAction::RequestSummary(summary_req) => {
+                eng.submit_summary(
+                    &handle,
+                    agent_core::turn_io::SummaryResult {
+                        summary_text: "Retained objective, artifact state, and tool decisions."
+                            .into(),
+                        last_message_id: summary_req.last_message_id,
+                    },
+                );
+            }
+            other => panic!("expected CallModel or RequestSummary, got {other:?}"),
+        }
     };
 
     let req_ledger = req.state_ledger.as_ref().expect("state_ledger required");
@@ -169,9 +181,13 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
     let pressure = TokenLedger::estimate(
         &AgentSession::new(req.session_messages.clone(), serde_json::Value::Null),
         &AgentConfig::default(),
-        "anthropic",
-        256,
-        &req.tools_schema_json,
+        &agent_core::budget::PromptBudgetParts {
+            provider: "anthropic",
+            context_window_tokens: 256,
+            tools_schema_json: &req.tools_schema_json,
+            system_prompt: &req.system_prompt,
+            context_sidecars: "",
+        },
     );
     assert!(
         pressure.ratio < 0.85,

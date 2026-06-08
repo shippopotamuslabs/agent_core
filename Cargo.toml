@@ -66,6 +66,10 @@ name = "compaction_triggers_test"
 path = "tests/compaction_triggers_test.rs"
 
 [[test]]
+name = "full_prompt_budget_test"
+path = "tests/full_prompt_budget_test.rs"
+
+[[test]]
 name = "context_management_end_to_end_test"
 path = "tests/context_management_end_to_end_test.rs"
 

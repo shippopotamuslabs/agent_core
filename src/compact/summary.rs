@@ -5,8 +5,8 @@
 //! The engine forwards that to the host; the host later calls [`apply_summary_result`] (or equivalent)
 //! with a [`crate::turn_io::SummaryResult`].
 
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::{effective_retention_window_tokens, TokenLedger};
+use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
+use crate::budget::effective_retention_window_tokens;
 use crate::events::{CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger};
 use crate::message::{AgentMessage, AgentRole};
 use crate::session::{AgentConfig, AgentSession};
@@ -219,14 +219,7 @@ pub fn apply_summary_result(
         }
     }
 
-    let tokens_before = TokenLedger::estimate(
-        session,
-        config,
-        &ctx.provider,
-        ctx.context_window_tokens,
-        &ctx.tools_schema_json,
-    )
-    .total_tokens;
+    let tokens_before = estimate_session_pressure(session, config, ctx).total_tokens;
 
     session.messages.drain(start..start + n);
 
@@ -253,14 +246,7 @@ pub fn apply_summary_result(
     };
     session.messages.insert(start, summary_msg);
 
-    let tokens_after = TokenLedger::estimate(
-        session,
-        config,
-        &ctx.provider,
-        ctx.context_window_tokens,
-        &ctx.tools_schema_json,
-    )
-    .total_tokens;
+    let tokens_after = estimate_session_pressure(session, config, ctx).total_tokens;
 
     session.push_compaction_event(CompactionEvent {
         tier: CompactionTierKind::Summary,
@@ -287,6 +273,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: crate::session::SessionCapabilities {
                 summarization_allowed: allowed,
                 kv_fixed,
