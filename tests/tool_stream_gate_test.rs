@@ -108,6 +108,23 @@ fn sg_03_native_tools_flush_preamble() {
 }
 
 #[test]
+fn sg_10_native_tools_flush_long_chunked_preamble_before_tool_calls() {
+    let preamble =
+        "I'll immediately proceed to append_blocks with artifact hbWxQYaTV7WyJ39rLRiq9to9LCu2 \
+         and populate the document with the requested sections.";
+    let mut gate = ToolStreamGate::new(true);
+    let mut emitted = String::new();
+    for chunk in preamble.as_bytes().chunks(17) {
+        let piece = std::str::from_utf8(chunk).expect("utf8");
+        emitted.push_str(&gate.push(piece).emitted_prefix);
+    }
+    let finish = gate.finish(true);
+    let visible = format!("{}{}", emitted, finish.trailing_flush);
+    assert_eq!(visible, preamble, "SG-10 visible text");
+    assert!(!finish.has_tool_marker, "SG-10 has_tool_marker");
+}
+
+#[test]
 fn sg_04_native_tools_do_not_flush_dsml_tail() {
     let mut gate = ToolStreamGate::new(true);
     gate.push("Summary.<|DSML|tool_calls></|DSML|tool_calls>");

@@ -16,6 +16,15 @@ pub fn tool_output_reference_id(call_id: &str) -> String {
     format!("tool-output-{call_id}")
 }
 
+/// Tool names to activate when a spill envelope's `retrieval_hint` references them.
+pub fn activation_tools_from_retrieval_hint(retrieval_hint: &str) -> Vec<String> {
+    const PREFIX: &str = "read_context_reference(\"";
+    if retrieval_hint.starts_with(PREFIX) && retrieval_hint.ends_with("\")") {
+        return vec!["read_context_reference".to_string()];
+    }
+    Vec::new()
+}
+
 /// Construct the prompt-facing JSON envelope that replaces the raw result.
 ///
 /// The envelope intentionally contains the literal string `context_ref` so

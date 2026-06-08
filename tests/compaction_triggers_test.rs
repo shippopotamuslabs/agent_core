@@ -9,7 +9,9 @@ use std::sync::Arc;
 use agent_core::action::AgentAction;
 use agent_core::compact::fifo::FifoCompactionTier;
 use agent_core::compact::summary::SummaryCompactionTier;
-use agent_core::compact::tool_spill::spill_tool_result_if_needed;
+use agent_core::compact::tool_spill::{
+    activation_tools_from_retrieval_hint, spill_tool_result_if_needed,
+};
 use agent_core::compact::{
     CompactionContext, CompactionOutcome, CompactionTier as CompactionTierTrait,
 };
@@ -946,6 +948,14 @@ fn m3_tool_spillover_must_preserve_full_raw_output() {
         .get(&reference.id)
         .expect("stored entry must be retrievable");
     assert_eq!(entry.content, full);
+}
+
+#[test]
+fn m3_spill_retrieval_hint_maps_to_read_context_reference_activation() {
+    assert_eq!(
+        activation_tools_from_retrieval_hint(r#"read_context_reference("tool-output-call-1")"#),
+        vec!["read_context_reference".to_string()]
+    );
 }
 
 // ── FEAT-long-agent-loop-robustness (TDD Red) ────────────────────────────────

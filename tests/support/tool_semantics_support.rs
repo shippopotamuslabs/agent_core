@@ -59,6 +59,7 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
             tool_name: "open_tools".to_string(),
             request_field_name: "names".to_string(),
             always_callable: true,
+            companion_callable_tools: Vec::new(),
         }),
         artifact: Some(ArtifactToolSemantics {
             start_tool_name: "begin_doc".to_string(),

@@ -135,6 +135,11 @@ fn tsd_26_default_semantics_reference_search_tools() {
     assert_eq!(discovery.tool_name, "search_tools");
     assert_eq!(discovery.request_field_name, "query");
     assert!(discovery.always_callable);
+    assert!(
+        discovery
+            .companion_callable_tools
+            .contains(&"read_context_reference".to_string())
+    );
 }
 
 #[test]
@@ -192,4 +197,130 @@ fn tsd_26_engine_rejects_append_blocks_before_search_activation() {
         payload["available_tools"],
         serde_json::json!(["search_tools", "web_search", "web_extract"])
     );
+}
+
+fn enclave_discovery_session(
+    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
+    config: AgentConfig,
+) -> agent_core::SessionHandle {
+    eng.create_session(
+        vec![AgentMessage {
+            id: "u1".into(),
+            role: AgentRole::User,
+            content: "research".into(),
+            metadata: serde_json::Value::Null,
+        }],
+        config,
+        capabilities(),
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: SEARCH_CATALOG_JSON.into(),
+            tool_schema_registry_json: SEARCH_REGISTRY_JSON.into(),
+            tools_schema_json: SEARCH_ACTIVE_SCHEMA_JSON.into(),
+            system_prompt: "sys".into(),
+        },
+    )
+}
+
+#[test]
+fn tsd_companion_read_context_reference_is_callable_without_search_tools() {
+    let eng = engine();
+    let handle = enclave_discovery_session(&eng, enclave_test_agent_config());
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("call-read".into()),
+                name: "read_context_reference".into(),
+                arguments_json: r#"{"reference_id":"tool-output-call-1"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "read_context_reference");
+        }
+        other => panic!("expected ExecuteTools for companion tool, got {other:?}"),
+    }
+}
+
+#[test]
+fn tsd_spill_retrieval_hint_activates_read_context_reference() {
+    let mut config = enclave_test_agent_config();
+    config.tool_spill_threshold_bytes = 64;
+    let eng = engine();
+    let handle = enclave_discovery_session(&eng, config);
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("call-extract".into()),
+                name: "web_extract".into(),
+                arguments_json: r#"{"urls":["https://example.com"]}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    let action = eng.next_action(&handle);
+    let AgentAction::ExecuteTools(calls) = action else {
+        panic!("expected ExecuteTools, got {action:?}");
+    };
+    assert_eq!(calls[0].name, "web_extract");
+
+    let huge = "x".repeat(128);
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-extract".into(),
+            result_json: huge,
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = handle.integration_test_snapshot();
+    let spilled = snapshot
+        .messages
+        .iter()
+        .find(|message| message.role == AgentRole::Tool && message.content.contains("context_ref"))
+        .expect("oversized tool result must spill to context_ref envelope");
+    assert!(spilled.content.contains("read_context_reference"));
+
+    let _follow_up = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("call-read".into()),
+                name: "read_context_reference".into(),
+                arguments_json: r#"{"reference_id":"tool-output-call-extract"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls[0].name, "read_context_reference");
+        }
+        other => panic!("expected ExecuteTools after spill hint activation, got {other:?}"),
+    }
 }
