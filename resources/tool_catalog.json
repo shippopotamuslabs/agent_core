@@ -1,15 +1,15 @@
 {
   "tools": [
     {
-      "name": "disclose_tool_schemas",
+      "name": "search_tools",
       "aliases": [],
       "reproducible": true,
       "schema_hint": {
         "required_fields": [
           {
-            "name": "tool_names",
-            "ty": "array",
-            "description": "Deferred tool names whose full schemas should be disclosed"
+            "name": "query",
+            "ty": "string",
+            "description": "Natural-language query describing the capability to find"
           }
         ],
         "defaults": {}

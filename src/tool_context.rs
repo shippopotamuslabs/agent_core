@@ -57,7 +57,7 @@ pub fn build_tool_context_index(
     )
 }
 
-/// Build the tool-context index using the lazy-disclosure split:
+/// Build the tool-context index using the tool-discovery split:
 /// - `catalog_json` supplies the compact catalog (drives `advertised_tools`).
 /// - `registry_json` supplies the full schema registry (persisted behind `full_schema_ref`).
 /// - `tools_schema_json` represents the currently active schemas.

@@ -1,0 +1,195 @@
+//! TDD Red — tool search discovery.
+
+#[path = "support/mod.rs"]
+mod support;
+
+use support::enclave_test_agent_config::enclave_test_agent_config;
+use agent_core::action::AgentAction;
+use agent_core::engine::{AgentEngine, SessionIoParams};
+use agent_core::events::AgentError;
+use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
+use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::policy::ContextPolicyTier;
+use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use std::sync::Arc;
+
+const ENCLAVE_SEMANTICS_JSON: &str =
+    include_str!("../../../core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json");
+
+const SEARCH_ACTIVE_SCHEMA_JSON: &str = r#"[
+  {"name":"search_tools","parameters":{}},
+  {"name":"web_search","parameters":{}},
+  {"name":"web_extract","parameters":{}}
+]"#;
+
+const SEARCH_CATALOG_JSON: &str = r#"[
+  {"name":"search_tools","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
+  {"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
+  {"name":"web_extract","aliases":["web_fetch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"urls","ty":"array","description":"urls"}],"defaults":{}}},
+  {"name":"append_blocks","aliases":[],"reproducible":false,"schema_hint":{"required_fields":[{"name":"artifactId","ty":"string","description":"id"},{"name":"blocks","ty":"array","description":"blocks"}],"defaults":{"isComplete":false}}}
+]"#;
+
+const SEARCH_REGISTRY_JSON: &str = r#"[
+  {"name":"search_tools","parameters":{}},
+  {"name":"web_search","parameters":{}},
+  {"name":"web_extract","parameters":{}},
+  {"name":"append_blocks","parameters":{"properties":{"artifactId":{"type":"string"}}}}
+]"#;
+
+struct PanicTransport;
+
+impl AgentTransport for PanicTransport {
+    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
+        panic!("transport is not used by engine-driven red tests");
+    }
+}
+
+struct PanicExecutor;
+
+impl AgentToolExecutor for PanicExecutor {
+    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
+        panic!("executor is not used by engine-driven red tests");
+    }
+}
+
+fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
+    AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExecutor),
+        Arc::new(NoOpSummarizer),
+    )
+}
+
+fn search_discovery_config() -> AgentConfig {
+    let mut config = enclave_test_agent_config();
+    config.tool_semantics = agent_core::tool_semantics::ToolSemanticsConfig::from_json(
+        r#"{
+          "catalog": { "tools": [] },
+          "discovery": {
+            "tool_name": "search_tools",
+            "request_field_name": "query",
+            "always_callable": true
+          },
+          "argument_repairs": [],
+          "canonical_shapes": [],
+          "result_policies": [],
+          "compaction": {},
+          "greedy_extension_tools": []
+        }"#,
+    )
+    .expect("search discovery semantics json must parse");
+    config
+}
+
+fn capabilities() -> SessionCapabilities {
+    SessionCapabilities {
+        tool_schema_deferral_supported: true,
+        context_policy_tier: ContextPolicyTier::HostedMutable,
+        ..SessionCapabilities::default()
+    }
+}
+
+fn create_session(
+    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
+) -> agent_core::SessionHandle {
+    eng.create_session(
+        vec![AgentMessage {
+            id: "u1".into(),
+            role: AgentRole::User,
+            content: "write".into(),
+            metadata: serde_json::Value::Null,
+        }],
+        search_discovery_config(),
+        capabilities(),
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: SEARCH_CATALOG_JSON.into(),
+            tool_schema_registry_json: SEARCH_REGISTRY_JSON.into(),
+            tools_schema_json: SEARCH_ACTIVE_SCHEMA_JSON.into(),
+            system_prompt: "sys".into(),
+        },
+    )
+}
+
+fn model_request(
+    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
+    handle: &agent_core::SessionHandle,
+) -> ModelRequest {
+    match eng.next_action(handle) {
+        AgentAction::CallModel(request) => request,
+        other => panic!("expected CallModel, got {other:?}"),
+    }
+}
+
+#[test]
+fn tsd_26_default_semantics_reference_search_tools() {
+    let semantics =
+        agent_core::tool_semantics::ToolSemanticsConfig::from_json(ENCLAVE_SEMANTICS_JSON)
+            .expect("enclave semantics json must parse");
+    let discovery = semantics
+        .discovery
+        .expect("enclave default semantics must configure discovery");
+    assert_eq!(discovery.tool_name, "search_tools");
+    assert_eq!(discovery.request_field_name, "query");
+    assert!(discovery.always_callable);
+}
+
+#[test]
+fn tsd_catalog_includes_search_tools_not_disclose() {
+    let catalog = include_str!("../resources/tool_catalog.json");
+    assert!(catalog.contains("\"name\": \"search_tools\""));
+    assert!(!catalog.contains("\"name\": \"disclose_tool_schemas\""));
+}
+
+#[test]
+fn tsd_26_engine_rejects_append_blocks_before_search_activation() {
+    let eng = engine();
+    let handle = create_session(&eng);
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("call-1".into()),
+                name: "append_blocks".into(),
+                arguments_json:
+                    r#"{"artifactId":"artifact-1","blocks":[{"type":"paragraph","text":"Hi"}]}"#
+                        .into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    let _repair_request = model_request(&eng, &handle);
+    let snapshot = handle.integration_test_snapshot();
+    let rejection = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == AgentRole::Tool
+                && !message
+                    .metadata
+                    .get("agent_tool_budget")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        })
+        .expect("deferred tool rejection must be stored as a tool message");
+    let payload: serde_json::Value =
+        serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
+
+    assert_eq!(
+        payload["error"].as_str(),
+        Some("Tool 'append_blocks' is not active. Call search_tools first.")
+    );
+    assert_eq!(
+        payload["available_tools"],
+        serde_json::json!(["search_tools", "web_search", "web_extract"])
+    );
+}

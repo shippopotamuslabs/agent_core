@@ -81,15 +81,15 @@ mod tests {
     }
 
     #[test]
-    fn disclose_tool_schemas_in_global_catalog() {
+    fn search_tools_in_global_catalog() {
         let catalog = fixture_catalog();
-        let spec = catalog.resolve("disclose_tool_schemas").unwrap();
+        let spec = catalog.resolve("search_tools").unwrap();
         assert!(spec.reproducible);
         let hint = spec.schema_hint.as_ref().unwrap();
         assert!(hint
             .required_fields
             .iter()
-            .any(|field| field.name == "tool_names"));
+            .any(|field| field.name == "query"));
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
     fn reproducible_classification() {
         let cat = fixture_catalog();
         let reproducible = [
-            "disclose_tool_schemas",
+            "search_tools",
             "web_search",
             "web_extract",
             "attached_image_inspect",

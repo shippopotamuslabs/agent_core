@@ -6,7 +6,7 @@ use crate::catalog::{ToolSchemaHint, ToolSpec};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSemanticsConfig {
     pub catalog: ToolCatalogConfig,
-    pub disclosure: Option<ToolDisclosureSemantics>,
+    pub discovery: Option<ToolDiscoverySemantics>,
     pub artifact: Option<ArtifactToolSemantics>,
     pub argument_repairs: Vec<ToolArgumentRepairRule>,
     pub canonical_shapes: Vec<ToolCanonicalShape>,
@@ -19,7 +19,7 @@ impl ToolSemanticsConfig {
     pub fn agnostic() -> Self {
         Self {
             catalog: ToolCatalogConfig { tools: Vec::new() },
-            disclosure: None,
+            discovery: None,
             artifact: None,
             argument_repairs: Vec::new(),
             canonical_shapes: Vec::new(),
@@ -93,15 +93,15 @@ impl ToolSemanticsConfig {
             }
         }
 
-        if let Some(disclosure) = &self.disclosure {
-            if disclosure.request_field_name.is_empty() {
-                return Err(ToolSemanticsError::InvalidDisclosureConfig {
-                    message: "disclosure request_field_name must not be empty".into(),
+        if let Some(discovery) = &self.discovery {
+            if discovery.request_field_name.is_empty() {
+                return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                    message: "discovery request_field_name must not be empty".into(),
                 });
             }
-            if disclosure.tool_name.is_empty() {
-                return Err(ToolSemanticsError::InvalidDisclosureConfig {
-                    message: "disclosure tool_name must not be empty".into(),
+            if discovery.tool_name.is_empty() {
+                return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                    message: "discovery tool_name must not be empty".into(),
                 });
             }
         }
@@ -146,7 +146,7 @@ pub struct ToolCatalogConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDisclosureSemantics {
+pub struct ToolDiscoverySemantics {
     pub tool_name: String,
     pub request_field_name: String,
     pub always_callable: bool,
@@ -234,7 +234,7 @@ pub enum ToolSemanticsError {
         first_tool: String,
         second_tool: String,
     },
-    InvalidDisclosureConfig {
+    InvalidDiscoveryConfig {
         message: String,
     },
     InvalidArtifactConfig {

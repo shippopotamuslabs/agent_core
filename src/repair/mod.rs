@@ -109,16 +109,16 @@ mod tests {
     }
 
     #[test]
-    fn disclose_tool_schemas_repair_succeeds_in_global_catalog() {
+    fn search_tools_repair_succeeds_in_global_catalog() {
         let raw = RawToolCall {
             id: Some("c1".into()),
-            name: "disclose_tool_schemas".into(),
-            arguments_json: r#"{"tool_names":["start_artifact"]}"#.into(),
+            name: "search_tools".into(),
+            arguments_json: r#"{"query":"start artifact"}"#.into(),
         };
         let (catalog, semantics) = enclave_repair_env();
         let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
         match out {
-            RepairOutcome::Repaired(rec) => assert_eq!(rec.name, "disclose_tool_schemas"),
+            RepairOutcome::Repaired(rec) => assert_eq!(rec.name, "search_tools"),
             other => panic!("expected Repaired, got {other:?}"),
         }
     }
