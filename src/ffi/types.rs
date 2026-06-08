@@ -1020,6 +1020,7 @@ pub enum FfiCompactionTier {
     Summary,
     ToolSpill,
     HistorySnapshot,
+    TextTruncate,
 }
 
 impl From<CompactionTier> for FfiCompactionTier {
@@ -1031,6 +1032,7 @@ impl From<CompactionTier> for FfiCompactionTier {
             CompactionTier::Summary => FfiCompactionTier::Summary,
             CompactionTier::ToolSpill => FfiCompactionTier::ToolSpill,
             CompactionTier::HistorySnapshot => FfiCompactionTier::HistorySnapshot,
+            CompactionTier::TextTruncate => FfiCompactionTier::TextTruncate,
         }
     }
 }

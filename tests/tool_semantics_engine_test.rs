@@ -85,6 +85,8 @@ fn compaction_ctx() -> CompactionContext {
         provider: "anthropic".to_string(),
         context_window_tokens: 200_000,
         tools_schema_json: "[]".to_string(),
+        system_prompt: String::new(),
+        context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities::default(),
         trigger: CompactionTrigger::MidTurn,
     }

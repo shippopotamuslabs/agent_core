@@ -1,5 +1,5 @@
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::{effective_threshold_tokens, should_compact_at_token_threshold, TokenLedger};
+use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
+use crate::budget::{effective_threshold_tokens, should_compact_at_token_threshold};
 use crate::compact::policy::{threshold_ratio_for_trigger, CompactionPlan};
 use crate::events::CompactionEvent;
 use crate::session::{AgentConfig, AgentSession};
@@ -26,13 +26,7 @@ impl CompactionPipeline {
         ctx: &CompactionContext,
         config: &AgentConfig,
     ) -> CompactionOutcome {
-        let pressure = TokenLedger::estimate(
-            &session,
-            config,
-            &ctx.provider,
-            ctx.context_window_tokens,
-            &ctx.tools_schema_json,
-        );
+        let pressure = estimate_session_pressure(&session, config, ctx);
 
         let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
         let threshold_tokens =
@@ -56,13 +50,7 @@ impl CompactionPipeline {
                     session = new_session;
                     session.push_compaction_event(event.clone());
 
-                    let new_pressure = TokenLedger::estimate(
-                        &session,
-                        config,
-                        &ctx.provider,
-                        ctx.context_window_tokens,
-                        &ctx.tools_schema_json,
-                    );
+                    let new_pressure = estimate_session_pressure(&session, config, ctx);
 
                     let under = !should_compact_at_token_threshold(&new_pressure, threshold_tokens);
                     last_event = Some(event);
@@ -87,13 +75,7 @@ impl CompactionPipeline {
         config: &AgentConfig,
         plan: &CompactionPlan,
     ) -> CompactionOutcome {
-        let pressure = TokenLedger::estimate(
-            &session,
-            config,
-            &ctx.provider,
-            ctx.context_window_tokens,
-            &ctx.tools_schema_json,
-        );
+        let pressure = estimate_session_pressure(&session, config, ctx);
 
         if !should_compact_at_token_threshold(&pressure, plan.threshold_tokens) {
             return CompactionOutcome::NotApplicable;
@@ -111,13 +93,7 @@ impl CompactionPipeline {
                     session = new_session;
                     session.push_compaction_event(event.clone());
 
-                    let new_pressure = TokenLedger::estimate(
-                        &session,
-                        config,
-                        &ctx.provider,
-                        ctx.context_window_tokens,
-                        &ctx.tools_schema_json,
-                    );
+                    let new_pressure = estimate_session_pressure(&session, config, ctx);
                     let under =
                         !should_compact_at_token_threshold(&new_pressure, plan.threshold_tokens);
                     last_event = Some(event);
@@ -149,6 +125,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: crate::session::SessionCapabilities {
                 summarization_allowed: true,
                 kv_fixed: false,

@@ -7,8 +7,8 @@
 //! Non-reproducible tools (per [`crate::catalog::ToolCatalog`]) are never modified. User and
 //! assistant turns are never touched. Tools with `preserve_in_micro_compaction` are excluded.
 
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
-use crate::budget::{effective_micro_keep_recent, TokenLedger};
+use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
+use crate::budget::effective_micro_keep_recent;
 use crate::catalog::ToolCatalog;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
@@ -40,14 +40,7 @@ impl CompactionTier for MicroCompactionTier {
         config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {
-        let tokens_before = TokenLedger::estimate(
-            &session,
-            config,
-            &ctx.provider,
-            ctx.context_window_tokens,
-            &ctx.tools_schema_json,
-        )
-        .total_tokens;
+        let tokens_before = estimate_session_pressure(&session, config, ctx).total_tokens;
 
         let keep = effective_micro_keep_recent(config, ctx.context_window_tokens) as usize;
         let catalog = match ToolCatalog::from_semantics(&config.tool_semantics) {
@@ -128,14 +121,7 @@ impl CompactionTier for MicroCompactionTier {
             }
         }
 
-        let tokens_after = TokenLedger::estimate(
-            &session,
-            config,
-            &ctx.provider,
-            ctx.context_window_tokens,
-            &ctx.tools_schema_json,
-        )
-        .total_tokens;
+        let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
 
         CompactionOutcome::Applied(
             session,
@@ -161,6 +147,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: crate::session::SessionCapabilities {
                 summarization_allowed: true,
                 kv_fixed: false,
@@ -195,7 +183,9 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let before = TokenLedger::estimate(&session, &cfg, "anthropic", 200_000, "[]").total_tokens;
+        let before =
+            super::estimate_session_pressure(&session, &cfg, &ctx(CompactionTrigger::MidTurn))
+                .total_tokens;
         let tier = MicroCompactionTier::default();
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::MidTurn));
         match outcome {
@@ -203,7 +193,8 @@ mod tests {
                 assert_eq!(ev.tier, TierEnum::Micro);
                 assert!(ev.tokens_after < ev.tokens_before);
                 let after =
-                    TokenLedger::estimate(&s, &cfg, "anthropic", 200_000, "[]").total_tokens;
+                    super::estimate_session_pressure(&s, &cfg, &ctx(CompactionTrigger::MidTurn))
+                        .total_tokens;
                 assert_eq!(after, ev.tokens_after);
                 assert!(after < before);
                 assert!(s

@@ -21,10 +21,10 @@
 //! Ported from `ChatHistoryCompressor.compressHistory` in the Android domain layer, extended for
 //! tool interleaving and protected roles as required by the agent-core ADR.
 
-use super::{CompactionContext, CompactionOutcome, CompactionTier};
+use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::{
     effective_retention_window_tokens, effective_threshold_tokens,
-    should_compact_at_token_threshold, TokenLedger,
+    should_compact_at_token_threshold,
 };
 use crate::compact::policy::threshold_ratio_for_trigger;
 use crate::events::{AgentError, CompactionEvent, CompactionTier as TierEnum};
@@ -165,26 +165,15 @@ impl CompactionTier for FifoCompactionTier {
         config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {
-        fn estimate(
-            session: &AgentSession,
-            config: &AgentConfig,
-            ctx: &CompactionContext,
-        ) -> crate::session::Pressure {
-            TokenLedger::estimate(
-                session,
-                config,
-                &ctx.provider,
-                ctx.context_window_tokens,
-                &ctx.tools_schema_json,
-            )
-        }
-
-        let tokens_before = estimate(&session, config, ctx).total_tokens;
+        let tokens_before = estimate_session_pressure(&session, config, ctx).total_tokens;
         let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
         let threshold_tokens =
             effective_threshold_tokens(config, ctx.context_window_tokens, threshold_ratio, None);
 
-        if !should_compact_at_token_threshold(&estimate(&session, config, ctx), threshold_tokens) {
+        if !should_compact_at_token_threshold(
+            &estimate_session_pressure(&session, config, ctx),
+            threshold_tokens,
+        ) {
             return CompactionOutcome::NotApplicable;
         }
 
@@ -215,8 +204,10 @@ impl CompactionTier for FifoCompactionTier {
         let mut last_u = last_user_index(&session.messages);
         let mut changed = false;
 
-        while should_compact_at_token_threshold(&estimate(&session, config, ctx), threshold_tokens)
-        {
+        while should_compact_at_token_threshold(
+            &estimate_session_pressure(&session, config, ctx),
+            threshold_tokens,
+        ) {
             let retention_start = retention_start_index(
                 &session.messages,
                 effective_retention_window_tokens(config, ctx.context_window_tokens),
@@ -235,7 +226,7 @@ impl CompactionTier for FifoCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
-        let tokens_after = estimate(&session, config, ctx).total_tokens;
+        let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
 
         CompactionOutcome::Applied(
             session,
@@ -261,6 +252,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens: cw,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: crate::session::SessionCapabilities {
                 summarization_allowed: true,
                 kv_fixed: false,

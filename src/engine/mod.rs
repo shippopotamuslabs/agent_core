@@ -20,14 +20,15 @@ use crate::artifact_finalize::{
 };
 use crate::budget::{
     effective_threshold_tokens, effective_tool_result_budget_for_window,
-    effective_tool_spill_threshold_bytes, should_compact_at_token_threshold, TokenLedger,
+    effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ceiling,
+    should_compact_at_token_threshold,
 };
 use crate::catalog::ToolCatalog;
 use crate::compact::{
     apply_summary_result,
     artifact_snapshot::persist_artifact_snapshot,
     artifact_squash::extract_artifact_anchor,
-    compaction_pipeline_for_plan, default_compaction_pipeline,
+    compaction_pipeline_for_plan, default_compaction_pipeline, estimate_session_pressure,
     history_snapshot::snapshot_history_range,
     policy::build_compaction_plan,
     tool_spill::{spill_tool_messages_in_session, spill_tool_result_if_needed},
@@ -61,7 +62,10 @@ use state::{EnginePhase, InnerSession};
 fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
         tier,
-        CompactionTier::Micro | CompactionTier::Fifo | CompactionTier::Summary
+        CompactionTier::Micro
+            | CompactionTier::Fifo
+            | CompactionTier::Summary
+            | CompactionTier::TextTruncate
     )
 }
 
@@ -776,14 +780,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             let Some((call, mut res)) = executed_by_call_id.remove(&call_id) else {
                 continue;
             };
-            let spill_tokens_before = TokenLedger::estimate(
-                &g.session,
-                &g.config,
-                &g.io.provider,
-                g.io.context_window_tokens,
-                &g.io.tools_schema_json,
-            )
-            .total_tokens;
+            let spill_tokens_before =
+                g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
             let policy = result_policy_for(&g.config.tool_semantics, &call.name);
             let spill_stored_copy_only = policy
                 .map(|policy| policy.spill_stored_copy_only)
@@ -817,13 +815,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             };
 
             if !skip_result_truncation {
-                let pressure = TokenLedger::estimate(
-                    &g.session,
-                    &g.config,
-                    &g.io.provider,
-                    g.io.context_window_tokens,
-                    &g.io.tools_schema_json,
-                );
+                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
                 let budget = effective_tool_result_budget_for_window(
                     &pressure,
                     &g.capabilities,
@@ -857,14 +849,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 g.state_ledger.observe_tool_result(&res);
             }
             if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = TokenLedger::estimate(
-                    &g.session,
-                    &g.config,
-                    &g.io.provider,
-                    g.io.context_window_tokens,
-                    &g.io.tools_schema_json,
-                )
-                .total_tokens;
+                let spill_tokens_after =
+                    g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
                 g.emit(AgentEvent::CompactionApplied(CompactionEvent {
                     tier: CompactionTier::ToolSpill,
                     tokens_before: spill_tokens_before,
@@ -880,14 +866,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
         }
         for (_, (call, mut res)) in executed_by_call_id {
-            let spill_tokens_before = TokenLedger::estimate(
-                &g.session,
-                &g.config,
-                &g.io.provider,
-                g.io.context_window_tokens,
-                &g.io.tools_schema_json,
-            )
-            .total_tokens;
+            let spill_tokens_before =
+                g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
             let threshold =
                 effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
             let turn_index = g.turn_index;
@@ -917,13 +897,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 )
             };
             if !skip_result_truncation {
-                let pressure = TokenLedger::estimate(
-                    &g.session,
-                    &g.config,
-                    &g.io.provider,
-                    g.io.context_window_tokens,
-                    &g.io.tools_schema_json,
-                );
+                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
                 let budget = effective_tool_result_budget_for_window(
                     &pressure,
                     &g.capabilities,
@@ -955,14 +929,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 g.state_ledger.observe_tool_result(&res);
             }
             if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = TokenLedger::estimate(
-                    &g.session,
-                    &g.config,
-                    &g.io.provider,
-                    g.io.context_window_tokens,
-                    &g.io.tools_schema_json,
-                )
-                .total_tokens;
+                let spill_tokens_after =
+                    g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
                 g.emit(AgentEvent::CompactionApplied(CompactionEvent {
                     tier: CompactionTier::ToolSpill,
                     tokens_before: spill_tokens_before,
@@ -1131,13 +1099,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
     ) -> AgentAction {
         let mut g = handle.lock_inner();
         if !g.config.enable_manual_compact {
-            let pressure = TokenLedger::estimate(
-                &g.session,
-                &g.config,
-                &g.io.provider,
-                g.io.context_window_tokens,
-                &g.io.tools_schema_json,
-            );
+            let pressure = g.estimate_pressure(CompactionTrigger::Manual);
             return AgentAction::ManualCompactCompleted(ManualCompactResult {
                 summary_ref: None,
                 history_ref: None,
@@ -1149,14 +1111,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let trigger = CompactionTrigger::Manual;
         g.emit(AgentEvent::PreCompact { trigger });
         let ctx = g.make_ctx(trigger);
-        let before = TokenLedger::estimate(
-            &g.session,
-            &g.config,
-            &g.io.provider,
-            g.io.context_window_tokens,
-            &g.io.tools_schema_json,
-        )
-        .total_tokens;
+        let before = g.estimate_pressure(CompactionTrigger::Manual).total_tokens;
 
         let outcome = crate::compact::SummaryCompactionTier::default().apply(
             g.session.clone(),
@@ -1303,9 +1258,16 @@ impl InnerSession {
             provider: self.io.provider.clone(),
             context_window_tokens: self.io.context_window_tokens,
             tools_schema_json: self.io.tools_schema_json.clone(),
+            system_prompt: self.io.system_prompt.clone(),
+            context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
             trigger,
         }
+    }
+
+    fn estimate_pressure(&self, trigger: CompactionTrigger) -> crate::session::Pressure {
+        let ctx = self.make_ctx(trigger);
+        estimate_session_pressure(&self.session, &self.config, &ctx)
     }
 
     fn persist_artifact_state_if_present(&mut self) {
@@ -1365,13 +1327,7 @@ impl InnerSession {
                 plan.threshold_ratio,
                 None,
             );
-            let pressure = TokenLedger::estimate(
-                &self.session,
-                &self.config,
-                &self.io.provider,
-                self.io.context_window_tokens,
-                &self.io.tools_schema_json,
-            );
+            let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
             let has_append_context = self.session.messages.iter().any(|message| {
@@ -1628,13 +1584,7 @@ impl InnerSession {
                     // loop until under threshold or NeedsHostCall / stuck
                 }
                 CompactionOutcome::NotApplicable => {
-                    let p2 = TokenLedger::estimate(
-                        &self.session,
-                        &self.config,
-                        &self.io.provider,
-                        self.io.context_window_tokens,
-                        &self.io.tools_schema_json,
-                    );
+                    let p2 = self.estimate_pressure(trigger);
                     if should_compact_at_token_threshold(&p2, active_threshold_tokens)
                         && !entered_for_long_loop_only
                         && !sync_applied
@@ -1702,6 +1652,19 @@ impl InnerSession {
         {
             self.emit(AgentEvent::HookInvoked {
                 checkpoint: "before_model_request".into(),
+            });
+        }
+
+        let preflight_ctx = self.make_ctx(CompactionTrigger::Preflight);
+        let preflight_pressure =
+            estimate_session_pressure(&self.session, &self.config, &preflight_ctx);
+        if exceeds_hard_prompt_ceiling(&preflight_pressure) {
+            return Err(AgentError::CompactionFailed {
+                tier: "pipeline".into(),
+                reason: format!(
+                    "Projected prompt {} tokens exceeds hard ceiling {} tokens after compaction",
+                    preflight_pressure.total_tokens, preflight_pressure.usable_prompt_tokens
+                ),
             });
         }
 
@@ -1954,14 +1917,7 @@ impl InnerSession {
                         .as_ref()
                         .map(|p| p.ratio)
                         .unwrap_or_else(|| {
-                            TokenLedger::estimate(
-                                &self.session,
-                                &self.config,
-                                &self.io.provider,
-                                self.io.context_window_tokens,
-                                &self.io.tools_schema_json,
-                            )
-                            .ratio
+                            self.estimate_pressure(CompactionTrigger::Preflight).ratio
                         });
                     (ratio * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32
                 },

@@ -22,6 +22,7 @@ pub enum CompactionTier {
     Summary,
     ToolSpill,
     HistorySnapshot,
+    TextTruncate,
 }
 
 impl std::fmt::Display for CompactionTier {
@@ -33,6 +34,7 @@ impl std::fmt::Display for CompactionTier {
             CompactionTier::Summary => write!(f, "summary"),
             CompactionTier::ToolSpill => write!(f, "tool_spill"),
             CompactionTier::HistorySnapshot => write!(f, "history_snapshot"),
+            CompactionTier::TextTruncate => write!(f, "text_truncate"),
         }
     }
 }

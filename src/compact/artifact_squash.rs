@@ -6,7 +6,7 @@
 
 use regex::Regex;
 
-use crate::budget::TokenLedger;
+use super::estimate_session_pressure;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole};
 use crate::session::{AgentConfig, AgentSession};
@@ -188,14 +188,7 @@ impl CompactionTier for ArtifactSquashCompactionTier {
         config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {
-        let tokens_before = TokenLedger::estimate(
-            &session,
-            config,
-            &ctx.provider,
-            ctx.context_window_tokens,
-            &ctx.tools_schema_json,
-        )
-        .total_tokens;
+        let tokens_before = estimate_session_pressure(&session, config, ctx).total_tokens;
 
         let Some(semantics) = config.tool_semantics.compaction.artifact_squash.as_ref() else {
             return CompactionOutcome::NotApplicable;
@@ -281,14 +274,7 @@ fn apply_semantic_artifact_squash(
     }
 
     session.messages = out;
-    let tokens_after = TokenLedger::estimate(
-        &session,
-        config,
-        &ctx.provider,
-        ctx.context_window_tokens,
-        &ctx.tools_schema_json,
-    )
-    .total_tokens;
+    let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
 
     CompactionOutcome::Applied(
         session,
@@ -312,6 +298,8 @@ mod tests {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tools_schema_json: "[]".into(),
+            system_prompt: String::new(),
+            context_sidecars_estimate: String::new(),
             capabilities: crate::session::SessionCapabilities {
                 summarization_allowed: true,
                 kv_fixed: false,

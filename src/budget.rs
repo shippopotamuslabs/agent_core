@@ -4,12 +4,24 @@ use tiktoken_rs::CoreBPE;
 use crate::session::{AgentConfig, AgentSession, Pressure, SessionCapabilities};
 
 /// Approximate bytes per token for local budget conversion.
-const AVG_BYTES_PER_TOKEN: usize = 4;
+pub(crate) const AVG_BYTES_PER_TOKEN: usize = 4;
+
+/// Conservative wrapper emitted by Kotlin `buildContextSidecars`.
+const CONTEXT_SIDECAR_WRAPPER_TOKENS: u32 = 12;
+
+/// Per-message chat-template overhead (role markers, newlines).
+const CHAT_TEMPLATE_OVERHEAD_PER_MESSAGE: u32 = 8;
+
+/// Assistant-turn priming overhead appended after history.
+const CHAT_TEMPLATE_ASSISTANT_PRIMER_TOKENS: u32 = 4;
+
+/// Extra ChatML markers used by the on-device Llama JNI path.
+const CHATML_EXTRA_OVERHEAD_TOKENS: u32 = 6;
 
 static ENCODER: Lazy<CoreBPE> =
     Lazy::new(|| tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load"));
 
-fn count_tokens(text: &str) -> u32 {
+pub(crate) fn count_tokens(text: &str) -> u32 {
     ENCODER.encode_with_special_tokens(text).len() as u32
 }
 
@@ -36,36 +48,128 @@ fn count_session_tokens(session: &AgentSession) -> u32 {
         .sum()
 }
 
+fn active_message_count(session: &AgentSession) -> usize {
+    session
+        .messages
+        .iter()
+        .filter(|m| {
+            !m.metadata
+                .get("superseded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// Inputs required to estimate the **full** provider-visible prompt budget.
+#[derive(Debug, Clone, Default)]
+pub struct PromptBudgetParts<'a> {
+    pub provider: &'a str,
+    pub context_window_tokens: u32,
+    pub tools_schema_json: &'a str,
+    pub system_prompt: &'a str,
+    pub context_sidecars: &'a str,
+}
+
+impl<'a> PromptBudgetParts<'a> {
+    pub fn from_legacy(
+        provider: &'a str,
+        context_window_tokens: u32,
+        tools_schema_json: &'a str,
+    ) -> Self {
+        Self {
+            provider,
+            context_window_tokens,
+            tools_schema_json,
+            ..Default::default()
+        }
+    }
+}
+
+/// Conservative upper bound for Kotlin context sidecars when no live payload exists yet.
+///
+/// Uses the per-call sidecar byte budget (not multiplied) so short sessions are not
+/// penalized with a triple sidecar reserve before any long-loop state exists.
+pub fn estimate_context_sidecar_tokens(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> u32 {
+    let payload_tokens = (config.long_loop.sidecar_byte_budget_per_call / AVG_BYTES_PER_TOKEN)
+        .max(1) as u32;
+    let raw = CONTEXT_SIDECAR_WRAPPER_TOKENS.saturating_add(payload_tokens);
+    if context_window_tokens == 0 {
+        return raw;
+    }
+    let window_cap = context_window_tokens
+        .saturating_div(4)
+        .max(CONTEXT_SIDECAR_WRAPPER_TOKENS);
+    raw.min(window_cap)
+}
+
+pub fn estimate_chat_template_overhead_tokens(provider: &str, message_count: usize) -> u32 {
+    let per_message = CHAT_TEMPLATE_OVERHEAD_PER_MESSAGE
+        .saturating_mul(message_count.min(u32::MAX as usize) as u32);
+    let provider_extra = if provider.eq_ignore_ascii_case("LLAMA") {
+        CHATML_EXTRA_OVERHEAD_TOKENS
+    } else {
+        0
+    };
+    per_message
+        .saturating_add(CHAT_TEMPLATE_ASSISTANT_PRIMER_TOKENS)
+        .saturating_add(provider_extra)
+}
+
+/// Hard prompt ceiling: everything in the context window except the output reserve.
+pub fn effective_hard_prompt_ceiling_tokens(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+) -> u32 {
+    context_window_tokens.saturating_sub(effective_output_reserve_tokens(
+        config,
+        context_window_tokens,
+    ))
+}
+
+pub fn exceeds_hard_prompt_ceiling(pressure: &Pressure) -> bool {
+    pressure.total_tokens >= pressure.usable_prompt_tokens
+}
+
 pub struct TokenLedger;
 
 impl TokenLedger {
-    /// Compute context pressure for the current session.
-    ///
-    /// - `provider`: key into `config.token_correction` (e.g. `"anthropic"`).
-    /// - `context_window_tokens`: model's total context limit.
-    /// - `tools_schema_json`: raw JSON blob from `ModelRequest`; token cost estimated here.
+    /// Compute context pressure for the current session using the full projected prompt.
     pub fn estimate(
         session: &AgentSession,
         config: &AgentConfig,
-        provider: &str,
-        context_window_tokens: u32,
-        tools_schema_json: &str,
+        parts: &PromptBudgetParts<'_>,
     ) -> Pressure {
-        let raw = count_session_tokens(session);
-        let total_tokens = apply_correction(raw, provider, config);
+        let message_tokens = count_session_tokens(session);
+        let system_tokens = count_tokens(parts.system_prompt);
+        let sidecar_tokens = if parts.context_sidecars.is_empty() {
+            estimate_context_sidecar_tokens(config, parts.context_window_tokens)
+        } else {
+            count_tokens(parts.context_sidecars)
+        };
+        let schema_tokens = count_tokens(parts.tools_schema_json);
+        let template_tokens =
+            estimate_chat_template_overhead_tokens(parts.provider, active_message_count(session));
 
-        let threshold_tokens = effective_preflight_threshold_tokens(config, context_window_tokens);
+        let raw = message_tokens
+            .saturating_add(system_tokens)
+            .saturating_add(sidecar_tokens)
+            .saturating_add(schema_tokens)
+            .saturating_add(template_tokens);
+        let total_tokens = apply_correction(raw, parts.provider, config);
 
-        let schema_tokens = count_tokens(tools_schema_json);
-        let reserve = effective_output_reserve_tokens(config, context_window_tokens);
-        let usable_prompt_tokens = context_window_tokens
-            .saturating_sub(reserve)
-            .saturating_sub(schema_tokens);
+        let threshold_tokens =
+            effective_preflight_threshold_tokens(config, parts.context_window_tokens);
+        let usable_prompt_tokens =
+            effective_hard_prompt_ceiling_tokens(config, parts.context_window_tokens);
 
-        let ratio = if context_window_tokens == 0 {
+        let ratio = if parts.context_window_tokens == 0 {
             0.0
         } else {
-            total_tokens as f32 / context_window_tokens as f32
+            total_tokens as f32 / parts.context_window_tokens as f32
         };
 
         Pressure {
@@ -83,16 +187,18 @@ impl TokenLedger {
 /// thresholds use [`crate::compact::policy::threshold_ratio_for_trigger`] with
 /// [`should_compact_at`].
 pub fn should_compact(pressure: &Pressure, config: &AgentConfig) -> bool {
-    pressure.total_tokens >= pressure.threshold_tokens || pressure.ratio >= config.threshold_ratio
+    pressure.total_tokens >= pressure.threshold_tokens
+        || pressure.ratio >= config.threshold_ratio
+        || exceeds_hard_prompt_ceiling(pressure)
 }
 
 /// Trigger-aware variant of [`should_compact`].
 pub fn should_compact_at(pressure: &Pressure, threshold_ratio: f32) -> bool {
-    pressure.ratio >= threshold_ratio
+    pressure.ratio >= threshold_ratio || exceeds_hard_prompt_ceiling(pressure)
 }
 
 pub fn should_compact_at_token_threshold(pressure: &Pressure, threshold_tokens: u32) -> bool {
-    pressure.total_tokens >= threshold_tokens
+    pressure.total_tokens >= threshold_tokens || exceeds_hard_prompt_ceiling(pressure)
 }
 
 pub fn effective_output_reserve_tokens(config: &AgentConfig, context_window_tokens: u32) -> u32 {
@@ -132,16 +238,14 @@ pub fn effective_threshold_tokens(
     if threshold_ratio > 1.0 && token_threshold.is_none() {
         return u32::MAX;
     }
-    let reserve = effective_output_reserve_tokens(config, context_window_tokens);
-    let usable = context_window_tokens.saturating_sub(reserve);
+    let hard_ceiling = effective_hard_prompt_ceiling_tokens(config, context_window_tokens);
     let ratio_based = (context_window_tokens as f32 * threshold_ratio).round() as u32;
     let abs_cap = token_threshold.unwrap_or(u32::MAX);
-    ratio_based.min(abs_cap).min(usable)
+    ratio_based.min(abs_cap).min(hard_ceiling)
 }
 
 pub fn effective_retention_window_tokens(config: &AgentConfig, context_window_tokens: u32) -> u32 {
-    let reserve = effective_output_reserve_tokens(config, context_window_tokens);
-    let usable = context_window_tokens.saturating_sub(reserve);
+    let usable = effective_hard_prompt_ceiling_tokens(config, context_window_tokens);
     config.retention_window_tokens.min(usable / 2)
 }
 
@@ -248,6 +352,7 @@ pub fn effective_tool_result_budget_for_window(
 mod tests {
     use super::*;
     use crate::message::{AgentMessage, AgentRole};
+    use crate::policy::ContextPolicyTier;
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 
     fn make_session(texts: &[&str]) -> AgentSession {
@@ -269,8 +374,24 @@ mod tests {
         Pressure {
             total_tokens: total,
             threshold_tokens: 8_000,
-            usable_prompt_tokens: 7_000,
+            usable_prompt_tokens: 12_000,
             ratio,
+        }
+    }
+
+    fn parts<'a>(
+        provider: &'a str,
+        context_window_tokens: u32,
+        tools_schema_json: &'a str,
+        system_prompt: &'a str,
+        context_sidecars: &'a str,
+    ) -> PromptBudgetParts<'a> {
+        PromptBudgetParts {
+            provider,
+            context_window_tokens,
+            tools_schema_json,
+            system_prompt,
+            context_sidecars,
         }
     }
 
@@ -300,6 +421,18 @@ mod tests {
         assert!(!should_compact(&make_pressure(0.0), &config));
     }
 
+    #[test]
+    fn should_compact_when_hard_ceiling_exceeded_even_if_ratio_low() {
+        let pressure = Pressure {
+            total_tokens: 7_500,
+            threshold_tokens: 8_000,
+            usable_prompt_tokens: 7_000,
+            ratio: 0.50,
+        };
+        let _config = AgentConfig::default();
+        assert!(should_compact_at_token_threshold(&pressure, 8_000));
+    }
+
     // ── apply_correction ─────────────────────────────────────────────────────
 
     #[test]
@@ -326,32 +459,84 @@ mod tests {
     // ── TokenLedger::estimate ─────────────────────────────────────────────────
 
     #[test]
-    fn estimate_empty_session_has_zero_total() {
+    fn estimate_empty_session_reserves_sidecar_budget() {
         let session = make_session(&[]);
         let config = AgentConfig::default();
-        let p = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
-        assert_eq!(p.total_tokens, 0);
+        let p = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 200_000, "[]", "", ""),
+        );
+        let expected_sidecar = estimate_context_sidecar_tokens(&config, 200_000);
+        let expected_template = estimate_chat_template_overhead_tokens("anthropic", 0);
+        assert!(
+            p.total_tokens >= expected_sidecar.saturating_add(expected_template),
+            "empty session should reserve sidecar + template overhead"
+        );
+    }
+
+    #[test]
+    fn estimate_counts_system_prompt_tools_and_template() {
+        let session = make_session(&["hello world"]);
+        let config = AgentConfig::for_policy_tier(ContextPolicyTier::HostedMutable);
+        let messages_only = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 200_000, "[]", "", ""),
+        );
+        let full = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts(
+                "anthropic",
+                200_000,
+                r#"[{"name":"web_search"}]"#,
+                "System instructions here",
+                "",
+            ),
+        );
+        assert!(full.total_tokens > messages_only.total_tokens);
+    }
+
+    #[test]
+    fn estimate_llama_provider_adds_chatml_overhead() {
+        let session = make_session(&["hello"]);
+        let config = AgentConfig::default();
+        let hosted = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 4096, "[]", "", ""),
+        );
+        let llama = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("LLAMA", 4096, "[]", "", ""),
+        );
+        assert!(llama.total_tokens > hosted.total_tokens);
     }
 
     #[test]
     fn estimate_threshold_tokens_uses_adaptive_threshold() {
         let session = make_session(&[]);
         let config = AgentConfig::default(); // threshold_ratio = 0.80
-        let p = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
+        let p = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 200_000, "[]", "", ""),
+        );
         assert_eq!(p.threshold_tokens, 160_000);
     }
 
     #[test]
-    fn estimate_usable_prompt_excludes_reserves() {
+    fn estimate_usable_prompt_matches_hard_ceiling_without_double_subtracting_tools() {
         let session = make_session(&[]);
         let config = AgentConfig::default();
-        // tools_schema_json = "[]" → 1 token
-        let p = TokenLedger::estimate(&session, &config, "anthropic", 10_000, "[]");
-        // 10_000 - adaptive output reserve - schema_tokens
-        let schema_tokens = count_tokens("[]");
-        let expected = 10_000u32
-            .saturating_sub(effective_output_reserve_tokens(&config, 10_000))
-            .saturating_sub(schema_tokens);
+        let p = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 10_000, "[]", "", ""),
+        );
+        let expected = effective_hard_prompt_ceiling_tokens(&config, 10_000);
         assert_eq!(p.usable_prompt_tokens, expected);
     }
 
@@ -360,7 +545,11 @@ mod tests {
         // "hello world" is 2 tokens in cl100k
         let session = make_session(&["hello world"]);
         let config = AgentConfig::default();
-        let p = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
+        let p = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 200_000, "[]", "", ""),
+        );
         assert!(p.total_tokens > 0);
         assert!(p.ratio > 0.0);
     }
@@ -373,11 +562,13 @@ mod tests {
         let base = TokenLedger::estimate(
             &session,
             &AgentConfig::default(),
-            "anthropic",
-            200_000,
-            "[]",
+            &parts("anthropic", 200_000, "[]", "", ""),
         );
-        let doubled = TokenLedger::estimate(&session, &config, "anthropic", 200_000, "[]");
+        let doubled = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 200_000, "[]", "", ""),
+        );
         assert_eq!(doubled.total_tokens, base.total_tokens * 2);
     }
 
@@ -385,8 +576,25 @@ mod tests {
     fn estimate_zero_context_window_ratio_is_zero() {
         let session = make_session(&[]);
         let config = AgentConfig::default();
-        let p = TokenLedger::estimate(&session, &config, "anthropic", 0, "[]");
+        let p = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("anthropic", 0, "[]", "", ""),
+        );
         assert_eq!(p.ratio, 0.0);
+    }
+
+    #[test]
+    fn at_4k_fixed_kv_large_system_prompt_triggers_hard_ceiling() {
+        let config = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
+        let system = "word ".repeat(2_500);
+        let session = make_session(&["short user question"]);
+        let pressure = TokenLedger::estimate(
+            &session,
+            &config,
+            &parts("LLAMA", 4096, "[]", &system, ""),
+        );
+        assert!(exceeds_hard_prompt_ceiling(&pressure));
     }
 
     // ── effective_tool_result_budget ───────────────────────────────────────

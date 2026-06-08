@@ -1,6 +1,5 @@
 ---
 source: tests/fixtures.rs
-assertion_line: 219
 expression: events
 ---
 [
@@ -10,35 +9,20 @@ expression: events
   },
   {
     "type": "context_pressure",
-    "ratio": 3.1367188
+    "ratio": 3.5039063
   },
   {
     "type": "compaction_applied",
     "tier": "history_snapshot",
-    "tokens_before": 803,
-    "tokens_after": 803,
+    "tokens_before": 897,
+    "tokens_after": 897,
     "trigger": "preflight"
   },
   {
     "type": "compaction_applied",
-    "tier": "fifo",
-    "tokens_before": 803,
-    "tokens_after": 402,
-    "trigger": "preflight"
-  },
-  {
-    "type": "pre_compact",
-    "trigger": "preflight"
-  },
-  {
-    "type": "context_pressure",
-    "ratio": 1.5703125
-  },
-  {
-    "type": "compaction_applied",
-    "tier": "history_snapshot",
-    "tokens_before": 402,
-    "tokens_after": 402,
+    "tier": "text_truncate",
+    "tokens_before": 488,
+    "tokens_after": 187,
     "trigger": "preflight"
   },
   {
@@ -48,7 +32,7 @@ expression: events
     "revision_after": 1,
     "trigger": "preflight",
     "tiers_applied": [
-      "fifo"
+      "text_truncate"
     ],
     "message_count_before": 3,
     "message_count_after": 2,
@@ -57,7 +41,7 @@ expression: events
   {
     "type": "post_compact",
     "trigger": "preflight",
-    "history_ref": "history-a0-u1",
+    "history_ref": "history-u0-u1",
     "transcript_revision_after": 1
   },
   {
