@@ -80,6 +80,9 @@ pub enum AgentError {
 
     #[error("Policy rejected: {reason}")]
     PolicyRejected { reason: String },
+
+    #[error("Model API unavailable: {message}")]
+    ModelApiUnavailable { message: String, attempts: u32 },
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -143,6 +146,13 @@ pub enum AgentEvent {
     VisibleAssistantText {
         text: String,
     },
+    /// Host should backoff and re-issue the pending model request.
+    ModelApiRetryScheduled {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for AgentEvent {
@@ -198,6 +208,15 @@ impl std::fmt::Display for AgentEvent {
             AgentEvent::VisibleAssistantText { text } => {
                 write!(f, "VisibleAssistantText({} chars)", text.len())
             }
+            AgentEvent::ModelApiRetryScheduled {
+                attempt,
+                max_attempts,
+                delay_ms,
+                ..
+            } => write!(
+                f,
+                "ModelApiRetryScheduled(attempt={attempt}/{max_attempts} delay_ms={delay_ms})"
+            ),
         }
     }
 }

@@ -211,6 +211,8 @@ pub struct FfiModelRequest {
     pub state_ledger_delta_json: Option<String>,
     pub tool_context_index_delta_json: Option<String>,
     pub file_context_index_delta_json: Option<String>,
+    pub retry_after_ms: Option<u64>,
+    pub model_retry_attempt: Option<u32>,
 }
 
 impl From<FfiModelRequest> for ModelRequest {
@@ -236,6 +238,8 @@ impl From<FfiModelRequest> for ModelRequest {
             state_ledger_delta_json: m.state_ledger_delta_json,
             tool_context_index_delta_json: m.tool_context_index_delta_json,
             file_context_index_delta_json: m.file_context_index_delta_json,
+            retry_after_ms: m.retry_after_ms,
+            model_retry_attempt: m.model_retry_attempt,
         }
     }
 }
@@ -262,6 +266,57 @@ impl From<ModelRequest> for FfiModelRequest {
             state_ledger_delta_json: m.state_ledger_delta_json,
             tool_context_index_delta_json: m.tool_context_index_delta_json,
             file_context_index_delta_json: m.file_context_index_delta_json,
+            retry_after_ms: m.retry_after_ms,
+            model_retry_attempt: m.model_retry_attempt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiModelApiErrorClass {
+    Transient,
+    Permanent,
+}
+
+impl From<crate::model_api_retry::ModelApiErrorClass> for FfiModelApiErrorClass {
+    fn from(value: crate::model_api_retry::ModelApiErrorClass) -> Self {
+        match value {
+            crate::model_api_retry::ModelApiErrorClass::Transient => Self::Transient,
+            crate::model_api_retry::ModelApiErrorClass::Permanent => Self::Permanent,
+        }
+    }
+}
+
+impl From<FfiModelApiErrorClass> for crate::model_api_retry::ModelApiErrorClass {
+    fn from(value: FfiModelApiErrorClass) -> Self {
+        match value {
+            FfiModelApiErrorClass::Transient => Self::Transient,
+            FfiModelApiErrorClass::Permanent => Self::Permanent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiModelTurnFailureReport {
+    pub error_class: FfiModelApiErrorClass,
+    pub http_status: Option<u16>,
+    pub provider_code: Option<String>,
+    pub message: String,
+    pub had_partial_output: bool,
+    pub partial_output_chars: u32,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl From<FfiModelTurnFailureReport> for crate::model_api_retry::ModelTurnFailureReport {
+    fn from(value: FfiModelTurnFailureReport) -> Self {
+        Self {
+            error_class: value.error_class.into(),
+            http_status: value.http_status,
+            provider_code: value.provider_code,
+            message: value.message,
+            had_partial_output: value.had_partial_output,
+            partial_output_chars: value.partial_output_chars,
+            retry_after_ms: value.retry_after_ms,
         }
     }
 }
@@ -753,6 +808,8 @@ pub struct FfiAgentConfig {
     pub threshold_ratio: f32,
     pub micro_keep_recent: u32,
     pub tool_retry_limit: u32,
+    pub model_api_retry_limit: u32,
+    pub model_api_retry_base_delay_ms: u64,
     /// JSON-serialized [`crate::tool_semantics::ToolSemanticsConfig`]; catalog tools may be empty and merged from session IO.
     pub tool_semantics_json: String,
     pub tool_result_budget_cloud_bytes: u64,
@@ -797,6 +854,8 @@ impl Default for FfiAgentConfig {
             threshold_ratio: c.threshold_ratio,
             micro_keep_recent: c.micro_keep_recent,
             tool_retry_limit: c.tool_retry_limit,
+            model_api_retry_limit: c.model_api_retry_limit,
+            model_api_retry_base_delay_ms: c.model_api_retry_base_delay_ms,
             tool_semantics_json: serde_json::to_string(&c.tool_semantics).unwrap_or_else(|_| "{}".into()),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
@@ -841,6 +900,8 @@ impl From<FfiAgentConfig> for AgentConfig {
             threshold_ratio: f.threshold_ratio,
             micro_keep_recent: f.micro_keep_recent,
             tool_retry_limit: f.tool_retry_limit,
+            model_api_retry_limit: f.model_api_retry_limit,
+            model_api_retry_base_delay_ms: f.model_api_retry_base_delay_ms,
             tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
             tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
             tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
@@ -1138,6 +1199,12 @@ pub enum FfiAgentEvent {
     VisibleAssistantText {
         text: String,
     },
+    ModelApiRetryScheduled {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
 }
 
 impl From<AgentEvent> for FfiAgentEvent {
@@ -1213,6 +1280,17 @@ impl From<AgentEvent> for FfiAgentEvent {
             AgentEvent::VisibleAssistantText { text } => {
                 FfiAgentEvent::VisibleAssistantText { text }
             }
+            AgentEvent::ModelApiRetryScheduled {
+                attempt,
+                max_attempts,
+                delay_ms,
+                reason,
+            } => FfiAgentEvent::ModelApiRetryScheduled {
+                attempt,
+                max_attempts,
+                delay_ms,
+                reason,
+            },
         }
     }
 }
@@ -1233,6 +1311,8 @@ pub enum AgentException {
     Internal { detail: String },
     #[error("context reference not found")]
     ContextReferenceNotFound { reference_id: String },
+    #[error("model api unavailable")]
+    ModelApiUnavailable { detail: String, attempts: u32 },
 }
 
 impl From<AgentError> for AgentException {
@@ -1262,6 +1342,12 @@ impl From<AgentError> for AgentException {
             AgentError::PolicyRejected { reason } => AgentException::Internal {
                 detail: format!("Policy rejected: {reason}"),
             },
+            AgentError::ModelApiUnavailable { message, attempts } => {
+                AgentException::ModelApiUnavailable {
+                    detail: message,
+                    attempts,
+                }
+            }
         }
     }
 }

@@ -22,6 +22,12 @@ pub struct AgentConfig {
     /// Consecutive all-soft-failure turns before `allow_tool_call` is set false.
     #[serde(default = "default_tool_retry_limit")]
     pub tool_retry_limit: u32,
+    /// Maximum transient model API retries per in-flight model turn (not counting first attempt).
+    #[serde(default = "default_model_api_retry_limit")]
+    pub model_api_retry_limit: u32,
+    /// Base backoff for model API retries when the host does not supply `retry_after_ms`.
+    #[serde(default = "default_model_api_retry_base_delay_ms")]
+    pub model_api_retry_base_delay_ms: u64,
     /// Per-result byte budget for cloud providers when context pressure is high.
     #[serde(default = "default_tool_result_budget_cloud_bytes")]
     pub tool_result_budget_cloud_bytes: usize,
@@ -133,6 +139,12 @@ fn default_micro_keep_recent() -> u32 {
 fn default_tool_retry_limit() -> u32 {
     3
 }
+fn default_model_api_retry_limit() -> u32 {
+    3
+}
+fn default_model_api_retry_base_delay_ms() -> u64 {
+    1_000
+}
 fn default_true() -> bool {
     true
 }
@@ -198,6 +210,8 @@ impl Default for AgentConfig {
             threshold_ratio: default_threshold_ratio(),
             micro_keep_recent: default_micro_keep_recent(),
             tool_retry_limit: default_tool_retry_limit(),
+            model_api_retry_limit: default_model_api_retry_limit(),
+            model_api_retry_base_delay_ms: default_model_api_retry_base_delay_ms(),
             tool_result_budget_cloud_bytes: default_tool_result_budget_cloud_bytes(),
             tool_result_budget_relaxed_bytes: default_tool_result_budget_relaxed_bytes(),
             tool_result_truncation_pressure_ratio: default_tool_result_truncation_pressure_ratio(),

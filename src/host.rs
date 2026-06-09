@@ -92,6 +92,8 @@ mod tests {
             state_ledger_delta_json: None,
             tool_context_index_delta_json: None,
             file_context_index_delta_json: None,
+            retry_after_ms: None,
+            model_retry_attempt: None,
         };
         let resp = transport.complete_model_turn(req).unwrap();
         assert_eq!(resp.assistant_text.as_deref(), Some("hello"));

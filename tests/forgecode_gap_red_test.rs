@@ -69,6 +69,8 @@ fn model_request(system_prompt: &str) -> ModelRequest {
         state_ledger_delta_json: None,
         tool_context_index_delta_json: None,
         file_context_index_delta_json: None,
+        retry_after_ms: None,
+        model_retry_attempt: None,
     }
 }
 

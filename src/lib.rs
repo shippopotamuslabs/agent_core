@@ -54,6 +54,7 @@ pub mod loop_hooks;
 pub mod loop_metrics;
 pub mod manual_compact;
 pub mod message;
+pub mod model_api_retry;
 pub mod policy;
 pub mod repair;
 pub mod request_pipeline;

@@ -42,6 +42,8 @@ pub struct GuardrailState {
     pub consecutive_soft_failure_turns: u32,
     /// Consecutive envelope parse failures (TOOL-PARSE-002).
     pub consecutive_envelope_parse_failures: u32,
+    /// Consecutive transient model API transport failures for the in-flight model turn.
+    pub consecutive_model_api_failures: u32,
 }
 
 impl GuardrailState {
@@ -79,6 +81,15 @@ impl GuardrailState {
     pub fn record_envelope_parse_failure(&mut self) {
         self.consecutive_envelope_parse_failures =
             self.consecutive_envelope_parse_failures.saturating_add(1);
+    }
+
+    pub fn reset_model_api_failures(&mut self) {
+        self.consecutive_model_api_failures = 0;
+    }
+
+    pub fn record_model_api_failure(&mut self) {
+        self.consecutive_model_api_failures =
+            self.consecutive_model_api_failures.saturating_add(1);
     }
 
     pub fn count_tool_executed(&mut self, n: u32) {

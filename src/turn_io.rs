@@ -30,6 +30,12 @@ pub struct ModelRequest {
     pub tool_context_index_delta_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_context_index_delta_json: Option<String>,
+    /// Host backoff before re-issuing this request after a transient API failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// 1-based retry attempt for the in-flight model turn (unset on first issue).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_retry_attempt: Option<u32>,
 }
 
 impl Default for ModelRequest {
@@ -49,6 +55,8 @@ impl Default for ModelRequest {
             state_ledger_delta_json: None,
             tool_context_index_delta_json: None,
             file_context_index_delta_json: None,
+            retry_after_ms: None,
+            model_retry_attempt: None,
         }
     }
 }
@@ -216,6 +224,8 @@ mod tests {
             state_ledger_delta_json: None,
             tool_context_index_delta_json: None,
             file_context_index_delta_json: None,
+            retry_after_ms: None,
+            model_retry_attempt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ModelRequest = serde_json::from_str(&json).unwrap();
