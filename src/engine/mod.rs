@@ -430,7 +430,11 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     g.emit(AgentEvent::VisibleAssistantText {
                         text: user_fallback_text.clone(),
                     });
-                    g.finish_after_model_stop(response.finish_reason);
+                    // The fallback text is the final user-facing answer for this turn.
+                    // The provider finish reason may be ToolUse/Other for the blocked
+                    // attempt; finishing with it would fail the loop after a graceful
+                    // fallback, so force Stop semantics.
+                    g.finish_after_model_stop(FinishReason::Stop);
                     return;
                 }
 
@@ -844,11 +848,48 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             merge_active_tool_names(&mut g.active_tool_names, res.activated_tool_names.iter().cloned());
         }
 
-        let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> = calls
-            .iter()
-            .zip(results.into_iter())
-            .map(|(call, res)| (call.call_id.clone(), (call.clone(), res)))
-            .collect();
+        // Pair results to calls by call_id; fall back to submission order for
+        // results the host returned with unknown ids. Calls left without any
+        // result get a synthesized error so provider replay still sees one tool
+        // message per tool_call_id (OpenAI-compatible APIs 400 otherwise).
+        let mut remaining: Vec<Option<ToolResultRecord>> = results.into_iter().map(Some).collect();
+        let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> =
+            HashMap::with_capacity(calls.len());
+        for call in &calls {
+            if let Some(slot) = remaining.iter_mut().find(|slot| {
+                slot.as_ref()
+                    .is_some_and(|res| res.call_id == call.call_id)
+            }) {
+                let res = slot.take().expect("matched result");
+                executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
+            }
+        }
+        let mut unmatched = remaining.into_iter().flatten();
+        for call in &calls {
+            if executed_by_call_id.contains_key(&call.call_id) {
+                continue;
+            }
+            let res = unmatched.next().map(|mut res| {
+                res.call_id = call.call_id.clone();
+                res
+            });
+            let res = res.unwrap_or_else(|| ToolResultRecord {
+                call_id: call.call_id.clone(),
+                result_json: json!({
+                    "error": "tool_result_missing",
+                    "message": format!(
+                        "Host returned no result for tool '{}' (call_id {}).",
+                        call.name, call.call_id
+                    ),
+                })
+                .to_string(),
+                truncated: false,
+                soft_failure: true,
+                activated_tool_names: Vec::new(),
+                result_metadata: None,
+            });
+            executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
+        }
 
         let mut processed_results: Vec<ToolResultRecord> =
             Vec::with_capacity(executed_by_call_id.len());
@@ -1209,7 +1250,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         request: crate::manual_compact::ManualCompactRequest,
     ) -> AgentAction {
         let mut g = handle.lock_inner();
-        if !g.config.enable_manual_compact {
+        // A pending model/tool/summary round-trip owns the phase; rewriting it
+        // to AwaitingSummary here would turn the in-flight submit_* call into
+        // an InvalidTransition. Defer to a no-op until the engine is Idle.
+        if !g.config.enable_manual_compact || !matches!(g.phase, EnginePhase::Idle) {
             let pressure = g.estimate_pressure(CompactionTrigger::Manual);
             return AgentAction::ManualCompactCompleted(ManualCompactResult {
                 summary_ref: None,
@@ -2305,6 +2349,189 @@ mod tests {
                 .collect(),
         );
         assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
+    }
+
+    #[test]
+    fn tool_results_matched_by_call_id_not_position() {
+        let eng = AgentEngine::new(
+            Arc::new(PanicTransport),
+            Arc::new(RecordingExecutor {
+                results: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoOpSummarizer),
+        );
+        let h = eng.create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: serde_json::Value::Null,
+            }],
+            AgentConfig {
+                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![
+                    RawToolCall {
+                        id: Some("c1".into()),
+                        name: "web_search".into(),
+                        arguments_json: r#"{"query":"a"}"#.into(),
+                    },
+                    RawToolCall {
+                        id: Some("c2".into()),
+                        name: "web_extract".into(),
+                        arguments_json: r#"{"urls":["https://b"]}"#.into(),
+                    },
+                ],
+                finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
+            },
+        );
+        let _ = eng.next_action(&h);
+        // Host returns results out of order: c2 first, then c1.
+        eng.submit_tool_results(
+            &h,
+            vec![
+                ToolResultRecord {
+                    call_id: "c2".into(),
+                    result_json: r#"{"results":["B"]}"#.into(),
+                    truncated: false,
+                    soft_failure: false,
+                    activated_tool_names: Vec::new(),
+                    result_metadata: None,
+                },
+                ToolResultRecord {
+                    call_id: "c1".into(),
+                    result_json: r#"{"results":["A"]}"#.into(),
+                    truncated: false,
+                    soft_failure: false,
+                    activated_tool_names: Vec::new(),
+                    result_metadata: None,
+                },
+            ],
+        );
+        let inner = h.lock_inner();
+        let c1_msg = inner
+            .session
+            .messages
+            .iter()
+            .find(|m| m.id == "tool-c1")
+            .expect("tool-c1 message");
+        assert!(
+            c1_msg.content.contains("\"A\""),
+            "c1 result misattributed: {}",
+            c1_msg.content
+        );
+        assert_eq!(
+            c1_msg.metadata.get("tool_name").and_then(|v| v.as_str()),
+            Some("web_search"),
+            "c1 tool_name metadata paired with wrong call"
+        );
+        let c2_msg = inner
+            .session
+            .messages
+            .iter()
+            .find(|m| m.id == "tool-c2")
+            .expect("tool-c2 message");
+        assert!(
+            c2_msg.content.contains("\"B\""),
+            "c2 result misattributed: {}",
+            c2_msg.content
+        );
+        assert_eq!(
+            c2_msg.metadata.get("tool_name").and_then(|v| v.as_str()),
+            Some("web_extract"),
+            "c2 tool_name metadata paired with wrong call"
+        );
+    }
+
+    #[test]
+    fn missing_tool_result_synthesizes_error_for_provider_replay() {
+        let eng = AgentEngine::new(
+            Arc::new(PanicTransport),
+            Arc::new(RecordingExecutor {
+                results: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoOpSummarizer),
+        );
+        let h = eng.create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: serde_json::Value::Null,
+            }],
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large_window(),
+        );
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(
+            &h,
+            ModelResponse {
+                assistant_text: None,
+                tool_calls: vec![
+                    RawToolCall {
+                        id: Some("c1".into()),
+                        name: "web_search".into(),
+                        arguments_json: r#"{"query":"a"}"#.into(),
+                    },
+                    RawToolCall {
+                        id: Some("c2".into()),
+                        name: "web_search".into(),
+                        arguments_json: r#"{"query":"b"}"#.into(),
+                    },
+                ],
+                finish_reason: FinishReason::ToolUse,
+                provider_reasoning_content: None,
+            },
+        );
+        let _ = eng.next_action(&h);
+        // Host drops c2's result (e.g. executor bug). Engine must still push a
+        // tool message for c2 so provider replay has one per tool_call_id.
+        eng.submit_tool_results(
+            &h,
+            vec![ToolResultRecord {
+                call_id: "c1".into(),
+                result_json: r#"{"results":["A"]}"#.into(),
+                truncated: false,
+                soft_failure: false,
+                activated_tool_names: Vec::new(),
+                result_metadata: None,
+            }],
+        );
+        let inner = h.lock_inner();
+        let c2_msg = inner
+            .session
+            .messages
+            .iter()
+            .find(|m| m.id == "tool-c2")
+            .expect("tool-c2 synthesized message");
+        assert!(
+            c2_msg.content.contains("tool_result_missing"),
+            "expected synthesized error, got: {}",
+            c2_msg.content
+        );
     }
 
     #[test]

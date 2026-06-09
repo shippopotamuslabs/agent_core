@@ -11,6 +11,7 @@ pub use markers::{
     normalize_spaced_dsml, resolve_tentative_hold, safe_emit_end, HoldResolution, TentativeKind,
     TOOL_MARKER_HOLDBACK_CHARS,
 };
+pub(crate) use markers::original_offset_for_normalized_offset;
 pub use result::{PushResult, StreamGateFinish};
 
 #[derive(Debug, Default)]

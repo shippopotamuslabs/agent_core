@@ -153,6 +153,31 @@ fn cl_tr_07_call_colon_in_prose_does_not_truncate_visible_text() {
     );
 }
 
+/// CL-TR-08: when an earlier spaced-DSML segment shifts byte offsets between
+/// `normalize_spaced_dsml(text)` and the raw text, the no-successes fallback
+/// must map the marker offset back to the raw text instead of slicing raw text
+/// with a normalized-space offset (previously a wrong slice or UTF-8 panic).
+#[test]
+fn cl_tr_08_spaced_dsml_prefix_offset_does_not_panic_on_multibyte_boundary() {
+    // "</ |DSML| " collapses to "</|DSML|" (2 bytes shorter), so the strong
+    // marker offset in normalized text lands inside the 4-byte rocket emoji
+    // when applied to the raw text.
+    let buffered = "A</ |DSML| x>\u{1F680}<|DSML|tool_calls junk";
+    let resolution = resolve_enclave(buffered, &[], true);
+    assert!(
+        resolution.had_strong_tool_marker,
+        "CL-TR-08 must detect the strong marker"
+    );
+    assert!(
+        resolution.recovered_tool_calls.is_empty(),
+        "CL-TR-08 malformed envelope must not recover calls"
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, "A</ |DSML| x>\u{1F680}",
+        "CL-TR-08 visible text must cut exactly at the marker in raw text"
+    );
+}
+
 #[test]
 fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
     use agent_core::tool_stream_gate::first_strong_tool_marker_start;
