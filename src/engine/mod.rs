@@ -497,19 +497,19 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         g.pending_reject_tool_by_call_id.clear();
 
         for raw in &merged_tool_calls {
-            // Lazy-disclosure guard: reject any call whose tool name is not part of the
-            // currently active set (the disclosure tool itself is always callable).
+            // Tool-discovery guard: reject any call whose tool name is not part of the
+            // currently active set (the discovery tool itself is always callable).
             // Only enforce when active_tool_names has actually been initialized — empty
             // active set means the host has not opted into the new contract yet.
-            let disclosure = g.config.tool_semantics.disclosure.clone();
-            let disclosure_name = disclosure.as_ref().map(|d| d.tool_name.as_str());
-            let disclosure_always_callable = disclosure
+            let discovery = g.config.tool_semantics.discovery.clone();
+            let discovery_name = discovery.as_ref().map(|d| d.tool_name.as_str());
+            let discovery_always_callable = discovery
                 .as_ref()
                 .map(|d| d.always_callable && raw.name == d.tool_name)
                 .unwrap_or(false);
             let callable_now = !g.active_tool_names.is_empty()
                 && (g.active_tool_names.iter().any(|n| n == &raw.name)
-                    || disclosure_always_callable);
+                    || discovery_always_callable);
             if !g.active_tool_names.is_empty() && !callable_now {
                 let ti = g.turn_index;
                 g.emit(AgentEvent::ToolSoftFailure {
@@ -517,12 +517,12 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                     turn_index: ti,
                 });
                 let mut available = g.active_tool_names.clone();
-                if let Some(name) = disclosure_name {
+                if let Some(name) = discovery_name {
                     if !available.iter().any(|n| n == name) {
                         available.insert(0, name.to_string());
                     }
                 }
-                let error = if let Some(name) = disclosure_name {
+                let error = if let Some(name) = discovery_name {
                     format!("Tool '{}' is not active. Call {name} first.", raw.name)
                 } else {
                     format!("Tool '{}' is not active.", raw.name)
@@ -738,7 +738,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
 
         let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
         let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
-        // Merge any disclosed tool names into the active set in first-seen order, deduped.
+        // Merge any search_tools-activated names into the active set in first-seen order, deduped.
         for res in &results {
             for name in &res.activated_tool_names {
                 if !g.active_tool_names.iter().any(|existing| existing == name) {

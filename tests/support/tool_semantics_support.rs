@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use agent_core::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
 use agent_core::tool_semantics::{
     ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDisclosureSemantics,
+    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
     ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
 };
 use serde_json::json;
@@ -55,7 +55,7 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
                 tool("lookup_memory"),
             ],
         },
-        disclosure: Some(ToolDisclosureSemantics {
+        discovery: Some(ToolDiscoverySemantics {
             tool_name: "open_tools".to_string(),
             request_field_name: "names".to_string(),
             always_callable: true,

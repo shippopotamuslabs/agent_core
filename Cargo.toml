@@ -54,6 +54,10 @@ name = "tool_context_test"
 path = "tests/tool_context_test.rs"
 
 [[test]]
+name = "tool_search_discovery_test"
+path = "tests/tool_search_discovery_test.rs"
+
+[[test]]
 name = "file_context_test"
 path = "tests/file_context_test.rs"
 

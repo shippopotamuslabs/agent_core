@@ -1,8 +1,8 @@
 {
   "catalog": { "tools": [] },
-  "disclosure": {
-    "tool_name": "disclose_tool_schemas",
-    "request_field_name": "tool_names",
+  "discovery": {
+    "tool_name": "search_tools",
+    "request_field_name": "query",
     "always_callable": true
   },
   "artifact": {

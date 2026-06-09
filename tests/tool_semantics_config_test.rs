@@ -17,7 +17,7 @@ use agent_core::session::AgentConfig;
 use agent_core::tool_parse::parse_tool_calls_with_semantics;
 use agent_core::tool_semantics::{
     ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDisclosureSemantics,
+    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
     ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig, ToolSemanticsError,
 };
 use agent_core::turn_io::RawToolCall;
@@ -70,7 +70,7 @@ fn custom_semantics() -> ToolSemanticsConfig {
                 tool("lookup_memory"),
             ],
         },
-        disclosure: Some(ToolDisclosureSemantics {
+        discovery: Some(ToolDiscoverySemantics {
             tool_name: "open_tools".to_string(),
             request_field_name: "names".to_string(),
             always_callable: true,
@@ -165,7 +165,7 @@ fn assert_json_eq(actual: &str, expected: Value) {
 fn ts_001_agnostic_default_contains_no_enclave_tool_semantics() {
     let config = AgentConfig::default();
 
-    assert!(config.tool_semantics.disclosure.is_none());
+    assert!(config.tool_semantics.discovery.is_none());
     assert!(config.tool_semantics.artifact.is_none());
     assert_eq!(config.tool_semantics.greedy_extension_tools.len(), 0);
 }
@@ -173,11 +173,11 @@ fn ts_001_agnostic_default_contains_no_enclave_tool_semantics() {
 #[test]
 fn ts_002_enclave_compatibility_config_preserves_existing_semantic_names() {
     let semantics = enclave_test_semantics();
-    let disclosure = semantics.disclosure.expect("disclosure semantics");
+    let discovery = semantics.discovery.expect("discovery semantics");
     let artifact = semantics.artifact.expect("artifact semantics");
 
-    assert_eq!(disclosure.tool_name, "disclose_tool_schemas");
-    assert_eq!(disclosure.request_field_name, "tool_names");
+    assert_eq!(discovery.tool_name, "search_tools");
+    assert_eq!(discovery.request_field_name, "query");
     assert_eq!(artifact.start_tool_name, "start_artifact");
     assert_eq!(artifact.append_tool_name, "append_blocks");
     assert_eq!(artifact.id_field, "artifactId");
