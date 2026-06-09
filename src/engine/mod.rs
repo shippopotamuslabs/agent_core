@@ -324,6 +324,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         g.phase = EnginePhase::Idle;
+        g.guardrails.reset_model_api_failures();
         let allow_tool_call = g
             .pending_call_model
             .as_ref()
@@ -748,6 +749,70 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
         g.pending_reject_tool_by_call_id.clear();
         inject_tool_budget_after_batch(&mut g, last_tool_idx);
+    }
+
+    pub fn submit_model_turn_failure(
+        &self,
+        handle: &SessionHandle,
+        report: crate::model_api_retry::ModelTurnFailureReport,
+    ) {
+        let mut g = handle.lock_inner();
+        if g.terminal_action.is_some() || g.cancelled {
+            return;
+        }
+        if !matches!(g.phase, EnginePhase::AwaitingModel) {
+            let ph = g.phase;
+            g.set_terminal(AgentAction::Failed(AgentError::InvalidTransition {
+                from: format!("{:?}", ph),
+                to: "submit_model_turn_failure".into(),
+            }));
+            return;
+        }
+
+        if report.error_class == crate::model_api_retry::ModelApiErrorClass::Permanent {
+            let attempts = g.guardrails.consecutive_model_api_failures.saturating_add(1);
+            g.set_terminal(AgentAction::Failed(AgentError::ModelApiUnavailable {
+                message: report.message.clone(),
+                attempts,
+            }));
+            return;
+        }
+
+        g.guardrails.record_model_api_failure();
+        let attempt = g.guardrails.consecutive_model_api_failures;
+        if attempt > g.config.model_api_retry_limit {
+            g.set_terminal(AgentAction::Failed(AgentError::GuardrailExceeded {
+                kind: "model_api_retries_exhausted".into(),
+            }));
+            return;
+        }
+
+        let max_attempts = g.config.model_api_retry_limit;
+        let delay_ms = crate::model_api_retry::model_api_retry_delay_ms(
+            attempt,
+            g.config.model_api_retry_base_delay_ms,
+            report.retry_after_ms,
+        );
+        let reason = if report.had_partial_output {
+            format!(
+                "{} (partial_output_chars={})",
+                truncate_model_api_failure_reason(&report.message),
+                report.partial_output_chars,
+            )
+        } else {
+            truncate_model_api_failure_reason(&report.message)
+        };
+        g.emit(AgentEvent::ModelApiRetryScheduled {
+            attempt,
+            max_attempts,
+            delay_ms,
+            reason,
+        });
+
+        if let Some(request) = g.pending_call_model.as_mut() {
+            request.retry_after_ms = Some(delay_ms);
+            request.model_retry_attempt = Some(attempt);
+        }
     }
 
     pub fn submit_tool_results(&self, handle: &SessionHandle, results: Vec<ToolResultRecord>) {
@@ -1979,6 +2044,8 @@ impl InnerSession {
             } else {
                 file_index_delta
             },
+            retry_after_ms: None,
+            model_retry_attempt: None,
         }
     }
 
@@ -1988,6 +2055,14 @@ impl InnerSession {
             other => self.set_terminal(other),
         }
     }
+}
+
+fn truncate_model_api_failure_reason(message: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    if message.chars().count() <= MAX_CHARS {
+        return message.to_string();
+    }
+    message.chars().take(MAX_CHARS).collect()
 }
 
 #[cfg(test)]

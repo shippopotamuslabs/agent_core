@@ -94,6 +94,10 @@ name = "engine_envelope_retry_test"
 path = "tests/engine_envelope_retry_test.rs"
 
 [[test]]
+name = "engine_model_api_retry_test"
+path = "tests/engine_model_api_retry_test.rs"
+
+[[test]]
 name = "leaked_tool_recovery_test"
 path = "tests/leaked_tool_recovery_test.rs"
 

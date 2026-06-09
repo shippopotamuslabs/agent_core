@@ -95,6 +95,15 @@ impl FfiAgentEngine {
             .submit_model_response(&session.handle, response.into());
     }
 
+    pub fn submit_model_turn_failure(
+        &self,
+        session: &FfiSession,
+        report: types::FfiModelTurnFailureReport,
+    ) {
+        self.inner
+            .submit_model_turn_failure(&session.handle, report.into());
+    }
+
     pub fn submit_tool_results(&self, session: &FfiSession, results: Vec<FfiToolResultRecord>) {
         self.inner.submit_tool_results(
             &session.handle,
