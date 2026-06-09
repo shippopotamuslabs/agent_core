@@ -116,8 +116,9 @@ fn detect_hold(buffer: &str, search_from: usize) -> Option<ActiveHold> {
 }
 
 fn emit_boundary(buffer: &str, emitted_length: usize, hold: Option<ActiveHold>) -> usize {
+    let emitted_length = char_boundary_truncate(buffer, emitted_length);
     if let Some(active) = hold {
-        return active.start;
+        return char_boundary_truncate(buffer, active.start);
     }
     emit_without_active_hold(buffer, emitted_length)
 }
@@ -136,7 +137,7 @@ fn emit_without_active_hold(buffer: &str, emitted_length: usize) -> usize {
     char_boundary_truncate(buffer, buffer.len())
 }
 
-fn char_boundary_truncate(buffer: &str, end: usize) -> usize {
+pub(crate) fn char_boundary_truncate(buffer: &str, end: usize) -> usize {
     let mut end = end.min(buffer.len());
     while end > 0 && !buffer.is_char_boundary(end) {
         end -= 1;

@@ -48,10 +48,12 @@ impl ToolStreamGate {
         self.hold = reconciled.hold;
 
         let mut emitted_prefix = String::new();
-        if reconciled.emit_exclusive_end > self.emitted_length {
-            emitted_prefix
-                .push_str(&self.buffer[self.emitted_length..reconciled.emit_exclusive_end]);
-            self.emitted_length = reconciled.emit_exclusive_end;
+        let emit_start = gate_state::char_boundary_truncate(&self.buffer, self.emitted_length);
+        let emit_end =
+            gate_state::char_boundary_truncate(&self.buffer, reconciled.emit_exclusive_end);
+        if emit_end > emit_start {
+            emitted_prefix.push_str(&self.buffer[emit_start..emit_end]);
+            self.emitted_length = emit_end;
         }
         PushResult { emitted_prefix }
     }
