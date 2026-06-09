@@ -140,6 +140,20 @@ fn cl_tr_06_normalize_spaced_dsml() {
 }
 
 #[test]
+fn cl_tr_07_call_colon_in_prose_does_not_truncate_visible_text() {
+    let buffered = "Here is the answer. To call: the API, do this next.";
+    let resolution = resolve_enclave(buffered, &[], true);
+    assert_eq!(
+        resolution.visible_assistant_text, buffered,
+        "CL-TR-07 visible text"
+    );
+    assert!(
+        !resolution.had_strong_tool_marker,
+        "CL-TR-07 must not treat prose call: as a tool marker"
+    );
+}
+
+#[test]
 fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
     use agent_core::tool_stream_gate::first_strong_tool_marker_start;
     use std::fs;

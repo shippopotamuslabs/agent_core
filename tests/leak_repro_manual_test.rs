@@ -24,7 +24,7 @@ fn double_pipe_dsml_is_normalized_recovered_and_hidden_from_stream() {
             "</|DSML|invoke></|DSML|tool_calls>"
         )
     );
-    assert!(first_strong_tool_marker_start(LEAKED_DOUBLE_PIPE).is_some());
+    assert!(first_strong_tool_marker_start(&normalize_spaced_dsml(LEAKED_DOUBLE_PIPE)).is_some());
 
     let mut gate = ToolStreamGate::new(true);
     let emitted = gate.push(LEAKED_DOUBLE_PIPE).emitted_prefix;

@@ -32,7 +32,10 @@ fn faal_sg_01_native_tools_flush_preamble_before_partial_tool_marker() {
         visible, "Let me try with a simpler ",
         "FAAL-SG-01 visible text"
     );
-    assert!(finish.has_tool_marker, "FAAL-SG-01 has_tool_marker");
+    assert!(
+        finish.has_tool_marker,
+        "FAAL-SG-01 unresolved partial <tool prefix is fail-closed at EOF"
+    );
 }
 
 #[test]
@@ -98,12 +101,10 @@ fn sg_02_partial_angle_bracket_holdback() {
 #[test]
 fn sg_03_native_tools_flush_preamble() {
     let mut gate = ToolStreamGate::new(true);
-    gate.push("Let me search.");
+    let emitted = gate.push("Let me search.").emitted_prefix;
+    assert_eq!(emitted, "Let me search.", "SG-03 emitted during stream");
     let finish = gate.finish(true);
-    assert_eq!(
-        finish.trailing_flush, "Let me search.",
-        "SG-03 trailing_flush"
-    );
+    assert_eq!(finish.trailing_flush, "", "SG-03 trailing_flush");
     assert!(!finish.has_tool_marker, "SG-03 has_tool_marker");
 }
 
@@ -146,18 +147,20 @@ fn sg_05_allow_tool_call_false_still_holds_back_tool_markers() {
 #[test]
 fn sg_05b_allow_tool_call_false_flushes_plain_prose() {
     let mut gate = ToolStreamGate::new(false);
-    gate.push("All done.");
+    let emitted = gate.push("All done.").emitted_prefix;
+    assert_eq!(emitted, "All done.", "SG-05b emitted during stream");
     let finish = gate.finish(false);
-    assert_eq!(finish.trailing_flush, "All done.", "SG-05b trailing_flush");
+    assert_eq!(finish.trailing_flush, "", "SG-05b trailing_flush");
     assert!(!finish.has_tool_marker, "SG-05b has_tool_marker");
 }
 
 #[test]
 fn sg_06_plain_text_finish_flush() {
     let mut gate = ToolStreamGate::new(true);
-    gate.push("All done.");
+    let emitted = gate.push("All done.").emitted_prefix;
+    assert_eq!(emitted, "All done.", "SG-06 emitted during stream");
     let finish = gate.finish(false);
-    assert_eq!(finish.trailing_flush, "All done.", "SG-06 trailing_flush");
+    assert_eq!(finish.trailing_flush, "", "SG-06 trailing_flush");
     assert!(!finish.has_tool_marker, "SG-06 has_tool_marker");
 }
 
@@ -223,12 +226,10 @@ fn cl_sg_02_partial_angle_holdback() {
 #[test]
 fn cl_sg_03_native_tools_flush_preamble() {
     let mut gate = ToolStreamGate::new(true);
-    gate.push("Let me search.");
+    let emitted = gate.push("Let me search.").emitted_prefix;
+    assert_eq!(emitted, "Let me search.", "CL-SG-03 emitted during stream");
     let finish = gate.finish(true);
-    assert_eq!(
-        finish.trailing_flush, "Let me search.",
-        "CL-SG-03 trailing_flush"
-    );
+    assert_eq!(finish.trailing_flush, "", "CL-SG-03 trailing_flush");
     assert!(!finish.has_tool_marker, "CL-SG-03 has_tool_marker");
 }
 
@@ -258,12 +259,10 @@ fn cl_sg_05_allow_false_still_holds_back_tool_markers() {
 #[test]
 fn cl_sg_06_plain_text_finish_flush() {
     let mut gate = ToolStreamGate::new(true);
-    gate.push("All done.");
+    let emitted = gate.push("All done.").emitted_prefix;
+    assert_eq!(emitted, "All done.", "CL-SG-06 emitted during stream");
     let finish = gate.finish(false);
-    assert_eq!(
-        finish.trailing_flush, "All done.",
-        "CL-SG-06 trailing_flush"
-    );
+    assert_eq!(finish.trailing_flush, "", "CL-SG-06 trailing_flush");
     assert!(!finish.has_tool_marker, "CL-SG-06 has_tool_marker");
 }
 
