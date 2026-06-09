@@ -1,11 +1,15 @@
 //! Streaming holdback for leaked tool syntax (TOOL-PARSE-002).
 
+mod gate_state;
 mod markers;
 mod result;
 
+pub use gate_state::{has_tool_marker_at_finish, native_tool_flush_end, ActiveHold, HoldKind};
 pub use markers::{
-    first_strong_tool_marker_start, first_tool_marker_start, might_be_tool_marker_prefix,
-    normalize_spaced_dsml, safe_emit_end, TOOL_MARKER_HOLDBACK_CHARS,
+    earliest_confirmed_marker_start, earliest_tentative_trigger, first_strong_tool_marker_start,
+    first_stream_holdback_marker_start, first_tool_marker_start, might_be_tool_marker_prefix,
+    normalize_spaced_dsml, resolve_tentative_hold, safe_emit_end, HoldResolution, TentativeKind,
+    TOOL_MARKER_HOLDBACK_CHARS,
 };
 pub use result::{PushResult, StreamGateFinish};
 
@@ -15,6 +19,7 @@ pub struct ToolStreamGate {
     allow_tool_call: bool,
     buffer: String,
     emitted_length: usize,
+    hold: Option<ActiveHold>,
 }
 
 impl ToolStreamGate {
@@ -23,33 +28,39 @@ impl ToolStreamGate {
             allow_tool_call,
             buffer: String::new(),
             emitted_length: 0,
+            hold: None,
         }
     }
 
     pub fn reset(&mut self) {
         self.buffer.clear();
         self.emitted_length = 0;
+        self.hold = None;
     }
 
     pub fn push(&mut self, chunk: &str) -> PushResult {
         self.buffer.push_str(chunk);
-        // Hold back leaked tool syntax for UI streaming even when the engine has disabled
-        // tool execution (`allow_tool_call = false`). Execution policy is enforced in
-        // `engine::ingest_model_response_envelopes`; the gate only controls visible tokens.
-        let safe_end = safe_emit_end(&self.buffer);
+        let reconciled = gate_state::reconcile_after_push(
+            &self.buffer,
+            self.emitted_length,
+            self.hold,
+        );
+        self.hold = reconciled.hold;
+
         let mut emitted_prefix = String::new();
-        if safe_end > self.emitted_length {
-            emitted_prefix.push_str(&self.buffer[self.emitted_length..safe_end]);
-            self.emitted_length = safe_end;
+        if reconciled.emit_exclusive_end > self.emitted_length {
+            emitted_prefix
+                .push_str(&self.buffer[self.emitted_length..reconciled.emit_exclusive_end]);
+            self.emitted_length = reconciled.emit_exclusive_end;
         }
         PushResult { emitted_prefix }
     }
 
     pub fn finish(&mut self, has_native_tool_calls: bool) -> StreamGateFinish {
-        let marker_start = first_strong_tool_marker_start(&self.buffer);
-        let has_tool_marker = marker_start.is_some();
+        let has_tool_marker = has_tool_marker_at_finish(&self.buffer, self.hold);
         let trailing_flush = if has_native_tool_calls {
-            self.flush_emitted_prefix(marker_start)
+            let flush_end = native_tool_flush_end(&self.buffer, self.hold);
+            self.flush_emitted_prefix(flush_end)
         } else if has_tool_marker {
             String::new()
         } else {
@@ -61,7 +72,6 @@ impl ToolStreamGate {
         }
     }
 
-    /// Emits `buffer[emitted_length..end)` and advances `emitted_length` to `end`.
     fn flush_emitted_prefix(&mut self, end_exclusive: Option<usize>) -> String {
         let end = end_exclusive
             .unwrap_or(self.buffer.len())
