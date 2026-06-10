@@ -12,13 +12,14 @@ pub const TOOLS_BLOCKED_USER_FALLBACK: &str =
 /// Model-facing payload when tool calls are disabled but the model emitted tool syntax anyway.
 pub fn tools_blocked_nudge_json() -> String {
     serde_json::to_string(&json!({
-        "error": "tool_calls_disabled",
-        "message": "Tool calls are disabled for this turn and will not be executed. \
-Do not emit tool_call, DSML, or function-call syntax. \
-Answer the user in plain text using what you already know."
+        "error": "tool_call_limit_exhausted",
+        "message": "Error: tool call limit exhausted. No more tool calls will be executed \
+this turn. Do not emit tool_call, DSML, or function-call syntax again. \
+Answer the user in plain text now, using the information you already have. \
+If the task is incomplete, say what is done and what remains."
     }))
     .unwrap_or_else(|_| {
-        r#"{"error":"tool_calls_disabled","message":"Tool calls are disabled. Answer in plain text only."}"#
+        r#"{"error":"tool_call_limit_exhausted","message":"Error: tool call limit exhausted. No more tool calls! Answer in plain text only."}"#
             .to_string()
     })
 }
