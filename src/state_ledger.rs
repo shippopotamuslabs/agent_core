@@ -67,7 +67,9 @@ impl StateLedger {
         // We scan line-by-line and also allow inline ". Decision: …" sentences
         // (M4 puts multiple "Decision:" tags on a single line).
         let mut search_from = 0usize;
-        let lower = content.to_lowercase();
+        // Must be to_ascii_lowercase: full Unicode lowercasing can change byte
+        // lengths, and the match offsets below index into the original `content`.
+        let lower = content.to_ascii_lowercase();
         // Walk through, finding any of the relevant prefixes.
         let prefixes: &[(&[&str], &str)] = &[
             (PREFIX_OBJECTIVE, "objective"),
@@ -230,6 +232,17 @@ mod tests {
             content: content.into(),
             metadata: serde_json::Value::Null,
         }
+    }
+
+    #[test]
+    fn observe_text_with_length_changing_lowercase_chars_does_not_panic() {
+        // Regression: full Unicode to_lowercase() can change byte lengths
+        // ('İ' is 2 bytes, its lowercase "i̇" is 3), shifting match offsets
+        // that are applied back to the original string.
+        let mut l = StateLedger::default();
+        let content = format!("{} Decision: ship it.", "İ".repeat(10));
+        l.observe_user_message(&user(&content));
+        assert_eq!(l.decisions, vec!["ship it".to_string()]);
     }
 
     #[test]
