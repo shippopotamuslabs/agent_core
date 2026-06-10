@@ -146,6 +146,9 @@ pub fn earliest_tentative_trigger(text: &str, search_from: usize) -> Option<(usi
     if search_from >= text.len() {
         return None;
     }
+    // `search_from` may come from raw byte arithmetic (e.g. the len-minus-holdback
+    // tail window) and land inside a multi-byte char; slicing there panics.
+    let search_from = super::gate_state::char_boundary_truncate(text, search_from);
     let slice = &text[search_from..];
     let mut best: Option<(usize, TentativeKind)> = None;
 

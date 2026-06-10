@@ -292,3 +292,38 @@ fn cl_sg_09_call_append_blocks_held_back() {
     assert_eq!(emitted, "", "CL-SG-09 emitted prefix");
     assert!(finish.has_tool_marker, "CL-SG-09 has_tool_marker");
 }
+
+#[test]
+fn multibyte_char_at_holdback_tail_boundary_does_not_panic() {
+    // Regression: the tail search window starts at len - TOOL_MARKER_HOLDBACK_CHARS,
+    // raw byte arithmetic that can land inside a multi-byte char (e.g. an en dash).
+    // This used to panic in earliest_tentative_trigger's slice.
+    let mut gate = ToolStreamGate::new(true);
+    // 100 ASCII bytes, then a 3-byte en dash at bytes 100..103, then 62 ASCII bytes:
+    // total 165 bytes, so the 64-byte tail window starts at byte 101 — inside the dash.
+    let text = format!("{}–{}", "a".repeat(100), "b".repeat(62));
+
+    let emitted = gate.push(&text).emitted_prefix;
+    let finish = gate.finish(false);
+
+    assert_eq!(format!("{}{}", emitted, finish.trailing_flush), text);
+    assert!(!finish.has_tool_marker);
+}
+
+#[test]
+fn multibyte_chars_streamed_in_small_chunks_do_not_panic() {
+    let mut gate = ToolStreamGate::new(true);
+    let text = format!(
+        "Sean — quick situational read on this: {} – and more — text {}",
+        "x".repeat(80),
+        "y".repeat(80)
+    );
+    let mut emitted = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for chunk in chars.chunks(7) {
+        let piece: String = chunk.iter().collect();
+        emitted.push_str(&gate.push(&piece).emitted_prefix);
+    }
+    let finish = gate.finish(false);
+    assert_eq!(format!("{}{}", emitted, finish.trailing_flush), text);
+}
