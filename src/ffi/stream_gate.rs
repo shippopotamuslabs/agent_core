@@ -37,6 +37,12 @@ pub struct FfiToolStreamGate {
     inner: Mutex<ToolStreamGate>,
 }
 
+fn lock_tool_stream_gate(inner: &Mutex<ToolStreamGate>) -> std::sync::MutexGuard<'_, ToolStreamGate> {
+    inner
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[uniffi::export]
 pub fn create_tool_stream_gate(allow_tool_call: bool) -> std::sync::Arc<FfiToolStreamGate> {
     std::sync::Arc::new(FfiToolStreamGate {
@@ -47,29 +53,21 @@ pub fn create_tool_stream_gate(allow_tool_call: bool) -> std::sync::Arc<FfiToolS
 #[uniffi::export]
 impl FfiToolStreamGate {
     pub fn reset(&self) {
-        self.inner.lock().expect("tool stream gate lock").reset();
+        lock_tool_stream_gate(&self.inner).reset();
     }
 
     pub fn push(&self, chunk: String) -> FfiStreamGatePushResult {
-        self.inner
-            .lock()
-            .expect("tool stream gate lock")
-            .push(&chunk)
-            .into()
+        lock_tool_stream_gate(&self.inner).push(&chunk).into()
     }
 
     pub fn finish(&self, has_native_tool_calls: bool) -> FfiStreamGateFinish {
-        self.inner
-            .lock()
-            .expect("tool stream gate lock")
+        lock_tool_stream_gate(&self.inner)
             .finish(has_native_tool_calls)
             .into()
     }
 
     pub fn buffered_text(&self) -> String {
-        self.inner
-            .lock()
-            .expect("tool stream gate lock")
+        lock_tool_stream_gate(&self.inner)
             .buffered_text()
             .to_string()
     }

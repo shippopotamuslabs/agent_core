@@ -79,20 +79,54 @@ pub fn earliest_confirmed_marker_start(text: &str, search_from: usize) -> Option
     if search_from >= text.len() {
         return None;
     }
+    let search_from = super::gate_state::char_boundary_truncate(text, search_from);
     let slice = &text[search_from..];
     let normalized = normalize_spaced_dsml(slice);
     let mut best: Option<usize> = None;
     for regex in STRONG_TOOL_MARKER_REGEXES.iter() {
-        for haystack in [slice, normalized.as_str()] {
-            if let Some(found) = regex.find(haystack) {
-                let abs = search_from + found.start();
-                if best.map(|b| abs < b).unwrap_or(true) {
-                    best = Some(abs);
-                }
+        if let Some(found) = regex.find(slice) {
+            consider_marker_start(text, search_from + found.start(), &mut best);
+        } else if let Some(found) = regex.find(normalized.as_str()) {
+            if let Some(orig_off) = original_offset_for_normalized_offset(slice, found.start()) {
+                consider_marker_start(text, search_from + orig_off, &mut best);
             }
         }
     }
     best
+}
+
+fn consider_marker_start(text: &str, abs: usize, best: &mut Option<usize>) {
+    let abs = super::gate_state::char_boundary_truncate(text, abs);
+    if best.map(|b| abs < b).unwrap_or(true) {
+        *best = Some(abs);
+    }
+}
+
+/// Map a byte offset in `normalize_spaced_dsml(original)` to a char boundary in `original`.
+pub(crate) fn original_offset_for_normalized_offset(
+    original: &str,
+    normalized_offset: usize,
+) -> Option<usize> {
+    if normalized_offset == 0 {
+        return Some(0);
+    }
+    let normalized = normalize_spaced_dsml(original);
+    if normalized_offset > normalized.len() {
+        return None;
+    }
+    for (idx, _) in original.char_indices().skip(1) {
+        if normalize_spaced_dsml(&original[..idx]).len() >= normalized_offset {
+            return Some(super::gate_state::char_boundary_truncate(original, idx));
+        }
+    }
+    if normalize_spaced_dsml(original).len() >= normalized_offset {
+        Some(super::gate_state::char_boundary_truncate(
+            original,
+            original.len(),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Strong + partial sentinels — legacy helper for tests and external callers.
