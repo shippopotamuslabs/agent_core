@@ -3,7 +3,9 @@
 use crate::catalog::ToolCatalog;
 use crate::tool_parse::parse_tool_calls_with_semantics;
 use crate::tool_semantics::ToolSemanticsConfig;
-use crate::tool_stream_gate::{first_strong_tool_marker_start, normalize_spaced_dsml};
+use crate::tool_stream_gate::{
+    first_strong_tool_marker_start, normalize_spaced_dsml, original_offset_for_normalized_offset,
+};
 use crate::turn_io::RawToolCall;
 
 /// Turn-end classification result for model text + native tools.
@@ -50,7 +52,11 @@ pub fn resolve_model_turn_text(
         if !batch.successes.is_empty() {
             visible_text_from_batch(&batch, buffered_text)
         } else {
+            // Marker offsets are byte positions in `normalized`; spaced-DSML
+            // collapse can shift them relative to `buffered_text`, so map back
+            // before slicing the raw text.
             first_strong_tool_marker_start(&normalized)
+                .and_then(|start| original_offset_for_normalized_offset(buffered_text, start))
                 .map(|start| buffered_text[..start].trim_end().to_string())
                 .unwrap_or_default()
         }

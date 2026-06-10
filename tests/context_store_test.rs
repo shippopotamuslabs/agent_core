@@ -297,3 +297,102 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
         outcome
     );
 }
+
+/// Probe: a spilled tool-output reference must remain readable and searchable
+/// across subsequent turn compaction passes (snapshot/spill) — compaction must
+/// not garbage-collect store entries that retrieval hints still point at.
+#[test]
+fn spilled_reference_remains_readable_across_turn_compaction_passes() {
+    let mut cfg = AgentConfig::default();
+    cfg.tool_spill_threshold_bytes = 10;
+    cfg.allow_fifo_on_preflight = true;
+
+    let filler = "history ".repeat(220);
+    let mut initial: Vec<AgentMessage> = Vec::new();
+    for i in 0..6 {
+        initial.push(AgentMessage {
+            id: format!("u{i}"),
+            role: AgentRole::User,
+            content: filler.clone(),
+            metadata: serde_json::Value::Null,
+        });
+        initial.push(AgentMessage {
+            id: format!("a{i}"),
+            role: AgentRole::Assistant,
+            content: filler.clone(),
+            metadata: serde_json::Value::Null,
+        });
+    }
+    initial.push(AgentMessage {
+        id: "u-tail".into(),
+        role: AgentRole::User,
+        content: "tail".into(),
+        metadata: serde_json::Value::Null,
+    });
+
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        initial,
+        cfg,
+        SessionCapabilities {
+            summarization_allowed: false,
+            ..Default::default()
+        },
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    // First turn: spill a tool result into the store.
+    let _ = eng.next_action(&handle);
+    eng.submit_model_response(
+        &handle,
+        agent_core::turn_io::ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![agent_core::turn_io::RawToolCall {
+                id: Some("call-1".into()),
+                name: "web_search".into(),
+                arguments_json: "{}".into(),
+            }],
+            finish_reason: agent_core::turn_io::FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+    let _ = eng.next_action(&handle);
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-1".into(),
+            result_json: "SPILLED_PAYLOAD_FOR_FIFO_PROBE".into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    // Advance to the next turn so preflight compaction passes (history
+    // snapshot, tool spill) run over the seeded history. The store contract is
+    // what we assert: the reference stays readable regardless of how the
+    // marker message was rewritten.
+    let _ = eng.next_action(&handle);
+    let raw = eng
+        .read_context_reference(&handle, "tool-output-call-1".into())
+        .expect("spilled reference must remain readable after compaction passes");
+    assert!(raw.contains("SPILLED_PAYLOAD_FOR_FIFO_PROBE"));
+    assert!(
+        !eng.search_context_references(&handle, "web_search".into(), 5)
+            .is_empty(),
+        "spilled reference must remain searchable"
+    );
+}

@@ -475,6 +475,76 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
     );
 }
 
+/// CL-TR-06: native tool calls while blocked, provider finish_reason=ToolUse.
+/// The fallback turn must still finish gracefully — not fail with
+/// `tool_use_without_tool_calls` after pushing the user-facing fallback text.
+#[test]
+fn cl_tr_06_native_tools_blocked_fallback_finishes_with_tool_use_finish_reason() {
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = eng.create_session(
+        vec![user_msg()],
+        AgentConfig {
+            max_model_requests_per_turn: 10,
+            ..AgentConfig::default()
+        },
+        SessionCapabilities {
+            summarization_allowed: false,
+            kv_fixed: false,
+            tool_result_budget_tokens: None,
+            ..Default::default()
+        },
+        serde_json::Value::Null,
+        io_large(),
+    );
+    for _ in 0..3 {
+        let _ = eng.next_action(&h);
+        eng.submit_model_response(&h, malformed_response());
+        let _ = eng.next_action(&h);
+    }
+    let _ = eng.next_action(&h);
+    let AgentAction::CallModel(pending) = eng.next_action(&h) else {
+        panic!("CL-TR-06 expected CallModel before submit");
+    };
+    assert!(!pending.allow_tool_call, "CL-TR-06 tools must be blocked");
+
+    let blocked_native_response = || ModelResponse {
+        assistant_text: None,
+        tool_calls: vec![agent_core::turn_io::RawToolCall {
+            id: Some("c1".into()),
+            name: "web_search".into(),
+            arguments_json: r#"{"query":"x"}"#.into(),
+        }],
+        finish_reason: FinishReason::ToolUse,
+        provider_reasoning_content: None,
+    };
+
+    eng.submit_model_response(&h, blocked_native_response());
+    let next = eng.next_action(&h);
+    assert!(
+        matches!(next, AgentAction::CallModel(_)),
+        "CL-TR-06 first blocked native response must nudge, got {next:?}"
+    );
+
+    eng.submit_model_response(&h, blocked_native_response());
+    let next = eng.next_action(&h);
+    assert!(
+        matches!(next, AgentAction::Finished),
+        "CL-TR-06 second blocked native response must finish gracefully, got {next:?}"
+    );
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        "Sorry, something went wrong on my end. Please try again.",
+        "CL-TR-06 user fallback"
+    );
+}
+
 const APPEND_BLOCKS_LEAK: &str = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-1","blocks":[],"isComplete":false}}</tool_call>"#;
 
 #[test]

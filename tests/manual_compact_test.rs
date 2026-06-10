@@ -226,3 +226,68 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
         .count();
     assert_eq!(pre_count, 0);
 }
+
+/// Manual compact requested while a model turn is in flight must not clobber
+/// the AwaitingModel phase: the pending submit_model_response would otherwise
+/// hit InvalidTransition after the summary round-trip rewrote the phase.
+#[test]
+fn manual_compact_mid_model_turn_is_deferred_as_noop() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_manual_compact = true;
+    let caps = SessionCapabilities {
+        summarization_allowed: true,
+        kv_fixed: false,
+        ..Default::default()
+    };
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![
+            user_msg("u0", &"long context ".repeat(64)),
+            AgentMessage {
+                id: "a0".into(),
+                role: AgentRole::Assistant,
+                content: "ack".repeat(64),
+                metadata: serde_json::Value::Null,
+            },
+            user_msg("u1", "tail"),
+        ],
+        cfg,
+        caps,
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    // Engine is now AwaitingModel.
+    assert!(matches!(eng.next_action(&handle), AgentAction::CallModel(_)));
+
+    let action = eng.request_manual_compact(
+        &handle,
+        ManualCompactRequest {
+            focus_instruction: None,
+            force_summary: true,
+        },
+    );
+    assert!(
+        matches!(action, AgentAction::ManualCompactCompleted(_)),
+        "mid-turn manual compact must be a no-op, got {action:?}"
+    );
+
+    // The in-flight model turn must still complete normally.
+    eng.submit_model_response(&handle, ModelResponse::text_only("done"));
+    let next = eng.next_action(&handle);
+    assert!(
+        matches!(next, AgentAction::Finished),
+        "model turn must finish after deferred manual compact, got {next:?}"
+    );
+}

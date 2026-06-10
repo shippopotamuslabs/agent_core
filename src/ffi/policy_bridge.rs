@@ -40,7 +40,7 @@ pub fn repair_tool(
         Err(error) => {
             return RepairResult {
                 resolved_name: name.to_string(),
-                arguments_json: format!(r#"{{"error":"{error}"}}"#),
+                arguments_json: serde_json::json!({ "error": error }).to_string(),
                 repaired: false,
             };
         }
@@ -71,9 +71,10 @@ pub fn repair_tool(
             closest_name,
         } => RepairResult {
             resolved_name: original,
-            arguments_json: format!(
-                "{{\"error\":\"Ambiguous tool (closest match: {closest_name})\"}}"
-            ),
+            arguments_json: serde_json::json!({
+                "error": format!("Ambiguous tool (closest match: {closest_name})"),
+            })
+            .to_string(),
             repaired: false,
         },
     }
@@ -152,7 +153,7 @@ pub fn coerce_provider_arguments(
         Err(error) => {
             return FfiToolParseField {
                 tool_name: tool_name.to_string(),
-                arguments_json: format!(r#"{{"error":"{error}"}}"#),
+                arguments_json: serde_json::json!({ "error": error }).to_string(),
                 repaired: false,
                 repairs: Vec::new(),
             };
@@ -160,4 +161,28 @@ pub fn coerce_provider_arguments(
     };
     tool_parse::coerce_provider_arguments_with_semantics(tool_name, args_json, &catalog, &semantics)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_tool_error_payload_is_valid_json_even_with_quotes_in_error() {
+        // Malformed catalog JSON forces the load-error path; serde error text
+        // contains characters that must be JSON-escaped.
+        let result = repair_tool("web_search", "{}", "{ not json", r#"{"broken": "#);
+        let parsed: serde_json::Value = serde_json::from_str(&result.arguments_json)
+            .expect("error payload must be valid JSON");
+        assert!(parsed.get("error").is_some(), "payload: {parsed}");
+        assert!(!result.repaired);
+    }
+
+    #[test]
+    fn coerce_provider_arguments_error_payload_is_valid_json() {
+        let field = coerce_provider_arguments("web_search", "{}", "{ not json", r#"{"broken": "#);
+        let parsed: serde_json::Value = serde_json::from_str(&field.arguments_json)
+            .expect("error payload must be valid JSON");
+        assert!(parsed.get("error").is_some(), "payload: {parsed}");
+    }
 }

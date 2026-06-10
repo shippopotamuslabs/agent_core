@@ -101,3 +101,83 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
         .iter()
         .any(|e| matches!(e, AgentEvent::KvCacheInvalidated { .. })));
 }
+
+/// Probe: kv_fixed session with summarization disabled and oversized history must
+/// resolve preflight pressure deterministically — either a successful compaction
+/// (CallModel) or a clean CompactionFailed — never a panic or stuck phase.
+#[test]
+fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
+    let big = "hello ".repeat(600);
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(agent_core::host::NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![
+            AgentMessage {
+                id: "u0".into(),
+                role: AgentRole::User,
+                content: big.clone(),
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "a0".into(),
+                role: AgentRole::Assistant,
+                content: big.clone(),
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: big.clone(),
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "a1".into(),
+                role: AgentRole::Assistant,
+                content: big,
+                metadata: serde_json::Value::Null,
+            },
+            AgentMessage {
+                id: "u2".into(),
+                role: AgentRole::User,
+                content: "tail".into(),
+                metadata: serde_json::Value::Null,
+            },
+        ],
+        AgentConfig::default(),
+        SessionCapabilities {
+            summarization_allowed: false,
+            kv_fixed: true,
+            context_policy_tier: agent_core::policy::ContextPolicyTier::FixedKv,
+            ..Default::default()
+        },
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "llama".into(),
+            context_window_tokens: 512,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    let action = eng.next_action(&handle);
+    match action {
+        agent_core::action::AgentAction::CallModel(_) => {}
+        agent_core::action::AgentAction::Failed(AgentError::CompactionFailed { .. }) => {}
+        other => panic!("expected CallModel or clean CompactionFailed, got {other:?}"),
+    }
+    // A second call must return the same class of action (no phase corruption).
+    let again = eng.next_action(&handle);
+    assert!(
+        matches!(
+            again,
+            agent_core::action::AgentAction::CallModel(_)
+                | agent_core::action::AgentAction::Failed(AgentError::CompactionFailed { .. })
+        ),
+        "second next_action changed action class: {again:?}"
+    );
+}
