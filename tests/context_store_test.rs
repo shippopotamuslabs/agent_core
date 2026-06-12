@@ -282,6 +282,7 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
             ..Default::default()
         },
         trigger: CompactionTrigger::Preflight,
+        suppress_summary_tier: false,
     };
 
     let outcome = FifoCompactionTier::default().apply(session, &cfg, &ctx);

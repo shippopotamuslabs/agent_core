@@ -74,6 +74,16 @@ fn th_sg_04_json_prose_still_streams_through() {
     assert_eq!(visible, text, "TH-SG-04 visible");
 }
 
+#[test]
+fn th_sg_04b_non_tool_json_at_start_streams_after_first_key_disambiguates() {
+    let mut gate = ToolStreamGate::new(true);
+    let text = r#"{"status":"ok","name":"demo"}"#;
+    let visible = visible_after_push(&mut gate, text);
+    assert_eq!(visible, text, "TH-SG-04b visible");
+    let finish = gate.finish(false);
+    assert!(!finish.has_tool_marker, "TH-SG-04b has_tool_marker");
+}
+
 // ---------------------------------------------------------------------------
 // Broken / incomplete tool syntax — fail-closed at EOF (no leak)
 // ---------------------------------------------------------------------------
@@ -145,6 +155,17 @@ fn th_sg_10_litert_call_syntax_confirmed_and_hidden() {
     assert_eq!(emitted, "", "TH-SG-10 emitted");
     let finish = gate.finish(false);
     assert!(finish.has_tool_marker, "TH-SG-10 has_tool_marker");
+}
+
+#[test]
+fn th_sg_10b_bare_json_tool_call_is_hidden_when_chunked() {
+    let raw = r#"{"name":"web_search","arguments":{"query":"kotlin"}}"#;
+    let mut gate = ToolStreamGate::new(true);
+    let emitted = push_chunked(&mut gate, raw, 1);
+    assert_eq!(emitted, "", "TH-SG-10b emitted");
+    let finish = gate.finish(false);
+    assert_eq!(finish.trailing_flush, "", "TH-SG-10b trailing_flush");
+    assert!(finish.has_tool_marker, "TH-SG-10b has_tool_marker");
 }
 
 #[test]

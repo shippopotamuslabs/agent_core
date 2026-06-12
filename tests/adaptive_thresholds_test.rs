@@ -25,33 +25,36 @@ fn at_200k_window_retention_is_16k_not_50k() {
 }
 
 #[test]
-fn at_4k_window_summary_tier_is_not_applicable() {
+fn at_4k_window_summary_tier_requests_host_when_allowed() {
     let config = AgentConfig::for_policy_tier(ContextPolicyTier::SmallContext);
     let session = AgentSession::new(
         vec![
-            message("u1", AgentRole::User, "older user"),
-            message("a1", AgentRole::Assistant, "older assistant"),
+            message("u1", AgentRole::User, &"older user ".repeat(80)),
+            message("a1", AgentRole::Assistant, &"older assistant ".repeat(80)),
             message("u2", AgentRole::User, "current user"),
         ],
         serde_json::Value::Null,
     );
     let ctx = CompactionContext {
-        provider: "anthropic".into(),
+        provider: "local".into(),
         context_window_tokens: 4096,
         tools_schema_json: "[]".into(),
         system_prompt: String::new(),
         context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities {
             summarization_allowed: true,
+            kv_fixed: true,
             context_policy_tier: ContextPolicyTier::SmallContext,
+            history_rewrite_supported: true,
             ..Default::default()
         },
         trigger: CompactionTrigger::Preflight,
+        suppress_summary_tier: false,
     };
 
     let outcome = agent_core::compact::summary::SummaryCompactionTier.apply(session, &config, &ctx);
 
-    assert!(matches!(outcome, CompactionOutcome::NotApplicable));
+    assert!(matches!(outcome, CompactionOutcome::NeedsHostCall(_, _)));
 }
 
 #[test]

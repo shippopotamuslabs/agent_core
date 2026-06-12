@@ -329,6 +329,7 @@ impl AgentConfig {
                 config.tool_result_budget_relaxed_bytes = 32_768;
                 config.enable_context_store = true;
                 config.prompt_cache_anchor_threshold_tokens = u32::MAX;
+                config.allow_fifo_on_mid_turn = true;
             }
             ContextPolicyTier::FixedKv => {
                 config.threshold_ratio = 0.60;
@@ -345,6 +346,7 @@ impl AgentConfig {
                 config.tool_result_budget_relaxed_bytes = 16_384;
                 config.enable_context_store = true;
                 config.prompt_cache_anchor_threshold_tokens = u32::MAX;
+                config.allow_fifo_on_mid_turn = true;
             }
         }
         config
@@ -418,6 +420,9 @@ impl AgentConfig {
         }
         if self.prompt_cache_anchor_threshold_tokens == base.prompt_cache_anchor_threshold_tokens {
             self.prompt_cache_anchor_threshold_tokens = tiered.prompt_cache_anchor_threshold_tokens;
+        }
+        if self.allow_fifo_on_mid_turn == base.allow_fifo_on_mid_turn {
+            self.allow_fifo_on_mid_turn = tiered.allow_fifo_on_mid_turn;
         }
         if context_window_tokens < 8_000 {
             self.enable_context_store = true;

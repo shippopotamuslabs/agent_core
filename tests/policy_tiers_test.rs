@@ -72,7 +72,7 @@ fn s22_high_context_raises_thresholds() {
     let cfg = AgentConfig::default();
     let policy = resolve_context_policy(&cfg, &caps, "anthropic", 200_000);
     // High context relaxes preflight threshold to ~0.90 per spec S22.
-    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 200_000);
+    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 200_000, false);
     assert!(
         (plan.threshold_ratio - 0.90).abs() < f32::EPSILON,
         "expected preflight threshold ratio 0.90 for high context, got {}",
@@ -129,7 +129,7 @@ fn e8_fixed_kv_rejects_history_rewrite_plan() {
     };
     let cfg = AgentConfig::default();
     let policy = resolve_context_policy(&cfg, &caps, "local", 4096);
-    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096);
+    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096, false);
     assert!(
         !plan.ordered_tiers.contains(&CompactionTier::Summary),
         "fixed_kv must not include Summary tier"
@@ -150,4 +150,22 @@ fn e10_cache_hints_omitted_when_unsupported() {
     let cfg = AgentConfig::default();
     let policy = resolve_context_policy(&cfg, &caps, "anthropic", 200_000);
     assert!(!policy.prompt_cache_hinting_allowed);
+}
+
+#[test]
+fn small_context_and_fixed_kv_allow_fifo_on_mid_turn() {
+    let small = AgentConfig::for_policy_tier(ContextPolicyTier::SmallContext);
+    let fixed_kv = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
+    let hosted = AgentConfig::for_policy_tier(ContextPolicyTier::HostedMutable);
+
+    assert!(small.allow_fifo_on_mid_turn);
+    assert!(fixed_kv.allow_fifo_on_mid_turn);
+    assert!(!hosted.allow_fifo_on_mid_turn);
+}
+
+#[test]
+fn apply_policy_tier_defaults_enables_mid_turn_fifo_for_small_context() {
+    let mut config = AgentConfig::default();
+    config.apply_policy_tier_defaults(ContextPolicyTier::SmallContext, 4096);
+    assert!(config.allow_fifo_on_mid_turn);
 }

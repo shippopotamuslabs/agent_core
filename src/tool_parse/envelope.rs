@@ -14,6 +14,7 @@ pub enum EnvelopeFormat {
     Mistral,
     ToolCall,
     Cdata,
+    LiteRtCall,
     RawJson,
 }
 

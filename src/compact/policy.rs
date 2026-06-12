@@ -34,6 +34,7 @@ pub fn build_compaction_plan(
     policy: &ContextPolicy,
     trigger: CompactionTrigger,
     context_window_tokens: u32,
+    suppress_summary_tier: bool,
 ) -> CompactionPlan {
     let threshold_ratio =
         effective_compaction_threshold_ratio(config, policy, trigger, context_window_tokens);
@@ -52,7 +53,8 @@ pub fn build_compaction_plan(
 
     let summary_allowed = policy.summarization_allowed
         && policy.history_rewrite_allowed
-        && crate::long_loop_policy::long_loop_plan_includes_summary(_capabilities);
+        && crate::long_loop_policy::long_loop_plan_includes_summary(_capabilities)
+        && !suppress_summary_tier;
     let history_rewrite_allowed = policy.history_rewrite_allowed;
 
     let fifo_gate_for_trigger = match trigger {

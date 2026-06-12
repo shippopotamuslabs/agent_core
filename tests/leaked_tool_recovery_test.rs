@@ -179,6 +179,119 @@ fn cl_tr_08_spaced_dsml_prefix_offset_does_not_panic_on_multibyte_boundary() {
 }
 
 #[test]
+fn cl_tr_09_litert_call_syntax_recovers_and_is_hidden() {
+    let buffered = r#"Before call:web_search{query="good news"}"#;
+    let resolution = resolve_enclave(buffered, &[], true);
+
+    assert_eq!(resolution.recovered_tool_calls.len(), 1);
+    assert_eq!(resolution.recovered_tool_calls[0].name, "web_search");
+    assert_eq!(
+        resolution.recovered_tool_calls[0].arguments_json,
+        r#"{"query":"good news"}"#
+    );
+    assert_eq!(resolution.visible_assistant_text, "Before");
+}
+
+#[test]
+fn cl_tr_10_litert_quote_sentinels_recover() {
+    let buffered = r#"call:web_search{query: <|"|>kotlin news<|"|>}"#;
+    let resolution = resolve_enclave(buffered, &[], true);
+
+    assert_eq!(resolution.recovered_tool_calls.len(), 1);
+    assert_eq!(
+        resolution.recovered_tool_calls[0].arguments_json,
+        r#"{"query":"kotlin news"}"#
+    );
+    assert_eq!(resolution.visible_assistant_text, "");
+}
+
+/// CL-TR-11: <tool_call> envelope truncated at EOS (no closing tag) is
+/// recovered into a valid tool call.
+#[test]
+fn cl_tr_11_tool_call_truncated_at_eos_recovers() {
+    // Truncated at end of generation — no </tool_call> closer.
+    let buffered =
+        r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"good news"}"#;
+    let resolution = resolve_enclave(buffered, &[], true);
+
+    assert_eq!(
+        resolution.recovered_tool_calls.len(),
+        1,
+        "CL-TR-11 recovered count"
+    );
+    assert_eq!(
+        resolution.recovered_tool_calls[0].name,
+        "tool_discovery_tool",
+        "CL-TR-11 tool name"
+    );
+    assert!(
+        resolution.recovered_tool_calls[0]
+            .arguments_json
+            .contains(r#""capability":"good news""#),
+        "CL-TR-11 args: {}",
+        resolution.recovered_tool_calls[0].arguments_json
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, "",
+        "CL-TR-11 visible text"
+    );
+}
+
+/// CL-TR-12: call: LiteRT envelope truncated at EOS (no closing brace) is
+/// recovered into a valid tool call.
+#[test]
+fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
+    // Truncated mid-argument — no closing brace.
+    let buffered = r#"call:tool_discovery_tool{capability="whats good"#;
+    let resolution = resolve_enclave(buffered, &[], true);
+
+    assert_eq!(
+        resolution.recovered_tool_calls.len(),
+        1,
+        "CL-TR-12 recovered count"
+    );
+    assert_eq!(
+        resolution.recovered_tool_calls[0].name,
+        "tool_discovery_tool",
+        "CL-TR-12 tool name"
+    );
+    assert!(
+        resolution.recovered_tool_calls[0]
+            .arguments_json
+            .contains(r#""capability""#),
+        "CL-TR-12 args: {}",
+        resolution.recovered_tool_calls[0].arguments_json
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, "",
+        "CL-TR-12 visible text"
+    );
+}
+
+/// CL-TR-13: two unclosed <tool_call> openers with no closing tag anywhere
+/// must NOT silently recover — the presence of a second opener after the first
+/// signals ambiguity, so recovery is skipped and had_strong_tool_marker is set.
+#[test]
+fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
+    // Two open tags, no close tag at all — ambiguous, not a simple EOS truncation.
+    let buffered =
+        r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"a"} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
+    let resolution = resolve_enclave(buffered, &[], true);
+
+    // Neither envelope should silently recover when there are multiple opens
+    // without any close tag.
+    assert!(
+        resolution.recovered_tool_calls.is_empty(),
+        "CL-TR-13 ambiguous multi-open envelope must not recover: {:?}",
+        resolution.recovered_tool_calls.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    assert!(
+        resolution.had_strong_tool_marker,
+        "CL-TR-13 strong marker must be detected"
+    );
+}
+
+#[test]
 fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
     use agent_core::tool_stream_gate::first_strong_tool_marker_start;
     use std::fs;

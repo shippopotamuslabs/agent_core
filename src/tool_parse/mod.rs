@@ -311,10 +311,94 @@ fn extract_envelopes(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
     if raw.contains("<![CDATA[<tool") {
         return extract_cdata(raw);
     }
+    if Regex::new(r"(?is)\bcall\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\{")
+        .unwrap()
+        .is_match(raw)
+    {
+        return extract_litert_call(raw);
+    }
     if raw.contains("\"name\"") || raw.contains("'name'") || raw.contains("\u{201C}name\u{201D}") {
         return extract_raw_json(raw);
     }
     Ok(Vec::new())
+}
+
+fn extract_litert_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let call = Regex::new(r"(?is)\bcall\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\{").unwrap();
+    let captures = call
+        .captures(raw)
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::LiteRtCall), "missing call envelope"))?;
+    let full = captures.get(0).unwrap();
+    let arguments_start = full.end() - 1;
+    let arguments_end = matching_delimiter(raw, arguments_start, '{', '}');
+
+    let (arguments_raw, visible_suffix, repair_hints) =
+        if let Some(end) = arguments_end {
+            let args = normalize_litert_arguments(&raw[arguments_start..=end]);
+            let suffix = raw[end + 1..].trim_start().to_string();
+            (args, suffix, vec!["converted call: tool syntax to canonical envelope".to_string()])
+        } else {
+            // No closing brace found. Recover only when this envelope runs to
+            // end of text (EOS truncation) AND there is actual argument content
+            // after the opening brace. If there is a second call: opener after
+            // this one, or the brace is the last non-whitespace character, keep
+            // hard-failure semantics.
+            let after_open = full.end();
+            let has_later_envelope = call.find_at(raw, after_open).is_some();
+            let has_argument_content = raw[after_open..].trim().len() > 0;
+            if has_later_envelope || !has_argument_content {
+                return Err(malformed(
+                    Some(EnvelopeFormat::LiteRtCall),
+                    "unclosed call envelope",
+                ));
+            }
+            let args = normalize_litert_arguments(&raw[arguments_start..]);
+            let hints = vec![
+                "converted call: tool syntax to canonical envelope".to_string(),
+                "recovered unclosed call envelope truncated at end of output".to_string(),
+            ];
+            (args, String::new(), hints)
+        };
+
+    Ok(vec![ExtractedEnvelope {
+        tool_name: captures.get(1).unwrap().as_str().trim().to_string(),
+        arguments_raw,
+        visible_prefix: raw[..full.start()].trim_end().to_string(),
+        visible_suffix,
+        format: EnvelopeFormat::LiteRtCall,
+        repair_hints,
+    }])
+}
+
+fn normalize_litert_arguments(raw: &str) -> String {
+    let sentinel_normalized = raw.replace("<|\"|>", "\"");
+    let mut normalized = String::with_capacity(sentinel_normalized.len());
+    let mut in_string = false;
+    let mut escape = false;
+
+    for char in sentinel_normalized.chars() {
+        if in_string {
+            normalized.push(char);
+            if escape {
+                escape = false;
+            } else if char == '\\' {
+                escape = true;
+            } else if char == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match char {
+            '"' => {
+                in_string = true;
+                normalized.push(char);
+            }
+            '=' => normalized.push(':'),
+            _ => normalized.push(char),
+        }
+    }
+    normalized
 }
 
 fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
@@ -445,13 +529,42 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
     let Some(start) = open.find(raw) else {
         return Ok(Vec::new());
     };
-    let Some(close_start_rel) = raw[start.end()..].to_ascii_lowercase().find("</tool_call>") else {
-        return Err(malformed(
-            Some(EnvelopeFormat::ToolCall),
-            "unclosed tool_call",
-        ));
-    };
-    let close_start = start.end() + close_start_rel;
+    let close_start_rel = raw[start.end()..].to_ascii_lowercase().find("</tool_call>");
+    if close_start_rel.is_none() {
+        // No closing tag. Recover only when this is EOS truncation: the open
+        // tag must be the last one in the text (no second <tool_call later).
+        let has_later_open = open.find_at(raw, start.end()).is_some();
+        if has_later_open {
+            return Err(malformed(
+                Some(EnvelopeFormat::ToolCall),
+                "unclosed tool_call",
+            ));
+        }
+        let payload = raw[start.end()..].trim();
+        if payload.contains("<arg_key>") {
+            // GLM format requires explicit close; cannot recover truncated GLM.
+            return Err(malformed(
+                Some(EnvelopeFormat::ToolCall),
+                "unclosed tool_call",
+            ));
+        }
+        let value = repair_json(payload)
+            .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
+        let mut repair_hints = vec![
+            "recovered unclosed tool_call envelope truncated at end of output".to_string(),
+        ];
+        if payload.contains('\'') {
+            repair_hints.push("converted single quotes to double quotes".to_string());
+        }
+        return values_from_payload(
+            value,
+            EnvelopeFormat::ToolCall,
+            raw[..start.start()].to_string(),
+            String::new(),
+            repair_hints,
+        );
+    }
+    let close_start = start.end() + close_start_rel.unwrap();
     let close_end = close_start + "</tool_call>".len();
     let payload = raw[start.end()..close_start].trim();
     if payload.contains("<arg_key>") {

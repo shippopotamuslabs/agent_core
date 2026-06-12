@@ -72,7 +72,7 @@ pub(crate) struct InnerSession {
     pub(super) pending_tool_turn_request_order: Vec<RawToolCall>,
     /// Reject/suggest tool payloads keyed by `call_id`, flushed after successful results.
     pub(super) pending_reject_tool_by_call_id: HashMap<String, AgentMessage>,
-    /// Active tool names for the current session. Updated on search_tools activations.
+    /// Active tool names for the current session. Updated on tool_discovery_tool activations.
     /// Initially populated from the session's initial `tools_schema_json`.
     pub(super) active_tool_names: Vec<String>,
     pub(super) sidecar_builder: SidecarBuilder,
@@ -81,6 +81,8 @@ pub(crate) struct InnerSession {
     /// Telemetry: number of destructive compaction tiers (Micro/Fifo/Summary) applied
     /// this user turn (reset on turn start).
     pub(super) destructive_tiers_this_turn: u32,
+    /// Host declined summarization for the current compaction continuation (utility lane skip).
+    pub(super) suppress_summary_tier: bool,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).

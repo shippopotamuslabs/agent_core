@@ -175,6 +175,7 @@ mod tests {
                 ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
+            suppress_summary_tier: false,
         }
     }
 

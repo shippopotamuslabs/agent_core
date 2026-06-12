@@ -177,8 +177,8 @@ fn ts_002_enclave_compatibility_config_preserves_existing_semantic_names() {
     let discovery = semantics.discovery.expect("discovery semantics");
     let artifact = semantics.artifact.expect("artifact semantics");
 
-    assert_eq!(discovery.tool_name, "search_tools");
-    assert_eq!(discovery.request_field_name, "query");
+    assert_eq!(discovery.tool_name, "tool_discovery_tool");
+    assert_eq!(discovery.request_field_name, "capability");
     assert_eq!(artifact.start_tool_name, "start_artifact");
     assert_eq!(artifact.append_tool_name, "append_blocks");
     assert_eq!(artifact.id_field, "artifactId");

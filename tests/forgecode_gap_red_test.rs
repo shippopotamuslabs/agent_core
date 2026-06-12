@@ -326,9 +326,12 @@ fn fcg_007_absolute_token_threshold_triggers_compaction() {
         preflight_token_threshold: Some(1200),
         ..AgentConfig::default()
     };
-    let initial = "token ".repeat(1300);
     let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, &initial)],
+        vec![
+            message("u1", AgentRole::User, &"token ".repeat(1300)),
+            message("a1", AgentRole::Assistant, "prior answer"),
+            message("u2", AgentRole::User, "active query"),
+        ],
         config,
         SessionCapabilities {
             summarization_allowed: true,
@@ -343,6 +346,36 @@ fn fcg_007_absolute_token_threshold_triggers_compaction() {
             assert_eq!(request.trigger, CompactionTrigger::Preflight);
         }
         other => panic!("expected preflight compaction before CallModel, got {other:?}"),
+    }
+}
+
+#[test]
+fn fcg_007b_lone_user_soft_threshold_preserves_active_query() {
+    let engine = red_engine();
+    let config = AgentConfig {
+        threshold_ratio: 1.0,
+        preflight_token_threshold: Some(1200),
+        ..AgentConfig::default()
+    };
+    let active_query = "token ".repeat(1300);
+    let handle = engine.create_session(
+        vec![message("u1", AgentRole::User, &active_query)],
+        config,
+        SessionCapabilities {
+            summarization_allowed: true,
+            ..SessionCapabilities::default()
+        },
+        serde_json::Value::Null,
+        session_io("[]", 200_000),
+    );
+
+    match engine.next_action(&handle) {
+        AgentAction::CallModel(request) => {
+            assert_eq!(request.session_messages.len(), 1);
+            assert_eq!(request.session_messages[0].role, AgentRole::User);
+            assert_eq!(request.session_messages[0].content, active_query);
+        }
+        other => panic!("expected intact active query to reach model, got {other:?}"),
     }
 }
 

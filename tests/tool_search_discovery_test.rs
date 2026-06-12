@@ -18,20 +18,20 @@ const ENCLAVE_SEMANTICS_JSON: &str =
     include_str!("../../../core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json");
 
 const SEARCH_ACTIVE_SCHEMA_JSON: &str = r#"[
-  {"name":"search_tools","parameters":{}},
+  {"name":"tool_discovery_tool","parameters":{}},
   {"name":"web_search","parameters":{}},
   {"name":"web_extract","parameters":{}}
 ]"#;
 
 const SEARCH_CATALOG_JSON: &str = r#"[
-  {"name":"search_tools","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
+  {"name":"tool_discovery_tool","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"capability","ty":"string","description":"capability"}],"defaults":{}}},
   {"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
   {"name":"web_extract","aliases":["web_fetch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"urls","ty":"array","description":"urls"}],"defaults":{}}},
   {"name":"append_blocks","aliases":[],"reproducible":false,"schema_hint":{"required_fields":[{"name":"artifactId","ty":"string","description":"id"},{"name":"blocks","ty":"array","description":"blocks"}],"defaults":{"isComplete":false}}}
 ]"#;
 
 const SEARCH_REGISTRY_JSON: &str = r#"[
-  {"name":"search_tools","parameters":{}},
+  {"name":"tool_discovery_tool","parameters":{}},
   {"name":"web_search","parameters":{}},
   {"name":"web_extract","parameters":{}},
   {"name":"append_blocks","parameters":{"properties":{"artifactId":{"type":"string"}}}}
@@ -67,8 +67,8 @@ fn search_discovery_config() -> AgentConfig {
         r#"{
           "catalog": { "tools": [] },
           "discovery": {
-            "tool_name": "search_tools",
-            "request_field_name": "query",
+            "tool_name": "tool_discovery_tool",
+            "request_field_name": "capability",
             "always_callable": true
           },
           "argument_repairs": [],
@@ -132,8 +132,8 @@ fn tsd_26_default_semantics_reference_search_tools() {
     let discovery = semantics
         .discovery
         .expect("enclave default semantics must configure discovery");
-    assert_eq!(discovery.tool_name, "search_tools");
-    assert_eq!(discovery.request_field_name, "query");
+    assert_eq!(discovery.tool_name, "tool_discovery_tool");
+    assert_eq!(discovery.request_field_name, "capability");
     assert!(discovery.always_callable);
     assert!(
         discovery
@@ -145,7 +145,7 @@ fn tsd_26_default_semantics_reference_search_tools() {
 #[test]
 fn tsd_catalog_includes_search_tools_not_disclose() {
     let catalog = include_str!("../resources/tool_catalog.json");
-    assert!(catalog.contains("\"name\": \"search_tools\""));
+    assert!(catalog.contains("\"name\": \"tool_discovery_tool\""));
     assert!(!catalog.contains("\"name\": \"disclose_tool_schemas\""));
 }
 
@@ -191,11 +191,11 @@ fn tsd_26_engine_rejects_append_blocks_before_search_activation() {
 
     assert_eq!(
         payload["error"].as_str(),
-        Some("Tool 'append_blocks' is not active. Call search_tools first.")
+        Some("Tool 'append_blocks' is not active. Call tool_discovery_tool first.")
     );
     assert_eq!(
         payload["available_tools"],
-        serde_json::json!(["search_tools", "web_search", "web_extract"])
+        serde_json::json!(["tool_discovery_tool", "web_search", "web_extract"])
     );
 }
 

@@ -261,6 +261,7 @@ mod tests {
                 ..Default::default()
             },
             trigger: CompactionTrigger::MidTurn,
+            suppress_summary_tier: false,
         }
     }
 

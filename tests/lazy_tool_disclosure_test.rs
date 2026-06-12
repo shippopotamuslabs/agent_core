@@ -14,7 +14,7 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 
 const CATALOG_JSON: &str = r#"[
-  {"name":"search_tools","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
+  {"name":"tool_discovery_tool","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"capability","ty":"string","description":"capability"}],"defaults":{}}},
   {"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
   {"name":"web_extract","aliases":["web_fetch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"urls","ty":"array","description":"urls"}],"defaults":{}}},
   {"name":"search_chat_history","aliases":[],"reproducible":true,"schema_hint":null},
@@ -23,13 +23,13 @@ const CATALOG_JSON: &str = r#"[
 ]"#;
 
 const ACTIVE_SCHEMA_JSON: &str = r#"[
-  {"name":"search_tools","parameters":{}},
+  {"name":"tool_discovery_tool","parameters":{}},
   {"name":"web_search","parameters":{}},
   {"name":"web_extract","parameters":{}}
 ]"#;
 
 const REGISTRY_JSON: &str = r#"[
-  {"name":"search_tools","parameters":{}},
+  {"name":"tool_discovery_tool","parameters":{}},
   {"name":"web_search","parameters":{}},
   {"name":"web_extract","parameters":{}},
   {"name":"search_chat_history","parameters":{}},
@@ -164,12 +164,12 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
 
     assert_eq!(
         tool_names(&request.tools_schema_json),
-        vec!["search_tools", "web_search", "web_extract"]
+        vec!["tool_discovery_tool", "web_search", "web_extract"]
     );
     assert_eq!(
         advertised,
         vec![
-            "search_tools",
+            "tool_discovery_tool",
             "web_search",
             "web_extract",
             "search_chat_history",
@@ -184,7 +184,7 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
 // LTD-09
 fn ltd_09_rust_merges_activated_tool_names_in_first_seen_order() {
     const LTD_09_ACTIVE_SCHEMA_JSON: &str = r#"[
-      {"name":"search_tools","parameters":{}},
+      {"name":"tool_discovery_tool","parameters":{}},
       {"name":"web_search","parameters":{}}
     ]"#;
 
@@ -222,7 +222,7 @@ fn ltd_09_rust_merges_activated_tool_names_in_first_seen_order() {
     assert_eq!(
         tool_names(&next_request.tools_schema_json),
         vec![
-            "search_tools",
+            "tool_discovery_tool",
             "web_search",
             "append_blocks",
             "search_current_artifact",
@@ -273,11 +273,11 @@ fn ltd_10_direct_call_to_deferred_tool_fails_closed_before_disclosure() {
 
     assert_eq!(
         payload["error"].as_str(),
-        Some("Tool 'append_blocks' is not active. Call search_tools first.")
+        Some("Tool 'append_blocks' is not active. Call tool_discovery_tool first.")
     );
     assert_eq!(
         payload["available_tools"],
-        serde_json::json!(["search_tools", "web_search", "web_extract"])
+        serde_json::json!(["tool_discovery_tool", "web_search", "web_extract"])
     );
 }
 
@@ -311,8 +311,8 @@ fn ltd_11_search_tools_passes_repair_after_deferred_rejection() {
             assistant_text: None,
             tool_calls: vec![RawToolCall {
                 id: Some("call-disclose".into()),
-                name: "search_tools".into(),
-                arguments_json: r#"{"query":"start artifact"}"#.into(),
+                name: "tool_discovery_tool".into(),
+                arguments_json: r#"{"capability":"start artifact"}"#.into(),
             }],
             finish_reason: FinishReason::ToolUse,
             provider_reasoning_content: None,
@@ -327,5 +327,5 @@ fn ltd_11_search_tools_passes_repair_after_deferred_rejection() {
         }
     };
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].name, "search_tools");
+    assert_eq!(calls[0].name, "tool_discovery_tool");
 }
