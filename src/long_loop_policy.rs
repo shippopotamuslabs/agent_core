@@ -52,12 +52,15 @@ impl LongLoopPolicy {
     }
 
     pub fn fixed_kv_defaults() -> Self {
+        // Periodic tool-turn compaction is disabled for fixed-KV sessions: every
+        // compaction invalidates the llama.cpp KV cache, so compaction must be
+        // driven by token pressure (threshold_ratio) only.
         Self {
             max_tool_turns: 20,
             sidecar_byte_budget_per_call: 4096,
             sidecar_total_byte_budget: 8192,
-            summarize_after_tool_turns: 8,
-            compact_every_n_tool_turns: 3,
+            summarize_after_tool_turns: 0,
+            compact_every_n_tool_turns: 0,
         }
     }
 
@@ -130,6 +133,9 @@ pub fn should_compact_for_long_loop(
 }
 
 /// Whether the compaction plan for the current pass should include Summary tier.
+///
+/// `kv_fixed` only signals that applying a summary invalidates the main-model KV cache;
+/// the host may still run summarization via a utility ONNX lane outside that cache.
 pub fn long_loop_plan_includes_summary(caps: &SessionCapabilities) -> bool {
-    caps.summarization_allowed && !caps.kv_fixed
+    caps.summarization_allowed
 }
