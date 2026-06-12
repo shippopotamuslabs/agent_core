@@ -71,4 +71,8 @@ impl FfiToolStreamGate {
             .buffered_text()
             .to_string()
     }
+
+    pub fn has_tool_markup(&self) -> bool {
+        lock_tool_stream_gate(&self.inner).has_tool_markup_at_finish()
+    }
 }

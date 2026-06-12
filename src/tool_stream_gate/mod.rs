@@ -91,4 +91,8 @@ impl ToolStreamGate {
     pub fn buffered_text(&self) -> &str {
         &self.buffer
     }
+
+    pub fn has_tool_markup_at_finish(&self) -> bool {
+        has_tool_marker_at_finish(&self.buffer, self.hold)
+    }
 }
