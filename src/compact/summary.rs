@@ -39,7 +39,6 @@ fn last_user_index(messages: &[AgentMessage]) -> Option<usize> {
 /// - Default: history **before** the last user message.
 /// - Active turn: assistant/tool traffic **after** the last user when there is no
 ///   prior history (common for post-tool compaction).
-/// - Lone oversized user turn: the user message itself when it is the only content.
 fn retention_start_index(messages: &[AgentMessage], retention_window_tokens: u32) -> Option<usize> {
     if retention_window_tokens == 0 {
         return None;
@@ -94,13 +93,6 @@ fn messages_to_summarize(
             picked.push(msg.clone());
         }
     }
-    if picked.is_empty()
-        && last_u == 0
-        && messages.len() == 1
-        && messages[0].role == AgentRole::User
-    {
-        picked.push(messages[0].clone());
-    }
     if picked.is_empty() {
         return None;
     }
@@ -126,23 +118,7 @@ impl CompactionTier for SummaryCompactionTier {
         _config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {
-        if !ctx.capabilities.summarization_allowed {
-            return CompactionOutcome::NotApplicable;
-        }
-
-        if ctx.context_window_tokens < 8_000
-            && matches!(
-                ctx.capabilities.context_policy_tier,
-                crate::policy::ContextPolicyTier::SmallContext
-                    | crate::policy::ContextPolicyTier::FixedKv
-                    | crate::policy::ContextPolicyTier::LocalMutable
-            )
-        {
-            return CompactionOutcome::NotApplicable;
-        }
-
-        // KV-fixed sessions cannot rebuild around a summarization round-trip (ADR AGENT-047).
-        if ctx.capabilities.kv_fixed {
+        if !ctx.capabilities.summarization_allowed || ctx.suppress_summary_tier {
             return CompactionOutcome::NotApplicable;
         }
 
@@ -186,6 +162,9 @@ pub fn apply_summary_result(
     config: &AgentConfig,
     ctx: &CompactionContext,
 ) -> Result<(), &'static str> {
+    if result.summary_text.trim().is_empty() {
+        return Err("empty summary_text");
+    }
     if result.last_message_id != req.last_message_id {
         return Err("last_message_id mismatch");
     }
@@ -282,6 +261,7 @@ mod tests {
                 ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
+            suppress_summary_tier: false,
         }
     }
 
@@ -313,12 +293,18 @@ mod tests {
     }
 
     #[test]
-    fn not_applicable_when_kv_fixed_even_if_summarization_allowed() {
-        let session =
-            AgentSession::new(vec![um("u1", "hi"), am("a1", "yo"), um("u2", "tail")], Null);
+    fn needs_host_call_when_kv_fixed_and_summarization_allowed() {
+        let session = AgentSession::new(
+            vec![
+                um("u1", &"hello world ".repeat(50)),
+                am("a1", &"reply ".repeat(50)),
+                um("u2", "tail"),
+            ],
+            Null,
+        );
         let cfg = AgentConfig::default();
         let out = SummaryCompactionTier.apply(session, &cfg, &ctx_kv(true, true));
-        assert!(matches!(out, CompactionOutcome::NotApplicable));
+        assert!(matches!(out, CompactionOutcome::NeedsHostCall(_, _)));
     }
 
     #[test]
@@ -404,6 +390,14 @@ mod tests {
             messages_to_summarize(&messages, 0).expect("post-user assistant/tool range");
         assert_eq!(picked.len(), 2);
         assert_eq!(last_id, "t1");
+    }
+
+    #[test]
+    fn lone_user_turn_is_never_summarized() {
+        let messages = vec![um("u1", &"active query ".repeat(2_000))];
+
+        assert!(messages_to_summarize(&messages, 0).is_none());
+        assert!(messages_to_summarize(&messages, 1_000).is_none());
     }
 
     #[test]

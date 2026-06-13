@@ -89,6 +89,7 @@ fn compaction_ctx() -> CompactionContext {
         context_sidecars_estimate: String::new(),
         capabilities: SessionCapabilities::default(),
         trigger: CompactionTrigger::MidTurn,
+        suppress_summary_tier: false,
     }
 }
 

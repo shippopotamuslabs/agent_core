@@ -156,6 +156,7 @@ mod tests {
                 ..Default::default()
             },
             trigger,
+            suppress_summary_tier: false,
         }
     }
 

@@ -437,7 +437,7 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
     let mut cfg = AgentConfig::for_policy_tier(agent_core::policy::ContextPolicyTier::FixedKv);
     cfg.require_snapshot_before_fifo = false;
     let caps = SessionCapabilities {
-        summarization_allowed: true,
+        summarization_allowed: false,
         kv_fixed: true,
         context_policy_tier: agent_core::policy::ContextPolicyTier::FixedKv,
         history_rewrite_supported: true,
@@ -571,6 +571,7 @@ fn s16_fifo_requires_history_snapshot_before_destructive_deletion() {
         context_sidecars_estimate: String::new(),
         capabilities: caps.clone(),
         trigger: CompactionTrigger::Preflight,
+        suppress_summary_tier: false,
     };
     // The production path that creates a pre-FIFO history snapshot is
     // `snapshot_history_range`. Drive it against the same `store` used for
@@ -623,6 +624,7 @@ fn e1_summary_tier_is_not_applicable_for_protected_tail_only() {
         context_sidecars_estimate: String::new(),
         capabilities: caps,
         trigger: CompactionTrigger::Preflight,
+        suppress_summary_tier: false,
     };
     let outcome = SummaryCompactionTier::default().apply(session, &AgentConfig::default(), &ctx);
     assert!(matches!(outcome, CompactionOutcome::NotApplicable));

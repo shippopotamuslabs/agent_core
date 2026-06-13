@@ -52,7 +52,7 @@ fn fixed_kv_plan_includes_text_truncate_after_fifo() {
     };
     let cfg = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
     let policy = resolve_context_policy(&cfg, &caps, "LLAMA", 4096);
-    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096);
+    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096, false);
     assert!(plan.ordered_tiers.contains(&CompactionTier::Fifo));
     assert!(plan.ordered_tiers.contains(&CompactionTier::TextTruncate));
     assert_eq!(
@@ -116,6 +116,7 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
                     ..Default::default()
                 },
                 trigger: CompactionTrigger::Preflight,
+                suppress_summary_tier: false,
             };
             let pressure = estimate_session_pressure(
                 &AgentSession::new(req.session_messages.clone(), serde_json::Value::Null),
@@ -162,6 +163,7 @@ fn text_truncate_shrinks_truncatable_messages_when_over_hard_ceiling() {
             ..Default::default()
         },
         trigger: CompactionTrigger::Preflight,
+        suppress_summary_tier: false,
     };
 
     let before = estimate_session_pressure(&session, &cfg, &ctx);

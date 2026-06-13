@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn search_tools_repair_succeeds_in_global_catalog() {
+    fn legacy_search_tools_name_is_rejected() {
         let raw = RawToolCall {
             id: Some("c1".into()),
             name: "search_tools".into(),
@@ -117,10 +117,19 @@ mod tests {
         };
         let (catalog, semantics) = enclave_repair_env();
         let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
-        match out {
-            RepairOutcome::Repaired(rec) => assert_eq!(rec.name, "search_tools"),
-            other => panic!("expected Repaired, got {other:?}"),
-        }
+        assert!(matches!(out, RepairOutcome::Reject { .. }));
+    }
+
+    #[test]
+    fn legacy_discovery_query_argument_is_rejected() {
+        let raw = RawToolCall {
+            id: Some("c2".into()),
+            name: "tool_discovery_tool".into(),
+            arguments_json: r#"{"query":"start artifact"}"#.into(),
+        };
+        let (catalog, semantics) = enclave_repair_env();
+        let (out, _) = ToolRepairPipeline::repair_with_semantics(&raw, &catalog, &semantics);
+        assert!(matches!(out, RepairOutcome::Reject { .. }));
     }
 
     #[test]

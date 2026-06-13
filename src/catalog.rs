@@ -81,15 +81,16 @@ mod tests {
     }
 
     #[test]
-    fn search_tools_in_global_catalog() {
+    fn discovery_tool_in_global_catalog_has_no_legacy_alias() {
         let catalog = fixture_catalog();
-        let spec = catalog.resolve("search_tools").unwrap();
+        let spec = catalog.resolve("tool_discovery_tool").unwrap();
         assert!(spec.reproducible);
         let hint = spec.schema_hint.as_ref().unwrap();
         assert!(hint
             .required_fields
             .iter()
-            .any(|field| field.name == "query"));
+            .any(|field| field.name == "capability"));
+        assert!(catalog.resolve("search_tools").is_none());
     }
 
     #[test]
@@ -123,7 +124,7 @@ mod tests {
     fn reproducible_classification() {
         let cat = fixture_catalog();
         let reproducible = [
-            "search_tools",
+            "tool_discovery_tool",
             "web_search",
             "web_extract",
             "attached_image_inspect",

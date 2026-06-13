@@ -14,6 +14,7 @@ static STRONG_TOOL_MARKER_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"(?is)<!\[CDATA\[<tool").unwrap(),
         Regex::new(r"(?is)\[TOOL_CALLS]").unwrap(),
         Regex::new(r"(?is)\bcall\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\{").unwrap(),
+        Regex::new(r#"(?is)^\s*\{\s*"name"\s*:"#).unwrap(),
     ]
 });
 
@@ -57,6 +58,7 @@ static DSML_PARTIAL_STILL: Lazy<Regex> =
 pub enum TentativeKind {
     AngleBracket,
     CallColon,
+    BareJsonTool,
     DsmlPartial,
     ToolCallPartial,
     ToolCallsBracket,
@@ -152,6 +154,11 @@ pub fn earliest_tentative_trigger(text: &str, search_from: usize) -> Option<(usi
     let slice = &text[search_from..];
     let mut best: Option<(usize, TentativeKind)> = None;
 
+    let object_start = text.len() - text.trim_start().len();
+    if object_start >= search_from && text[object_start..].starts_with('{') {
+        best = Some((object_start, TentativeKind::BareJsonTool));
+    }
+
     for (name, regex) in PARTIAL_TOOL_MARKER_REGEXES.iter() {
         if let Some(found) = regex.find(slice) {
             let abs = search_from + found.start();
@@ -187,6 +194,7 @@ pub fn resolve_tentative_hold(suffix: &str, kind: TentativeKind) -> HoldResoluti
 
     match kind {
         TentativeKind::CallColon => resolve_call_colon(suffix),
+        TentativeKind::BareJsonTool => resolve_bare_json_tool(suffix),
         TentativeKind::AngleBracket => resolve_angle_bracket(suffix),
         TentativeKind::ToolCallPartial => resolve_tool_partial(suffix),
         TentativeKind::DsmlPartial => resolve_dsml_partial(suffix),
@@ -198,6 +206,32 @@ pub fn resolve_tentative_hold(suffix: &str, kind: TentativeKind) -> HoldResoluti
             }
         }
     }
+}
+
+fn resolve_bare_json_tool(suffix: &str) -> HoldResolution {
+    let Some(rest) = suffix.strip_prefix('{') else {
+        return HoldResolution::Disproved;
+    };
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return HoldResolution::StillTentative;
+    }
+
+    const NAME_KEY: &str = "\"name\"";
+    if NAME_KEY.starts_with(rest) {
+        return HoldResolution::StillTentative;
+    }
+    let Some(after_name) = rest.strip_prefix(NAME_KEY) else {
+        return HoldResolution::Disproved;
+    };
+    let after_name = after_name.trim_start();
+    if after_name.is_empty() {
+        return HoldResolution::StillTentative;
+    }
+    if after_name.starts_with(':') {
+        return HoldResolution::Confirmed;
+    }
+    HoldResolution::Disproved
 }
 
 fn resolve_call_colon(suffix: &str) -> HoldResolution {

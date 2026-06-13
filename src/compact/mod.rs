@@ -43,6 +43,8 @@ pub struct CompactionContext {
     pub capabilities: SessionCapabilities,
     /// Which phase of the turn loop triggered this compaction pass.
     pub trigger: CompactionTrigger,
+    /// When true, the host declined summarization for this pass (e.g. utility ONNX unavailable).
+    pub suppress_summary_tier: bool,
 }
 
 /// Full projected prompt pressure for compaction tiers and engine preflight checks.
@@ -162,6 +164,7 @@ mod tests {
                 ..Default::default()
             },
             trigger: CompactionTrigger::Preflight,
+            suppress_summary_tier: false,
         };
         assert_eq!(ctx.provider, "anthropic");
         assert_eq!(ctx.context_window_tokens, 200_000);

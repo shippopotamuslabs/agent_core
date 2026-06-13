@@ -1,10 +1,11 @@
 //! Turn-end envelope ingest (TOOL-PARSE-002).
 
+use crate::catalog::ToolCatalog;
 use crate::engine::leaked_tool_recovery::resolve_model_turn_text;
 use crate::tool_parse::envelope_error::{tools_blocked_nudge_json, TOOLS_BLOCKED_USER_FALLBACK};
 use crate::tool_parse::envelope_failure_json;
-use crate::catalog::ToolCatalog;
 use crate::tool_parse::parse_tool_calls_with_semantics;
+use crate::tool_parse::{ToolParseFailure, ToolParseFailureReason};
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
@@ -74,7 +75,18 @@ pub fn ingest_model_response_envelopes(
                 native_tool_calls.to_vec(),
             );
         }
-        return (EnvelopeIngestOutcome::NoMarkers, native_tool_calls.to_vec());
+        let failure = ToolParseFailure {
+            reason: ToolParseFailureReason::MalformedEnvelope,
+            original: text.to_string(),
+            format_hint: None,
+        };
+        return (
+            EnvelopeIngestOutcome::ParseFailed {
+                error_json_for_model: envelope_failure_json(&failure, catalog),
+                visible_assistant_text: resolution.visible_assistant_text,
+            },
+            native_tool_calls.to_vec(),
+        );
     }
 
     (

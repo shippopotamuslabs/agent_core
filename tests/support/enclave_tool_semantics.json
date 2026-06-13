@@ -1,8 +1,8 @@
 {
   "catalog": { "tools": [] },
   "discovery": {
-    "tool_name": "search_tools",
-    "request_field_name": "query",
+    "tool_name": "tool_discovery_tool",
+    "request_field_name": "capability",
     "always_callable": true,
     "companion_callable_tools": ["read_context_reference"]
   },

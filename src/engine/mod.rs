@@ -270,6 +270,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 sidecar_builder: SidecarBuilder::new(),
                 compaction_passes_this_turn: 0,
                 destructive_tiers_this_turn: 0,
+                suppress_summary_tier: false,
             })),
         }
     }
@@ -1189,9 +1190,36 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let ctx = g.pending_summary_ctx.take().expect("summary ctx");
         g.phase = EnginePhase::Idle;
 
+        if summary.summary_text.trim().is_empty() {
+            g.suppress_summary_tier = true;
+            let trigger = ctx.trigger;
+            match g.run_compaction_pass(trigger) {
+                Ok(Some(_)) => {}
+                Ok(None) => {}
+                Err(e) => {
+                    g.set_terminal(AgentAction::Failed(e));
+                }
+            }
+            g.suppress_summary_tier = false;
+            return;
+        }
+
         let cfg = g.config.clone();
         let message_count_before = g.session.messages.len() as u32;
         if let Err(reason) = apply_summary_result(&mut g.session, &req, &summary, &cfg, &ctx) {
+            if reason == "empty summary_text" {
+                g.suppress_summary_tier = true;
+                let trigger = ctx.trigger;
+                match g.run_compaction_pass(trigger) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {}
+                    Err(e) => {
+                        g.set_terminal(AgentAction::Failed(e));
+                    }
+                }
+                g.suppress_summary_tier = false;
+                return;
+            }
             g.set_terminal(AgentAction::Failed(AgentError::CompactionFailed {
                 tier: "summary".into(),
                 reason: reason.into(),
@@ -1417,6 +1445,7 @@ impl InnerSession {
             context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
             trigger,
+            suppress_summary_tier: self.suppress_summary_tier,
         }
     }
 
@@ -1474,6 +1503,7 @@ impl InnerSession {
                 &policy,
                 trigger,
                 self.io.context_window_tokens,
+                self.suppress_summary_tier,
             );
             let threshold_tokens = plan.threshold_tokens;
             let ratio_threshold_tokens = effective_threshold_tokens(
@@ -1740,7 +1770,7 @@ impl InnerSession {
                 }
                 CompactionOutcome::NotApplicable => {
                     let p2 = self.estimate_pressure(trigger);
-                    if should_compact_at_token_threshold(&p2, active_threshold_tokens)
+                    if exceeds_hard_prompt_ceiling(&p2)
                         && !entered_for_long_loop_only
                         && !sync_applied
                         && !defer_compaction_failure

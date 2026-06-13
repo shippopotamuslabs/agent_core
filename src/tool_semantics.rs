@@ -150,7 +150,7 @@ pub struct ToolDiscoverySemantics {
     pub tool_name: String,
     pub request_field_name: String,
     pub always_callable: bool,
-    /// Tools that may be called without a prior `search_tools` activation (e.g. context retrieval).
+    /// Tools that may be called without a prior `tool_discovery_tool` activation (e.g. context retrieval).
     #[serde(default)]
     pub companion_callable_tools: Vec<String>,
 }

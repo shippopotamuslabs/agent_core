@@ -307,6 +307,7 @@ mod tests {
                 ..Default::default()
             },
             trigger: CompactionTrigger::PostToolResult,
+            suppress_summary_tier: false,
         }
     }
 
