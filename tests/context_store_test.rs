@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use agent_core::compact::fifo::FifoCompactionTier;
 use agent_core::compact::history_snapshot::snapshot_history_range;
-use agent_core::compact::tool_spill::spill_tool_result_if_needed;
+use agent_core::compact::tool_spill::{
+    spill_tool_result_if_needed, DEFAULT_TOOL_OUTPUT_TTL_TURNS,
+};
 use agent_core::compact::{
     CompactionContext, CompactionOutcome, CompactionTier as CompactionTierTrait,
 };
-use agent_core::context_store::{ContextReferenceKind, ContextStore};
+use agent_core::action::AgentAction;
+use agent_core::context_store::{is_browsable_context_kind, ContextReferenceKind, ContextStore};
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, CompactionTrigger};
 use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
@@ -52,11 +55,85 @@ fn s8_oversized_tool_output_spills_to_context_reference() {
         .expect("spill expected for oversized output");
     assert_eq!(reference.kind, ContextReferenceKind::ToolOutput);
     assert_eq!(reference.byte_len, 200);
+    assert!(reference.title.contains("@turn:0"));
+    assert_eq!(
+        store
+            .get("tool-output-call-1")
+            .expect("spilled entry")
+            .expires_after_turn,
+        Some(DEFAULT_TOOL_OUTPUT_TTL_TURNS)
+    );
     assert!(
         result.result_json.contains("context_ref"),
         "stored tool message content must contain 'context_ref' marker, got {}",
         result.result_json
     );
+}
+
+#[test]
+fn tool_output_ttl_expires_after_turn_boundary() {
+    let mut store = ContextStore::default();
+    let call = ToolCallRecord {
+        call_id: "call-ttl".into(),
+        name: "web_search".into(),
+        arguments_json: "{}".into(),
+        attempt_metadata: None,
+        repair_metadata: None,
+    };
+    let mut result = ToolResultRecord {
+        call_id: "call-ttl".into(),
+        result_json: "x".repeat(200),
+        truncated: false,
+        soft_failure: false,
+        activated_tool_names: Vec::new(),
+        result_metadata: None,
+    };
+    spill_tool_result_if_needed(&mut store, &mut result, &call, 64, 1);
+    assert!(store.get("tool-output-call-ttl").is_some());
+    let removed = store.expire_after_turn(3);
+    assert_eq!(removed, vec!["tool-output-call-ttl".to_string()]);
+    assert!(store.get("tool-output-call-ttl").is_none());
+}
+
+#[test]
+fn duplicate_spill_content_dedupes_to_newest_reference() {
+    let mut store = ContextStore::default();
+    let call_a = ToolCallRecord {
+        call_id: "call-a".into(),
+        name: "web_search".into(),
+        arguments_json: "{}".into(),
+        attempt_metadata: None,
+        repair_metadata: None,
+    };
+    let call_b = ToolCallRecord {
+        call_id: "call-b".into(),
+        name: "web_search".into(),
+        arguments_json: "{}".into(),
+        attempt_metadata: None,
+        repair_metadata: None,
+    };
+    let payload = "IDENTICAL_SPILL_PAYLOAD".repeat(10);
+    let mut result_a = ToolResultRecord {
+        call_id: "call-a".into(),
+        result_json: payload.clone(),
+        truncated: false,
+        soft_failure: false,
+        activated_tool_names: Vec::new(),
+        result_metadata: None,
+    };
+    let mut result_b = ToolResultRecord {
+        call_id: "call-b".into(),
+        result_json: payload,
+        truncated: false,
+        soft_failure: false,
+        activated_tool_names: Vec::new(),
+        result_metadata: None,
+    };
+    spill_tool_result_if_needed(&mut store, &mut result_a, &call_a, 64, 0);
+    spill_tool_result_if_needed(&mut store, &mut result_b, &call_b, 64, 0);
+    assert!(store.get("tool-output-call-a").is_none());
+    assert!(store.get("tool-output-call-b").is_some());
+    assert_eq!(store.len(), 1);
 }
 
 #[test]
@@ -166,6 +243,64 @@ fn s10_summarized_history_range_remains_searchable() {
     let hits = store.search("ToolSpill", 5);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].kind, ContextReferenceKind::HistorySnapshot);
+}
+
+#[test]
+fn browsable_context_references_exclude_infrastructure_kinds() {
+    let mut cfg = AgentConfig::default();
+    cfg.enable_tool_schema_deferral = true;
+    let caps = SessionCapabilities {
+        tool_schema_deferral_supported: true,
+        ..Default::default()
+    };
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(PanicExec),
+        Arc::new(NoOpSummarizer),
+    );
+    let handle = eng.create_session(
+        vec![AgentMessage {
+            id: "u1".into(),
+            role: AgentRole::User,
+            content: "hi".into(),
+            metadata: serde_json::Value::Null,
+        }],
+        cfg,
+        caps,
+        serde_json::Value::Null,
+        SessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry_json: "[]".into(),
+            tools_schema_json: r#"[{"name":"web_search"}]"#.into(),
+            system_prompt: "sys".into(),
+        },
+    );
+
+    let req = match eng.next_action(&handle) {
+        AgentAction::CallModel(req) => req,
+        other => panic!("expected CallModel, got {other:?}"),
+    };
+    assert!(
+        req.context_references
+            .iter()
+            .all(|reference| is_browsable_context_kind(&reference.kind)),
+        "model-facing refs must be browsable only: {:?}",
+        req.context_references
+    );
+    assert!(
+        !req.context_references
+            .iter()
+            .any(|reference| reference.kind == ContextReferenceKind::ToolSchema),
+        "ToolSchema must not appear in browsable sidecar"
+    );
+    assert!(
+        !req.context_references
+            .iter()
+            .any(|reference| reference.kind == ContextReferenceKind::ToolCatalogIndex),
+        "ToolCatalogIndex must not appear in browsable sidecar"
+    );
 }
 
 #[test]

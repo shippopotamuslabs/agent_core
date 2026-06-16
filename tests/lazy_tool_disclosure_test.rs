@@ -166,17 +166,15 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
         tool_names(&request.tools_schema_json),
         vec!["tool_discovery_tool", "web_search", "web_extract"]
     );
+    // Discovery is real: advertised_tools lists only the active/callable subset, never the
+    // deferred catalog. Deferred tools (search_chat_history, append_blocks, ...) must be
+    // surfaced via tool_discovery_tool, not listed up front.
     assert_eq!(
         advertised,
-        vec![
-            "tool_discovery_tool",
-            "web_search",
-            "web_extract",
-            "search_chat_history",
-            "append_blocks",
-            "search_current_artifact",
-        ]
+        vec!["tool_discovery_tool", "web_search", "web_extract"]
     );
+    // The full registry is still stashed behind full_schema_ref so a disclosed tool's
+    // schema can be retrieved after activation.
     assert!(stored_registry.contains("\"append_blocks\""));
 }
 

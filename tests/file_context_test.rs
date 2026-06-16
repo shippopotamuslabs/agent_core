@@ -40,11 +40,11 @@ fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
         {
             "path": "src/large.rs",
             "token_estimate": 500,
-            "content": "pub fn alpha() {}\nstruct Beta {}\nfn gamma() {}"
+            "content": "// license header\npub fn alpha() {}\nstruct Beta {}\nfn gamma() {}"
         }
     ]);
 
-    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps)
+    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps, 0)
         .expect("file context index");
 
     assert_eq!(index.included_paths.len(), 1);
@@ -56,7 +56,8 @@ fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
     let outline = store.get(outline_ref).expect("stored outline");
     assert!(outline.content.contains("pub fn alpha"));
     let chunk = store.get(&summary.chunk_refs[0]).expect("stored chunk");
-    assert!(chunk.content.contains("fn gamma"));
+    assert!(chunk.content.contains("license header"));
+    assert!(!outline.content.contains("license header"));
 }
 
 #[test]
@@ -77,7 +78,7 @@ fn e7_unparseable_file_context_becomes_filename_only() {
         }
     ]);
 
-    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps)
+    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps, 0)
         .expect("file context index");
 
     assert_eq!(index.included_paths.len(), 1);

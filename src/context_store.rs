@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +46,38 @@ pub struct ContextStoreEntry {
 
 const PREVIEW_MAX_CHARS: usize = 160;
 
+/// Suffix appended to browsable reference titles for turn-aware freshness in Kotlin hosts.
+pub const CONTEXT_REFERENCE_TURN_SUFFIX: &str = "@turn:";
+
+/// Appends [`CONTEXT_REFERENCE_TURN_SUFFIX`] + turn index when the title does not already carry turn metadata.
+pub fn append_turn_suffix(title: impl AsRef<str>, turn_index: u32) -> String {
+    let title = title.as_ref();
+    if title.contains(CONTEXT_REFERENCE_TURN_SUFFIX) {
+        title.to_string()
+    } else {
+        format!("{title} {CONTEXT_REFERENCE_TURN_SUFFIX}{turn_index}")
+    }
+}
+
+/// Kinds exposed in the model-facing browsable context-reference sidecar.
+pub fn is_browsable_context_kind(kind: &ContextReferenceKind) -> bool {
+    matches!(
+        kind,
+        ContextReferenceKind::ToolOutput
+            | ContextReferenceKind::FileOutline
+            | ContextReferenceKind::FileChunk
+            | ContextReferenceKind::HistorySnapshot
+            | ContextReferenceKind::TerminalOutput
+            | ContextReferenceKind::ArtifactSnapshot
+    )
+}
+
+fn content_fingerprint(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Build a short preview of the content (single-line, head-clipped).
 pub fn make_preview(content: &str) -> String {
     let one_line: String = content
@@ -69,6 +103,23 @@ pub struct ContextStore {
 
 impl ContextStore {
     pub fn insert_entry(&mut self, entry: ContextStoreEntry) -> ContextReference {
+        let fingerprint = content_fingerprint(&entry.content);
+        let to_remove: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|(id, existing)| {
+                if content_fingerprint(&existing.content) == fingerprint
+                    && existing.content == entry.content
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in to_remove {
+            self.entries.remove(&id);
+        }
         let reference = entry.reference.clone();
         self.entries.insert(reference.id.clone(), entry);
         reference
@@ -174,7 +225,7 @@ pub fn insert_terminal_output(
     let reference = ContextReference {
         id: id.clone(),
         kind: ContextReferenceKind::TerminalOutput,
-        title,
+        title: append_turn_suffix(title, turn_index),
         byte_len: content.len() as u64,
         token_estimate: (content.len() / 4) as u32,
         preview: make_preview(&content),
@@ -232,6 +283,33 @@ mod tests {
         let hits = store.search("rare_token", 5);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "a");
+    }
+
+    #[test]
+    fn dedup_keeps_newest_reference_for_duplicate_content() {
+        let mut store = ContextStore::default();
+        store.insert_entry(entry("old", ContextReferenceKind::ToolOutput, "dup payload"));
+        store.insert_entry(entry("new", ContextReferenceKind::ToolOutput, "dup payload"));
+        assert!(store.get("old").is_none());
+        assert_eq!(store.get("new").unwrap().content, "dup payload");
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn dedup_preserves_distinct_content_with_same_fingerprint_collision_guard() {
+        let mut store = ContextStore::default();
+        store.insert_entry(entry("a", ContextReferenceKind::ToolOutput, "payload-a"));
+        store.insert_entry(entry("b", ContextReferenceKind::ToolOutput, "payload-b"));
+        assert!(store.get("a").is_some());
+        assert!(store.get("b").is_some());
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn is_browsable_context_kind_excludes_infrastructure_refs() {
+        assert!(is_browsable_context_kind(&ContextReferenceKind::ToolOutput));
+        assert!(!is_browsable_context_kind(&ContextReferenceKind::ToolSchema));
+        assert!(!is_browsable_context_kind(&ContextReferenceKind::ToolCatalogIndex));
     }
 
     #[test]

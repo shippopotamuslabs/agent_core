@@ -2,7 +2,8 @@
 //! and replace the prompt-facing payload with a compact `context_ref` envelope.
 
 use crate::context_store::{
-    make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
+    append_turn_suffix, make_preview, ContextReference, ContextReferenceKind, ContextStore,
+    ContextStoreEntry,
 };
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole};
@@ -10,6 +11,9 @@ use crate::message::{ToolCallRecord, ToolResultRecord};
 use crate::session::{AgentConfig, AgentSession};
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
+
+/// Tool-output references expire this many turns after spill (inclusive turn index).
+pub const DEFAULT_TOOL_OUTPUT_TTL_TURNS: u32 = 2;
 
 /// Build the canonical reference id used for a spilled tool output.
 pub fn tool_output_reference_id(call_id: &str) -> String {
@@ -57,7 +61,10 @@ pub fn spill_tool_result_if_needed(
         return None;
     }
     let id = tool_output_reference_id(&result.call_id);
-    let title = format!("tool_output:{}:{}", call.name, result.call_id);
+    let title = append_turn_suffix(
+        format!("tool_output:{}:{}", call.name, result.call_id),
+        turn_index,
+    );
     let preview = make_preview(&result.result_json);
     let token_estimate = (len / 4) as u32;
     let reference = ContextReference {
@@ -74,7 +81,7 @@ pub fn spill_tool_result_if_needed(
         content: result.result_json.clone(),
         source_message_ids: vec![format!("tool-{}", result.call_id)],
         created_turn_index: turn_index,
-        expires_after_turn: None,
+        expires_after_turn: Some(turn_index + DEFAULT_TOOL_OUTPUT_TTL_TURNS),
     };
     let inserted = store.insert_entry(entry);
     // Replace the prompt-facing payload with a compact envelope.
@@ -119,7 +126,7 @@ pub fn spill_tool_messages_in_session(
         let reference = ContextReference {
             id: id.clone(),
             kind: ContextReferenceKind::ToolOutput,
-            title: format!("tool_output:{}", message.id),
+            title: append_turn_suffix(format!("tool_output:{}", message.id), turn_index),
             byte_len: content.len() as u64,
             token_estimate: (content.len() / 4) as u32,
             preview: make_preview(&content),
@@ -130,7 +137,7 @@ pub fn spill_tool_messages_in_session(
             content,
             source_message_ids: vec![message.id.clone()],
             created_turn_index: turn_index,
-            expires_after_turn: None,
+            expires_after_turn: Some(turn_index + DEFAULT_TOOL_OUTPUT_TTL_TURNS),
         };
         let inserted = store.insert_entry(entry);
         message.content = spill_envelope(&inserted);

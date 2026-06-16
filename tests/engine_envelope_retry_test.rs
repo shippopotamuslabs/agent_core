@@ -164,8 +164,8 @@ fn e_01_malformed_dsml_retries_model() {
     assert!(
         tool_role_messages(&snapshot)
             .iter()
-            .any(|m| m.metadata.get("agent_tool_budget").is_some()),
-        "E-01 budget sidecar"
+            .all(|m| m.metadata.get("agent_tool_budget").is_none()),
+        "E-01 skips budget injection until remaining <= 5 or tools disabled"
     );
 }
 

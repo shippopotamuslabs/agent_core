@@ -92,6 +92,7 @@ pub fn condense_file_context(
     store: &mut ContextStore,
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
+    turn_index: u32,
 ) -> Option<FileContextIndex> {
     if !config.enable_file_condensation {
         return None;
@@ -136,7 +137,10 @@ pub fn condense_file_context(
                     reference: ContextReference {
                         id: outline_id.clone(),
                         kind: ContextReferenceKind::FileOutline,
-                        title: format!("outline:{}", file.path),
+                        title: crate::context_store::append_turn_suffix(
+                            format!("outline:{}", file.path),
+                            turn_index,
+                        ),
                         byte_len: outline_body.len() as u64,
                         token_estimate: (outline_body.len() / 4) as u32,
                         preview: make_preview(&outline_body),
@@ -144,7 +148,7 @@ pub fn condense_file_context(
                     },
                     content: outline_body,
                     source_message_ids: vec![],
-                    created_turn_index: 0,
+                    created_turn_index: turn_index,
                     expires_after_turn: None,
                 };
                 let outline = store.insert_entry(outline_entry);
@@ -155,7 +159,10 @@ pub fn condense_file_context(
                     reference: ContextReference {
                         id: chunk_id.clone(),
                         kind: ContextReferenceKind::FileChunk,
-                        title: format!("chunk:{}", file.path),
+                        title: crate::context_store::append_turn_suffix(
+                            format!("chunk:{}", file.path),
+                            turn_index,
+                        ),
                         byte_len: file.content.len() as u64,
                         token_estimate: file.token_estimate,
                         preview: make_preview(&file.content),
@@ -163,7 +170,7 @@ pub fn condense_file_context(
                     },
                     content: file.content.clone(),
                     source_message_ids: vec![],
-                    created_turn_index: 0,
+                    created_turn_index: turn_index,
                     expires_after_turn: None,
                 };
                 let chunk = store.insert_entry(chunk_entry);
