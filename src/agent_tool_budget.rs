@@ -42,6 +42,31 @@ pub enum InjectOutcome {
         message_id: String,
     },
     SkippedNoToolMessages,
+    /// Budget is healthy (remaining > 5 and tools still allowed).
+    SkippedInjectionThreshold,
+}
+
+/// Returns true when the engine should append a synthetic budget sidecar message.
+pub fn should_inject_budget(meta: &AgentToolBudgetMeta) -> bool {
+    meta.tool_calls_remaining <= 5 || !meta.allow_tool_call
+}
+
+/// Builds plain-prose budget content for the synthetic tool sidecar (XML envelope).
+pub fn build_budget_prose_content(meta: &AgentToolBudgetMeta) -> String {
+    let status = if meta.allow_tool_call {
+        "Tools enabled.".to_string()
+    } else if let Some(reason) = meta.reason {
+        format!("Tools disabled ({}).", reason.as_json_str())
+    } else {
+        "Tools disabled.".to_string()
+    };
+    format!(
+        "<system_context>\nTool budget: {}/{} used ({} remaining). {}\n</system_context>",
+        meta.tool_calls_used,
+        meta.tool_calls_limit,
+        meta.tool_calls_remaining,
+        status
+    )
 }
 
 /// Resolves shutdown reason from guardrail counters (first failing predicate wins).
@@ -101,7 +126,7 @@ pub fn merge_budget_into_tool_content(content: &str, meta: &AgentToolBudgetMeta)
     serde_json::to_string(&root).unwrap_or_else(|_| content.to_string())
 }
 
-/// Builds a synthetic tool message containing only `{"_agent":{...}}`.
+/// Builds a synthetic tool message carrying engine-internal budget prose in XML.
 ///
 /// [seq] disambiguates multiple tool batches in the same user turn so each inject appends
 /// a new message instead of rewriting a prior slot (prompt-cache prefix stability).
@@ -113,8 +138,7 @@ pub fn build_synthetic_budget_message(
     AgentMessage {
         id: format!("tool-agent-budget-{turn_index}-{seq}"),
         role: AgentRole::Tool,
-        content: serde_json::to_string(&json!({ "_agent": agent_object_from_meta(meta) }))
-            .unwrap_or_else(|_| "{}".into()),
+        content: build_budget_prose_content(meta),
         metadata: json!({ "agent_tool_budget": true }),
     }
 }
@@ -132,6 +156,9 @@ pub fn inject_tool_budget_into_session(
 ) -> InjectOutcome {
     if last_batch_tool_message_index.is_none() {
         return InjectOutcome::SkippedNoToolMessages;
+    }
+    if !should_inject_budget(meta) {
+        return InjectOutcome::SkippedInjectionThreshold;
     }
     let seq = session
         .messages
@@ -234,6 +261,34 @@ mod tests {
         assert_eq!(agent["tool_calls_used"], 3, "TB-06 used");
         assert_eq!(agent["tool_calls_remaining"], 17, "TB-06 remaining");
         assert_eq!(agent["tool_calls_limit"], 20, "TB-06 limit");
+    }
+
+    /// C1 — inject only when remaining <= 5 or tools disallowed.
+    #[test]
+    fn c1_should_inject_budget_threshold() {
+        assert!(!should_inject_budget(&meta(1, 20, true, None)));
+        assert!(should_inject_budget(&meta(15, 20, true, None)));
+        assert!(should_inject_budget(&meta(1, 20, false, None)));
+    }
+
+    /// C1 — prose XML envelope (not JSON).
+    #[test]
+    fn c1_budget_prose_content_format() {
+        let snapshot = meta(3, 50, true, None);
+        assert_eq!(
+            build_budget_prose_content(&snapshot),
+            "<system_context>\nTool budget: 3/50 used (47 remaining). Tools enabled.\n</system_context>"
+        );
+        let exhausted = meta(
+            1,
+            1,
+            false,
+            Some(ToolBudgetShutdownReason::ToolCallBudgetExhausted),
+        );
+        assert_eq!(
+            build_budget_prose_content(&exhausted),
+            "<system_context>\nTool budget: 1/1 used (0 remaining). Tools disabled (tool_call_budget_exhausted).\n</system_context>"
+        );
     }
 
     /// MD-04 — `reason` absent when `allow_tool_call` is true.

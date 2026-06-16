@@ -1,7 +1,8 @@
 //! Persist artifact continuation state before squashing append loops.
 
 use crate::context_store::{
-    make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
+    append_turn_suffix, make_preview, ContextReference, ContextReferenceKind, ContextStore,
+    ContextStoreEntry,
 };
 use crate::state_ledger::ArtifactStateAnchor;
 
@@ -20,7 +21,7 @@ pub fn persist_artifact_snapshot(
     let reference = ContextReference {
         id: id.clone(),
         kind: ContextReferenceKind::ArtifactSnapshot,
-        title: format!("artifact_snapshot:{}", anchor.artifact_id),
+        title: append_turn_suffix(format!("artifact_snapshot:{}", anchor.artifact_id), turn_index),
         byte_len: content.len() as u64,
         token_estimate: (content.len() / 4) as u32,
         preview: make_preview(&content),

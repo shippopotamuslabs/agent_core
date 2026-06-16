@@ -58,13 +58,13 @@ pub fn build_tool_context_index(
 }
 
 /// Build the tool-context index using the tool-discovery split:
-/// - `catalog_json` supplies the compact catalog (drives `advertised_tools`).
-/// - `registry_json` supplies the full schema registry (persisted behind `full_schema_ref`).
-/// - `tools_schema_json` represents the currently active schemas.
-///
-/// When `catalog_json` is non-empty, the catalog is the authoritative source for
-/// `advertised_tools` and the registry is what gets stashed. When the catalog is empty,
-/// the legacy behavior derives summaries directly from `tools_schema_json`.
+/// - `tools_schema_json` represents the currently active (callable) schemas and is the
+///   sole source for `advertised_tools` — discovery must be real, so deferred tools are
+///   never listed up front and can only be surfaced via `tool_discovery_tool`.
+/// - `catalog_json` is retained for the presence guard (a session with neither active
+///   tools nor a catalog has nothing to index).
+/// - `registry_json` supplies the full schema registry (persisted behind `full_schema_ref`)
+///   so an activated tool's full schema can be retrieved on disclosure.
 pub fn build_tool_context_index_with_registry(
     tools_schema_json: &str,
     catalog_json: &str,
@@ -131,11 +131,9 @@ pub fn build_tool_context_index_with_registry(
         }
     };
 
-    let advertised_source = if catalog_entries.is_empty() {
-        fallback_entries
-    } else {
-        catalog_entries
-    };
+    // Advertise only the active/callable tools. Deferred catalog tools stay hidden until
+    // the model activates them through `tool_discovery_tool` (capability search).
+    let advertised_source = fallback_entries;
 
     let summaries: Vec<ToolContextSummary> = advertised_source
         .into_iter()

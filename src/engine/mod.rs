@@ -37,7 +37,9 @@ use crate::compact::{
     },
     CompactionContext, CompactionOutcome, CompactionPipeline, CompactionTier as _,
 };
-use crate::context_store::{insert_terminal_output, ContextReference, ContextStore};
+use crate::context_store::{
+    insert_terminal_output, is_browsable_context_kind, ContextReference, ContextStore,
+};
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 use crate::file_context::condense_file_context;
 use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
@@ -1806,6 +1808,7 @@ impl InnerSession {
         }
 
         self.turn_index += 1;
+        self.context_store.expire_after_turn(self.turn_index);
         // Reset per-turn telemetry counters for the new user turn.
         self.compaction_passes_this_turn = 0;
         self.destructive_tiers_this_turn = 0;
@@ -2033,6 +2036,7 @@ impl InnerSession {
                     &mut self.context_store,
                     &self.config,
                     &self.capabilities,
+                    self.turn_index,
                 )
             });
 
@@ -2080,6 +2084,7 @@ impl InnerSession {
             context_references: self
                 .context_store
                 .entries()
+                .filter(|entry| is_browsable_context_kind(&entry.reference.kind))
                 .map(|entry| entry.reference.clone())
                 .collect(),
             state_ledger: self

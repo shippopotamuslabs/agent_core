@@ -2,7 +2,8 @@
 //! before destructive compaction (summary or FIFO).
 
 use crate::context_store::{
-    make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
+    append_turn_suffix, make_preview, ContextReference, ContextReferenceKind, ContextStore,
+    ContextStoreEntry,
 };
 use crate::events::CompactionTrigger;
 use crate::message::AgentMessage;
@@ -42,11 +43,14 @@ pub fn snapshot_history_range(
     let id = history_snapshot_reference_id(messages);
     let content = serialize_range(messages);
     let len = content.len();
-    let title = format!(
-        "history_snapshot:{:?}:{}..{}",
-        source,
-        messages.first().unwrap().id,
-        messages.last().unwrap().id
+    let title = append_turn_suffix(
+        format!(
+            "history_snapshot:{:?}:{}..{}",
+            source,
+            messages.first().unwrap().id,
+            messages.last().unwrap().id
+        ),
+        turn_index,
     );
     let reference = ContextReference {
         id: id.clone(),

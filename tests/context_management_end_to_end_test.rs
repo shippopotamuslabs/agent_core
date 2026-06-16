@@ -168,7 +168,6 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         ContextReferenceKind::ToolOutput,
         ContextReferenceKind::HistorySnapshot,
         ContextReferenceKind::ArtifactSnapshot,
-        ContextReferenceKind::FileOutline,
     ] {
         assert!(
             kinds.contains(&required),
@@ -177,6 +176,12 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
             kinds
         );
     }
+    assert!(
+        kinds.contains(&ContextReferenceKind::FileOutline)
+            || kinds.contains(&ContextReferenceKind::FileChunk),
+        "file condensation ref missing; got {:?}",
+        kinds
+    );
 
     let pressure = TokenLedger::estimate(
         &AgentSession::new(req.session_messages.clone(), serde_json::Value::Null),

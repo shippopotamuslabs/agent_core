@@ -120,11 +120,48 @@ fn parse_json(content: &str) -> Value {
     serde_json::from_str(content).expect("valid json")
 }
 
-fn agent_block(content: &str) -> Value {
-    parse_json(content)
-        .get("_agent")
-        .cloned()
-        .expect("_agent key")
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedBudgetProse {
+    used: u32,
+    limit: u32,
+    remaining: u32,
+    allow_tool_call: bool,
+    reason: Option<String>,
+}
+
+fn parse_budget_prose(content: &str) -> ParsedBudgetProse {
+    let inner = content
+        .strip_prefix("<system_context>\n")
+        .and_then(|s| s.strip_suffix("\n</system_context>"))
+        .unwrap_or_else(|| panic!("expected budget prose XML, got {content}"));
+    let rest = inner
+        .strip_prefix("Tool budget: ")
+        .expect("budget prefix");
+    let (used_limit, rest) = rest.split_once(" used ").expect("used clause");
+    let (used_str, limit_str) = used_limit.split_once('/').expect("used/limit");
+    let open = rest.strip_prefix('(').expect("remaining open paren");
+    let (remaining_str, status) = open
+        .split_once(" remaining). ")
+        .expect("remaining clause");
+    let (allow_tool_call, reason) = if status == "Tools enabled." {
+        (true, None)
+    } else if let Some(reason) = status
+        .strip_prefix("Tools disabled (")
+        .and_then(|s| s.strip_suffix(")."))
+    {
+        (false, Some(reason.to_string()))
+    } else if status == "Tools disabled." {
+        (false, None)
+    } else {
+        panic!("unexpected budget status line: {status}");
+    };
+    ParsedBudgetProse {
+        used: used_str.parse().expect("used"),
+        limit: limit_str.parse().expect("limit"),
+        remaining: remaining_str.parse().expect("remaining"),
+        allow_tool_call,
+        reason,
+    }
 }
 
 fn tool_msg_by_call_id<'a>(messages: &'a [AgentMessage], call_id: &str) -> &'a AgentMessage {
@@ -135,11 +172,8 @@ fn tool_msg_by_call_id<'a>(messages: &'a [AgentMessage], call_id: &str) -> &'a A
         .unwrap_or_else(|| panic!("tool message for call_id {call_id}"))
 }
 
-fn count_agent_bearing_tool_messages(messages: &[AgentMessage]) -> usize {
-    messages
-        .iter()
-        .filter(|m| m.role == AgentRole::Tool && m.content.contains("_agent"))
-        .count()
+fn count_budget_prose_tool_messages(messages: &[AgentMessage]) -> usize {
+    synthetic_budget_messages(messages).len()
 }
 
 fn is_agent_tool_budget_message(message: &AgentMessage) -> bool {
@@ -236,12 +270,12 @@ fn tb_01_single_tool_result_merges_agent_mid_loop() {
         "TB-01 tool payload must not be mutated for prompt-cache stability"
     );
     assert!(parsed.get("results").is_some(), "TB-01 results present");
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 17, "TB-01 used");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-01 limit");
-    assert_eq!(agent["tool_calls_remaining"], 3, "TB-01 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-01 allow");
-    assert!(agent.get("reason").is_none(), "TB-01 reason absent");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(prose.used, 17, "TB-01 used");
+    assert_eq!(prose.limit, 20, "TB-01 limit");
+    assert_eq!(prose.remaining, 3, "TB-01 remaining");
+    assert!(prose.allow_tool_call, "TB-01 allow");
+    assert!(prose.reason.is_none(), "TB-01 reason absent");
 }
 
 /// TB-02 — parallel batch leaves tool payloads clean; one synthetic budget row.
@@ -255,6 +289,7 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
+    h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
     drive_model_tool_batch(
         &eng,
@@ -307,16 +342,16 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
         1,
         "TB-02 one synthetic budget row per batch"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 3, "TB-02 used");
-    assert_eq!(agent["tool_calls_remaining"], 17, "TB-02 remaining");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-02 limit");
-    assert_eq!(agent["allow_tool_call"], true, "TB-02 allow");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(prose.used, 19, "TB-02 used");
+    assert_eq!(prose.remaining, 1, "TB-02 remaining");
+    assert_eq!(prose.limit, 20, "TB-02 limit");
+    assert!(prose.allow_tool_call, "TB-02 allow");
 }
 
-/// TB-03 — first tool call reports full remaining budget.
+/// TB-03 — healthy budget skips synthetic injection.
 #[test]
-fn tb_03_first_tool_call_reports_full_remaining_budget() {
+fn tb_03_healthy_budget_skips_synthetic_injection() {
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
         Arc::new(RecordingExecutor {
@@ -331,14 +366,13 @@ fn tb_03_first_tool_call_reports_full_remaining_budget() {
     let snapshot = h.integration_test_snapshot();
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     assert!(
-        !tool_msg.content.contains("_agent"),
+        !tool_msg.content.contains("<system_context>"),
         "TB-03 tool payload must stay unmerged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 1, "TB-03 used");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-03 limit");
-    assert_eq!(agent["tool_calls_remaining"], 19, "TB-03 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-03 allow");
+    assert!(
+        synthetic_budget_messages(&snapshot.messages).is_empty(),
+        "TB-03 skips injection when remaining > 5"
+    );
 }
 
 /// TB-04 — tool-call budget exhausted.
@@ -364,13 +398,13 @@ fn tb_04_budget_exhausted_disables_tools_with_reason() {
         !tool_msg.content.contains("_agent"),
         "TB-04 tool payload unmerged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 1, "TB-04 used");
-    assert_eq!(agent["tool_calls_limit"], 1, "TB-04 limit");
-    assert_eq!(agent["tool_calls_remaining"], 0, "TB-04 remaining");
-    assert_eq!(agent["allow_tool_call"], false, "TB-04 allow");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(prose.used, 1, "TB-04 used");
+    assert_eq!(prose.limit, 1, "TB-04 limit");
+    assert_eq!(prose.remaining, 0, "TB-04 remaining");
+    assert!(!prose.allow_tool_call, "TB-04 allow");
     assert_eq!(
-        agent["reason"].as_str(),
+        prose.reason.as_deref(),
         Some("tool_call_budget_exhausted"),
         "TB-04 reason"
     );
@@ -403,16 +437,16 @@ fn tb_05_soft_failure_streak_sets_reason() {
         !tool_msg.content.contains("_agent"),
         "TB-05 tool payload unmerged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["allow_tool_call"], false, "TB-05 allow");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert!(!prose.allow_tool_call, "TB-05 allow");
     assert_eq!(
-        agent["reason"].as_str(),
+        prose.reason.as_deref(),
         Some("soft_failure_streak_exhausted"),
         "TB-05 reason"
     );
-    assert_eq!(agent["tool_calls_used"], 6, "TB-05 used");
-    assert_eq!(agent["tool_calls_remaining"], 14, "TB-05 remaining");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-05 limit");
+    assert_eq!(prose.used, 6, "TB-05 used");
+    assert_eq!(prose.remaining, 14, "TB-05 remaining");
+    assert_eq!(prose.limit, 20, "TB-05 limit");
 }
 
 /// TB-06 — envelope-parse streak exhausted.
@@ -443,16 +477,16 @@ fn tb_06_envelope_parse_streak_sets_reason() {
     );
 
     let snapshot = h.integration_test_snapshot();
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["allow_tool_call"], false, "TB-06 allow");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert!(!prose.allow_tool_call, "TB-06 allow");
     assert_eq!(
-        agent["reason"].as_str(),
+        prose.reason.as_deref(),
         Some("envelope_parse_streak_exhausted"),
         "TB-06 reason"
     );
-    assert_eq!(agent["tool_calls_used"], 3, "TB-06 used");
-    assert_eq!(agent["tool_calls_remaining"], 17, "TB-06 remaining");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-06 limit");
+    assert_eq!(prose.used, 3, "TB-06 used");
+    assert_eq!(prose.remaining, 17, "TB-06 remaining");
+    assert_eq!(prose.limit, 20, "TB-06 limit");
 }
 
 /// TB-07 — plain-text tool result appends synthetic budget message.
@@ -473,14 +507,10 @@ fn tb_07_non_json_tool_result_appends_synthetic_budget_message() {
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     assert_eq!(tool_msg.content, "OK: 3 files", "TB-07 original content");
 
-    let synthetic = latest_synthetic_budget_message(&snapshot.messages);
-    assert_eq!(synthetic.id, "tool-agent-budget-1-0", "TB-07 synthetic id");
-    let agent = agent_block(&synthetic.content);
-    assert_eq!(agent["tool_calls_used"], 1, "TB-07 used");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-07 limit");
-    assert_eq!(agent["tool_calls_remaining"], 19, "TB-07 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-07 allow");
-    assert!(agent.get("reason").is_none(), "TB-07 reason absent");
+    assert!(
+        synthetic_budget_messages(&snapshot.messages).is_empty(),
+        "TB-07 skips injection for healthy budget on plain-text result"
+    );
 }
 
 /// TB-08 — JSON array tool result appends synthetic budget message.
@@ -501,15 +531,10 @@ fn tb_08_json_array_result_appends_synthetic_budget_message() {
     let tool_msg = tool_msg_by_call_id(&snapshot.messages, "c1");
     assert_eq!(tool_msg.content, "[1,2,3]", "TB-08 original array content");
 
-    assert_eq!(
-        synthetic_budget_messages(&snapshot.messages).len(),
-        1,
-        "TB-08 one synthetic message"
+    assert!(
+        synthetic_budget_messages(&snapshot.messages).is_empty(),
+        "TB-08 skips injection for healthy budget on array result"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 1, "TB-08 used");
-    assert_eq!(agent["allow_tool_call"], true, "TB-08 allow");
-    assert!(agent.get("reason").is_none(), "TB-08 reason absent");
 }
 
 /// TB-09 — greedy append_blocks raises limit to 35.
@@ -523,7 +548,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, enclave_test_agent_config());
-    h.integration_test_seed_guardrails(20, 0, 0, vec!["append_blocks".into()]);
+    h.integration_test_seed_guardrails(35, 0, 0, vec!["append_blocks".into()]);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -540,7 +565,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         },
     );
     // Non-append tool responses clear greedy flag; re-seed before budget injection.
-    h.integration_test_seed_guardrails(20, 0, 0, vec!["append_blocks".into()]);
+    h.integration_test_seed_guardrails(35, 0, 0, vec!["append_blocks".into()]);
     match eng.next_action(&h) {
         AgentAction::ExecuteTools(_) => {}
         other => panic!("TB-09 expected ExecuteTools, got {other:?}"),
@@ -563,11 +588,10 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         !tool_msg.content.contains("_agent"),
         "TB-09 tool payload unmerged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_limit"], 41, "TB-09 limit");
-    assert_eq!(agent["tool_calls_used"], 21, "TB-09 used");
-    assert_eq!(agent["tool_calls_remaining"], 20, "TB-09 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-09 allow");
+    assert!(
+        synthetic_budget_messages(&snapshot.messages).is_empty(),
+        "TB-09 greedy extension keeps remaining above injection threshold"
+    );
 }
 
 /// TB-10 — skip_count auto-finalize path still injects budget.
@@ -660,20 +684,10 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
     );
 
     let snapshot = h.integration_test_snapshot();
-    let budget_msgs: Vec<_> = snapshot
-        .messages
-        .iter()
-        .filter(|m| m.role == AgentRole::Tool && m.content.contains("_agent"))
-        .collect();
     assert!(
-        !budget_msgs.is_empty(),
-        "TB-10 budget-bearing message exists"
+        synthetic_budget_messages(&snapshot.messages).is_empty(),
+        "TB-10 skips injection when remaining > 5 on auto-finalize path"
     );
-    let agent = agent_block(&budget_msgs.last().unwrap().content);
-    assert_eq!(agent["tool_calls_used"], 6, "TB-10 used");
-    assert_eq!(agent["tool_calls_limit"], 26, "TB-10 limit");
-    assert_eq!(agent["tool_calls_remaining"], 20, "TB-10 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-10 allow");
 }
 
 /// TB-11 — invalid phase submit_tool_results does not inject.
@@ -709,9 +723,9 @@ fn tb_11_invalid_phase_submit_tool_results_does_not_inject() {
         "TB-11 InvalidTransition"
     );
     assert_eq!(
-        count_agent_bearing_tool_messages(&snapshot.messages),
+        count_budget_prose_tool_messages(&snapshot.messages),
         0,
-        "TB-11 zero _agent messages"
+        "TB-11 zero budget prose messages"
     );
 }
 
@@ -750,6 +764,7 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, enclave_test_agent_config());
+    h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -786,18 +801,18 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
         !reject_tool.content.contains("_agent"),
         "TB-12 reject payload must not be merged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 1, "TB-12 used");
-    assert_eq!(agent["tool_calls_limit"], 20, "TB-12 limit");
-    assert_eq!(agent["tool_calls_remaining"], 19, "TB-12 remaining");
-    assert_eq!(agent["allow_tool_call"], true, "TB-12 allow");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(prose.used, 16, "TB-12 used");
+    assert_eq!(prose.limit, 20, "TB-12 limit");
+    assert_eq!(prose.remaining, 4, "TB-12 remaining");
+    assert!(prose.allow_tool_call, "TB-12 allow");
     assert!(
         parsed.get("available_tools").is_some(),
         "TB-12 available_tools"
     );
 }
 
-/// MD-01 — at most one tool message contains `_agent` per batch.
+/// MD-01 — at most one budget prose message per batch when injection triggers.
 #[test]
 fn md_01_only_one_tool_message_contains_agent_per_batch() {
     let eng = AgentEngine::new(
@@ -808,6 +823,7 @@ fn md_01_only_one_tool_message_contains_agent_per_batch() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
+    h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
     drive_model_tool_batch(
         &eng,
@@ -823,10 +839,22 @@ fn md_01_only_one_tool_message_contains_agent_per_batch() {
 
     let snapshot = h.integration_test_snapshot();
     assert_eq!(
-        count_agent_bearing_tool_messages(&snapshot.messages),
+        count_budget_prose_tool_messages(&snapshot.messages),
         1,
-        "MD-01 exactly one _agent message"
+        "MD-01 exactly one budget prose message"
     );
+}
+
+fn kotlin_line_references_agent_json_key(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("//")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with("*/")
+    {
+        return false;
+    }
+    line.contains("\"_agent\":")
 }
 
 fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
@@ -837,7 +865,7 @@ fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
         .unwrap_or(false)
     {
         let output = Command::new("rg")
-            .arg(r#""_agent""#)
+            .arg(r#""_agent":"#)
             .args(paths.iter().map(|p| p.as_os_str()))
             .output()
             .expect("MD-02 rg execution");
@@ -850,20 +878,24 @@ fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
         return String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| !line.is_empty())
+            .filter(|line| kotlin_line_references_agent_json_key(line))
             .count();
     }
 
-    fn walk(dir: &Path, needle: &str, matches: &mut usize) {
+    fn walk(dir: &Path, matches: &mut usize) {
         let entries =
             fs::read_dir(dir).unwrap_or_else(|e| panic!("MD-02 read {}: {e}", dir.display()));
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, needle, matches);
+                walk(&path, matches);
             } else if path.extension().is_some_and(|ext| ext == "kt") {
                 let content = fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("MD-02 read file {}: {e}", path.display()));
-                if content.contains(needle) {
+                if content
+                    .lines()
+                    .any(kotlin_line_references_agent_json_key)
+                {
                     *matches += 1;
                 }
             }
@@ -872,7 +904,7 @@ fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
 
     let mut matches = 0;
     for path in paths {
-        walk(path, "\"_agent\"", &mut matches);
+        walk(path, &mut matches);
     }
     matches
 }
@@ -906,6 +938,7 @@ fn md_03_merge_keeps_original_tool_keys() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
+    h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
     drive_model_tool_batch(
         &eng,
@@ -923,11 +956,11 @@ fn md_03_merge_keeps_original_tool_keys() {
         !parsed.as_object().is_some_and(|o| o.contains_key("_agent")),
         "MD-03 tool payload unmerged"
     );
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["tool_calls_used"], 1, "MD-03 used");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(prose.used, 16, "MD-03 used");
 }
 
-/// MD-04 — reason key absent when allow_tool_call true.
+/// MD-04 — reason absent in prose when allow_tool_call true.
 #[test]
 fn md_04_reason_key_absent_when_allow_tool_call_true() {
     let eng = AgentEngine::new(
@@ -938,13 +971,14 @@ fn md_04_reason_key_absent_when_allow_tool_call_true() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
+    h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"results":[]}"#]);
 
     let snapshot = h.integration_test_snapshot();
-    let agent = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(agent["allow_tool_call"], true, "MD-04 allow");
-    assert!(agent.get("reason").is_none(), "MD-04 reason absent");
+    let prose = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert!(prose.allow_tool_call, "MD-04 allow");
+    assert!(prose.reason.is_none(), "MD-04 reason absent");
 }
 
 /// MD-05 — budget injection only on submit paths, not from next_action alone.
@@ -990,6 +1024,7 @@ fn md_06_merge_preserves_executor_provided_agent_fields() {
         Arc::new(NoOpSummarizer),
     );
     let h = new_session(&eng, AgentConfig::default());
+    h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
     drive_model_tool_batch(
         &eng,
@@ -1007,9 +1042,9 @@ fn md_06_merge_preserves_executor_provided_agent_fields() {
         "MD-06 executor source preserved in tool payload"
     );
     assert!(parsed.get("results").is_some(), "MD-06 results present");
-    let synth = agent_block(&latest_synthetic_budget_message(&snapshot.messages).content);
-    assert_eq!(synth["tool_calls_used"], 1, "MD-06 used");
-    assert_eq!(synth["tool_calls_limit"], 20, "MD-06 limit");
-    assert_eq!(synth["tool_calls_remaining"], 19, "MD-06 remaining");
-    assert_eq!(synth["allow_tool_call"], true, "MD-06 allow");
+    let synth = parse_budget_prose(&latest_synthetic_budget_message(&snapshot.messages).content);
+    assert_eq!(synth.used, 16, "MD-06 used");
+    assert_eq!(synth.limit, 20, "MD-06 limit");
+    assert_eq!(synth.remaining, 4, "MD-06 remaining");
+    assert!(synth.allow_tool_call, "MD-06 allow");
 }
