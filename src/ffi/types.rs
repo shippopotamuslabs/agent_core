@@ -1300,7 +1300,10 @@ pub enum AgentException {
     #[error("repair failed")]
     RepairFailed { name: String, reason: String },
     #[error("guardrail")]
-    GuardrailExceeded { kind: String },
+    GuardrailExceeded {
+        kind: String,
+        detail: Option<String>,
+    },
     #[error("model stopped")]
     ModelStopped { reason: String },
     #[error("compaction")]
@@ -1324,7 +1327,9 @@ impl From<AgentError> for AgentException {
             AgentError::RepairFailed { name, reason } => {
                 AgentException::RepairFailed { name, reason }
             }
-            AgentError::GuardrailExceeded { kind } => AgentException::GuardrailExceeded { kind },
+            AgentError::GuardrailExceeded { kind, detail } => {
+                AgentException::GuardrailExceeded { kind, detail }
+            }
             AgentError::ModelStopped { reason } => AgentException::ModelStopped { reason },
             AgentError::CompactionFailed { tier, reason } => {
                 AgentException::CompactionFailed { tier, reason }

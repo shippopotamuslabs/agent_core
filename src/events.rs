@@ -58,7 +58,10 @@ pub enum AgentError {
     RepairFailed { name: String, reason: String },
 
     #[error("Guardrail exceeded: {kind}")]
-    GuardrailExceeded { kind: String },
+    GuardrailExceeded {
+        kind: String,
+        detail: Option<String>,
+    },
 
     #[error("Model stopped before completion: {reason}")]
     ModelStopped { reason: String },
@@ -238,10 +241,13 @@ mod tests {
     fn agent_error_roundtrip() {
         let e = AgentError::GuardrailExceeded {
             kind: "max_turns".into(),
+            detail: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: AgentError = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, AgentError::GuardrailExceeded { kind } if kind == "max_turns"));
+        assert!(
+            matches!(back, AgentError::GuardrailExceeded { kind, detail: None } if kind == "max_turns")
+        );
     }
 
     #[test]
@@ -297,6 +303,7 @@ mod tests {
             },
             AgentError::GuardrailExceeded {
                 kind: "max_turns".into(),
+                detail: None,
             },
             AgentError::CompactionFailed {
                 tier: "fifo".into(),

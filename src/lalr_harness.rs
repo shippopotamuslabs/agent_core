@@ -561,7 +561,7 @@ where
 
 pub fn guardrail_kind(err: &AgentError) -> Option<&str> {
     match err {
-        AgentError::GuardrailExceeded { kind } => Some(kind.as_str()),
+        AgentError::GuardrailExceeded { kind, detail: _ } => Some(kind.as_str()),
         _ => None,
     }
 }
