@@ -702,6 +702,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             {
                 g.set_terminal(AgentAction::Failed(AgentError::GuardrailExceeded {
                     kind: "max_tool_turns".into(),
+                    detail: None,
                 }));
                 return;
             }
@@ -790,6 +791,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         if attempt > g.config.model_api_retry_limit {
             g.set_terminal(AgentAction::Failed(AgentError::GuardrailExceeded {
                 kind: "model_api_retries_exhausted".into(),
+                detail: Some(truncate_model_api_failure_reason(&report.message)),
             }));
             return;
         }
@@ -1940,12 +1942,14 @@ impl InnerSession {
             return force_blocked.then(|| {
                 AgentAction::Failed(AgentError::GuardrailExceeded {
                     kind: "finish_blocked_without_injected_message".into(),
+                    detail: None,
                 })
             });
         }
         if self.model_requests_this_turn >= self.config.max_model_requests_per_turn {
             return Some(AgentAction::Failed(AgentError::GuardrailExceeded {
                 kind: "max_model_requests_per_turn".into(),
+                detail: None,
             }));
         }
 

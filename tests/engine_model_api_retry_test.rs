@@ -199,10 +199,63 @@ fn mar_02_exhausted_transient_failures_terminal_guardrail() {
     eng.submit_model_turn_failure(&h, transient_failure("timeout"));
     let final_action = eng.next_action(&h);
     match final_action {
-        AgentAction::Failed(AgentError::GuardrailExceeded { kind }) => {
+        AgentAction::Failed(AgentError::GuardrailExceeded { kind, detail }) => {
             assert_eq!(kind, "model_api_retries_exhausted");
+            assert_eq!(detail.as_deref(), Some("timeout"));
         }
         other => panic!("MAR-02 expected guardrail failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn mar_02b_exhausted_rate_limit_preserves_provider_message() {
+    let mut config = enclave_test_agent_config();
+    config.model_api_retry_limit = 1;
+    let eng = AgentEngine::new(
+        Arc::new(PanicTransport),
+        Arc::new(RecordingExecutor {
+            results: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoOpSummarizer),
+    );
+    let h = new_session(&eng, config);
+    expect_call_model(&eng, &h);
+
+    eng.submit_model_turn_failure(
+        &h,
+        ModelTurnFailureReport {
+            error_class: ModelApiErrorClass::Transient,
+            http_status: Some(429),
+            provider_code: Some("1310".into()),
+            message: "RateLimitException: 429: Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-06-21 05:51:46".into(),
+            had_partial_output: false,
+            partial_output_chars: 0,
+            retry_after_ms: None,
+        },
+    );
+    expect_call_model(&eng, &h);
+
+    eng.submit_model_turn_failure(
+        &h,
+        ModelTurnFailureReport {
+            error_class: ModelApiErrorClass::Transient,
+            http_status: Some(429),
+            provider_code: Some("1310".into()),
+            message: "RateLimitException: 429: Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-06-21 05:51:46".into(),
+            had_partial_output: false,
+            partial_output_chars: 0,
+            retry_after_ms: None,
+        },
+    );
+    let final_action = eng.next_action(&h);
+    match final_action {
+        AgentAction::Failed(AgentError::GuardrailExceeded { kind, detail }) => {
+            assert_eq!(kind, "model_api_retries_exhausted");
+            let detail = detail.expect("expected provider detail on retry exhaustion");
+            assert!(detail.contains("Weekly/Monthly Limit Exhausted"));
+            assert!(detail.contains("2026-06-21 05:51:46"));
+        }
+        other => panic!("MAR-02b expected guardrail failure, got {other:?}"),
     }
 }
 
