@@ -27,9 +27,9 @@ Hosts drive it two ways:
 cargo test
 ```
 
-The crate's own CI (`.gitlab-ci.yml`, from the GitLab era) ran
+A CI config left over from before the move to GitHub ran
 `cargo fmt --check`, clippy with warnings denied, and `cargo test
---all-features`. That file is a record of the old pipeline; no GitHub Actions
+--all-features`. That config is a record of the old pipeline; no GitHub Actions
 workflow replaces it yet.
 
 ## The tool catalog lives with the consumer
