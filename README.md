@@ -68,11 +68,10 @@ Release process, from the Enclave side:
 
 ## Layout
 
-- `src/engine/`, `src/compact/`, `src/repair/`, `src/canonicalize/`: the
-  loop, the compaction tiers, tool-call repair, and message canonicalization
-- `src/host.rs`: the native host trait surface
-- `src/ffi/`: the UniFFI bridge for Kotlin
-- `src/events.rs`, `src/policy.rs`, `src/guardrails.rs`, `src/budget.rs`:
-  the event schema, policy, guardrails, and session accounting
-- `leak_repro`: a ~95 MB compiled reproduction binary from a past memory
-  investigation. It is an artifact, not source.
+| Path | Contents |
+| --- | --- |
+| `src/engine/`, `src/compact/`, `src/repair/`, `src/canonicalize/` | The loop, the compaction tiers, tool-call repair, and message canonicalization |
+| `src/host.rs` | The native host trait surface |
+| `src/ffi/` | The UniFFI bridge for Kotlin |
+| `src/events.rs`, `src/policy.rs`, `src/guardrails.rs`, `src/budget.rs` | The event schema, policy, guardrails, and session accounting |
+| `tests/leak_repro_manual_test.rs` | The leaked-tool-call recovery harness, kept as a source test |
