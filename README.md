@@ -75,3 +75,7 @@ Release process, from the Enclave side:
 | `src/ffi/` | The UniFFI bridge for Kotlin |
 | `src/events.rs`, `src/policy.rs`, `src/guardrails.rs`, `src/budget.rs` | The event schema, policy, guardrails, and session accounting |
 | `tests/leak_repro_manual_test.rs` | The leaked-tool-call recovery harness, kept as a source test |
+
+## License
+
+0BSD license. Do whatever you want with the code. Just don't expect it to work or sue me.
