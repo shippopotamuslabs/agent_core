@@ -16,10 +16,12 @@ log = "0.4"
 tiktoken-rs = "0.6"
 once_cell = "1.19"
 regex = "1"
-uniffi = { version = "0.29.0", default-features = true, features = ["cli"] }
+uniffi = { version = "0.29.0", default-features = true, features = ["cli"], optional = true }
 uuid = { version = "1.8", features = ["v4"] }
 
 [features]
+default = ["ffi"]
+ffi = ["dep:uniffi"]
 lalr-harness = []
 
 [dev-dependencies]
@@ -28,6 +30,7 @@ insta = { version = "1.39", features = ["json"] }
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/uniffi-bindgen.rs"
+required-features = ["ffi"]
 
 [[test]]
 name = "fixtures"
@@ -84,6 +87,7 @@ path = "tests/tool_parse_integration.rs"
 [[test]]
 name = "finish_boundary_test"
 path = "tests/finish_boundary_test.rs"
+required-features = ["ffi"]
 
 [[test]]
 name = "tool_stream_gate_test"
@@ -127,7 +131,7 @@ required-features = ["lalr-harness"]
 [[test]]
 name = "compaction_boundary_test"
 path = "tests/compaction_boundary_test.rs"
-required-features = ["lalr-harness"]
+required-features = ["lalr-harness", "ffi"]
 
 [[test]]
 name = "long_loop_policy_test"

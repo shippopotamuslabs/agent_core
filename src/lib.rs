@@ -1,7 +1,10 @@
+#[cfg(feature = "ffi")]
 uniffi::setup_scaffolding!();
 
+#[cfg(feature = "ffi")]
 pub mod ffi;
 
+#[cfg(feature = "ffi")]
 pub use ffi::{
     coerce_provider_arguments, create_agent_engine, create_tool_stream_gate,
     has_local_tool_contract, parse_tool_calls, repair_tool, result_json_looks_soft_failure,
@@ -17,16 +20,19 @@ pub use ffi::{
 };
 
 /// Kotlin / host transport — UniFFI callback (crate root required for UniFFI metadata).
+#[cfg(feature = "ffi")]
 #[uniffi::export(callback_interface)]
 pub trait AgentTransportCallback: Send + Sync {
     fn complete_model_turn(&self, request: FfiModelRequest) -> FfiModelResponse;
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::export(callback_interface)]
 pub trait AgentToolExecutorCallback: Send + Sync {
     fn execute_tools(&self, calls: Vec<FfiToolCallRecord>) -> Vec<FfiToolResultRecord>;
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::export(callback_interface)]
 pub trait AgentSummarizerCallback: Send + Sync {
     fn summarize(&self, request: FfiSummaryRequest) -> FfiSummaryResult;
