@@ -90,9 +90,13 @@ pub fn build_tool_context_index_with_registry(
     } else {
         tools_schema_json.to_string()
     };
-    let existing_ref = store.entries().find(|entry| {
-        entry.reference.kind == ContextReferenceKind::ToolSchema && entry.content == stash_content
-    }).map(|entry| entry.reference.clone());
+    let existing_ref = store
+        .entries()
+        .find(|entry| {
+            entry.reference.kind == ContextReferenceKind::ToolSchema
+                && entry.content == stash_content
+        })
+        .map(|entry| entry.reference.clone());
 
     let stored = match existing_ref {
         Some(r) => r,
@@ -157,4 +161,3 @@ fn get_tool_names(json_str: &str) -> Vec<String> {
         .map(|entries| entries.into_iter().map(|e| e.name).collect())
         .unwrap_or_default()
 }
-

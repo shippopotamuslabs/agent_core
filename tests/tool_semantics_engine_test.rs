@@ -317,7 +317,7 @@ fn ts_026_micro_compaction_preserves_configured_tool() {
         ..AgentConfig::default()
     };
 
-    let outcome = MicroCompactionTier::default().apply(session, &config, &compaction_ctx());
+    let outcome = MicroCompactionTier.apply(session, &config, &compaction_ctx());
 
     assert!(matches!(outcome, CompactionOutcome::NotApplicable));
 }
@@ -350,7 +350,7 @@ fn ts_029_custom_artifact_squash_collapses_configured_append_loop() {
         ..AgentConfig::default()
     };
 
-    match ArtifactSquashCompactionTier::default().apply(session, &config, &compaction_ctx()) {
+    match ArtifactSquashCompactionTier.apply(session, &config, &compaction_ctx()) {
         CompactionOutcome::Applied(applied, _) => {
             assert!(applied.messages.iter().any(|m| {
                 m.role == AgentRole::System
@@ -423,7 +423,7 @@ fn ts_034_hard_coded_artifact_squash_misses_custom_append_tool() {
         ..AgentConfig::default()
     };
 
-    match ArtifactSquashCompactionTier::default().apply(session, &config, &compaction_ctx()) {
+    match ArtifactSquashCompactionTier.apply(session, &config, &compaction_ctx()) {
         CompactionOutcome::Applied(applied, _) => {
             assert!(applied.messages.iter().any(|m| {
                 m.role == AgentRole::System

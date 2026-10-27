@@ -50,9 +50,9 @@ fn cl_tr_01_recover_append_blocks_without_native_tools() {
 
 #[test]
 fn cl_tr_02_native_preferred_over_leaked_dsml() {
-    let buffered = format!(
+    let buffered =
         "preamble.<|DSML|tool_calls><|DSML|invoke name=\"append_blocks\"></|DSML|invoke></|DSML|tool_calls>"
-    );
+            .to_string();
     let native = vec![RawToolCall {
         id: Some("call_native".into()),
         name: "web_search".into(),
@@ -220,8 +220,7 @@ fn cl_tr_11_tool_call_truncated_at_eos_recovers() {
         "CL-TR-11 recovered count"
     );
     assert_eq!(
-        resolution.recovered_tool_calls[0].name,
-        "tool_discovery_tool",
+        resolution.recovered_tool_calls[0].name, "tool_discovery_tool",
         "CL-TR-11 tool name"
     );
     assert!(
@@ -251,8 +250,7 @@ fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
         "CL-TR-12 recovered count"
     );
     assert_eq!(
-        resolution.recovered_tool_calls[0].name,
-        "tool_discovery_tool",
+        resolution.recovered_tool_calls[0].name, "tool_discovery_tool",
         "CL-TR-12 tool name"
     );
     assert!(
@@ -274,8 +272,7 @@ fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
 #[test]
 fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
     // Two open tags, no close tag at all — ambiguous, not a simple EOS truncation.
-    let buffered =
-        r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"a"} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
+    let buffered = r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"a"} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
     let resolution = resolve_enclave(buffered, &[], true);
 
     // Neither envelope should silently recover when there are multiple opens
@@ -283,7 +280,11 @@ fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-13 ambiguous multi-open envelope must not recover: {:?}",
-        resolution.recovered_tool_calls.iter().map(|c| &c.name).collect::<Vec<_>>()
+        resolution
+            .recovered_tool_calls
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
     );
     assert!(
         resolution.had_strong_tool_marker,

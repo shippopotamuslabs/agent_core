@@ -44,6 +44,7 @@ fn compaction_ctx(trigger: CompactionTrigger) -> CompactionContext {
             summarization_allowed: true,
             ..Default::default()
         },
+        suppress_summary_tier: false,
         trigger,
     }
 }
@@ -467,7 +468,7 @@ pub fn run_summary_compaction_with_objective(ledger: &mut StateLedger, session: 
     );
     let config = AgentConfig::default();
     let ctx = compaction_ctx(CompactionTrigger::Preflight);
-    let tier = SummaryCompactionTier::default();
+    let tier = SummaryCompactionTier;
     let CompactionOutcome::NeedsHostCall(req, mut working) =
         tier.apply(session.clone(), &config, &ctx)
     else {
@@ -508,7 +509,7 @@ where
     let config = handle.lalr_config();
     let cap = effective_max_tool_turns(&config);
     assert!(
-        should_stop_tool_rounds(&config, tool_round_index, false),
+        should_stop_tool_rounds(&config, tool_round_index, &[]),
         "harness expects tool_round_index {tool_round_index} >= cap {cap}"
     );
 

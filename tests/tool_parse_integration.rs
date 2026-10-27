@@ -8,11 +8,11 @@ mod support;
 
 use agent_core::catalog::{FieldHint, ToolSchemaHint};
 use agent_core::tool_parse::json_repair::repair_json;
-use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_calls;
 use agent_core::tool_parse::result::ToolParseFailureReason;
 use agent_core::tool_parse::schema_coerce::coerce_to_schema;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_calls;
 
 #[test]
 fn faal_cp_05_parse_tool_calls_coerces_stringified_blocks() {
@@ -98,7 +98,7 @@ fn r_03_dsml_invoke_string_true_repair_false() {
                </| DSML | invoke></| DSML | tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(batch.successes[0].repaired, false);
+    assert!(!batch.successes[0].repaired);
     assert!(batch.successes[0].repairs.is_empty());
 }
 

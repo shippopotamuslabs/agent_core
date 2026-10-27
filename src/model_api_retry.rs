@@ -42,10 +42,7 @@ mod tests {
 
     #[test]
     fn honors_retry_after_header() {
-        assert_eq!(
-            model_api_retry_delay_ms(2, 1_000, Some(5_000)),
-            5_000
-        );
+        assert_eq!(model_api_retry_delay_ms(2, 1_000, Some(5_000)), 5_000);
     }
 
     #[test]

@@ -20,26 +20,14 @@ static STRONG_TOOL_MARKER_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
 
 static PARTIAL_TOOL_MARKER_REGEXES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
     vec![
-        (
-            "dsml_pipe",
-            Regex::new(r"(?is)<\s*[|｜]+").unwrap(),
-        ),
+        ("dsml_pipe", Regex::new(r"(?is)<\s*[|｜]+").unwrap()),
         (
             "dsml_partial",
             Regex::new(r"(?is)<\s*(?:[|｜]+\s*)?DSM").unwrap(),
         ),
-        (
-            "tool_partial",
-            Regex::new(r"(?is)<\s*tool").unwrap(),
-        ),
-        (
-            "tool_underscore",
-            Regex::new(r"(?is)<\s*tool_").unwrap(),
-        ),
-        (
-            "call_colon",
-            Regex::new(r"(?is)\bcall\s*:").unwrap(),
-        ),
+        ("tool_partial", Regex::new(r"(?is)<\s*tool").unwrap()),
+        ("tool_underscore", Regex::new(r"(?is)<\s*tool_").unwrap()),
+        ("call_colon", Regex::new(r"(?is)\bcall\s*:").unwrap()),
         (
             "tool_calls_bracket",
             Regex::new(r"(?is)\[TOOL_CALLS\]").unwrap(),
@@ -133,9 +121,9 @@ pub(crate) fn original_offset_for_normalized_offset(
 
 /// Strong + partial sentinels — legacy helper for tests and external callers.
 pub fn first_stream_holdback_marker_start(text: &str) -> Option<usize> {
-    earliest_tentative_trigger(text, 0).map(|(start, _)| start).or_else(|| {
-        earliest_confirmed_marker_start(text, 0)
-    })
+    earliest_tentative_trigger(text, 0)
+        .map(|(start, _)| start)
+        .or_else(|| earliest_confirmed_marker_start(text, 0))
 }
 
 /// All stream-gate markers (strong + partial).
@@ -144,7 +132,10 @@ pub fn first_tool_marker_start(text: &str) -> Option<usize> {
 }
 
 /// Earliest tentative trigger at or after `search_from`.
-pub fn earliest_tentative_trigger(text: &str, search_from: usize) -> Option<(usize, TentativeKind)> {
+pub fn earliest_tentative_trigger(
+    text: &str,
+    search_from: usize,
+) -> Option<(usize, TentativeKind)> {
     if search_from >= text.len() {
         return None;
     }
@@ -175,12 +166,11 @@ pub fn earliest_tentative_trigger(text: &str, search_from: usize) -> Option<(usi
         }
     }
 
-    if let Some(angle) = last_ambiguous_angle_bracket(text) {
-        if angle >= search_from {
-            if best.map(|(b, _)| angle < b).unwrap_or(true) {
-                best = Some((angle, TentativeKind::AngleBracket));
-            }
-        }
+    let better_angle = last_ambiguous_angle_bracket(text)
+        .filter(|angle| *angle >= search_from)
+        .filter(|angle| best.map(|(b, _)| *angle < b).unwrap_or(true));
+    if let Some(angle) = better_angle {
+        best = Some((angle, TentativeKind::AngleBracket));
     }
 
     best
@@ -321,6 +311,27 @@ pub fn last_ambiguous_angle_bracket(text: &str) -> Option<usize> {
     None
 }
 
+pub fn might_be_tool_marker_prefix(suffix: &str) -> bool {
+    if !suffix.starts_with('<') {
+        return false;
+    }
+    let tail = &suffix[1..];
+    if tail.is_empty() {
+        return true;
+    }
+    if tail
+        .chars()
+        .all(|c| c == '|' || c == '｜' || c.is_whitespace())
+    {
+        return true;
+    }
+    const PREFIXES: &[&str] = &["DSML", "tool_call", "tool_calls", "![CDATA[<tool", "tool>"];
+    PREFIXES.iter().any(|prefix| {
+        prefix.len() >= tail.len() && prefix[..tail.len()].eq_ignore_ascii_case(tail)
+            || tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,25 +365,4 @@ mod tests {
             HoldResolution::StillTentative
         );
     }
-}
-
-pub fn might_be_tool_marker_prefix(suffix: &str) -> bool {
-    if !suffix.starts_with('<') {
-        return false;
-    }
-    let tail = &suffix[1..];
-    if tail.is_empty() {
-        return true;
-    }
-    if tail
-        .chars()
-        .all(|c| c == '|' || c == '｜' || c.is_whitespace())
-    {
-        return true;
-    }
-    const PREFIXES: &[&str] = &["DSML", "tool_call", "tool_calls", "![CDATA[<tool", "tool>"];
-    PREFIXES.iter().any(|prefix| {
-        prefix.len() >= tail.len() && prefix[..tail.len()].eq_ignore_ascii_case(tail)
-            || tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix)
-    })
 }

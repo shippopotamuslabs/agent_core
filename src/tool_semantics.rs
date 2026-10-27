@@ -68,7 +68,10 @@ impl ToolSemanticsConfig {
         let mut names: HashMap<String, String> = HashMap::new();
         for tool in &self.catalog.tools {
             let normalized = normalize_tool_name(&tool.name);
-            if names.insert(normalized.clone(), tool.name.clone()).is_some() {
+            if names
+                .insert(normalized.clone(), tool.name.clone())
+                .is_some()
+            {
                 return Err(ToolSemanticsError::DuplicateToolName {
                     normalized_name: normalized,
                 });
@@ -253,33 +256,10 @@ pub(crate) fn normalize_tool_name(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod merge_catalog_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_kotlin_catalog_shape_fails_merge() {
-        let mut semantics = ToolSemanticsConfig::agnostic();
-        let legacy =
-            r#"[{"name":"web_search","description":"x","disclosureMode":"PRELOADED"}]"#;
-        assert!(semantics.merge_catalog_json(legacy).is_err());
-    }
-
-    #[test]
-    fn tool_spec_array_merges_into_empty_semantics_catalog() {
-        let mut semantics = ToolSemanticsConfig::agnostic();
-        let specs = r#"[{"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":null}]"#;
-        semantics.merge_catalog_json(specs).expect("merge");
-        assert_eq!(semantics.catalog.tools.len(), 1);
-        assert_eq!(semantics.catalog.tools[0].name, "web_search");
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
-    let mut semantics: ToolSemanticsConfig = serde_json::from_str(include_str!(
-        "../tests/support/enclave_tool_semantics.json"
-    ))
-    .expect("enclave_tool_semantics.json");
+    let mut semantics: ToolSemanticsConfig =
+        serde_json::from_str(include_str!("../tests/support/enclave_tool_semantics.json"))
+            .expect("enclave_tool_semantics.json");
     let raw = include_str!("../resources/tool_catalog.json");
     #[derive(Deserialize)]
     struct CatalogFile {
@@ -315,6 +295,8 @@ pub(crate) fn result_policy_for<'a>(
 }
 
 /// Loads host semantics JSON and merges session catalog JSON into an executable catalog.
+/// Only called from the UniFFI bridge, so it exists only with the `ffi` feature.
+#[cfg(feature = "ffi")]
 pub(crate) fn load_semantics_with_session_catalog(
     tool_semantics_json: &str,
     tool_catalog_json: &str,
@@ -327,4 +309,25 @@ pub(crate) fn load_semantics_with_session_catalog(
     let catalog = crate::catalog::ToolCatalog::from_semantics(&semantics)
         .map_err(|error| format!("invalid merged tool catalog: {error:?}"))?;
     Ok((semantics, catalog))
+}
+
+#[cfg(test)]
+mod merge_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_kotlin_catalog_shape_fails_merge() {
+        let mut semantics = ToolSemanticsConfig::agnostic();
+        let legacy = r#"[{"name":"web_search","description":"x","disclosureMode":"PRELOADED"}]"#;
+        assert!(semantics.merge_catalog_json(legacy).is_err());
+    }
+
+    #[test]
+    fn tool_spec_array_merges_into_empty_semantics_catalog() {
+        let mut semantics = ToolSemanticsConfig::agnostic();
+        let specs = r#"[{"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":null}]"#;
+        semantics.merge_catalog_json(specs).expect("merge");
+        assert_eq!(semantics.catalog.tools.len(), 1);
+        assert_eq!(semantics.catalog.tools[0].name, "web_search");
+    }
 }

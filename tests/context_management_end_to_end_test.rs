@@ -3,8 +3,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::Arc;
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::budget::TokenLedger;

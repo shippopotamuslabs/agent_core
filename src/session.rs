@@ -260,14 +260,19 @@ impl Default for AgentConfig {
 impl AgentConfig {
     /// Applies host IO payloads to [`tool_semantics`] (catalog JSON merge).
     pub fn prepare_tool_semantics(&mut self, io: &crate::engine::SessionIoParams) {
-        if let Err(error) = self.tool_semantics.merge_catalog_json(&io.tool_catalog_json) {
+        if let Err(error) = self
+            .tool_semantics
+            .merge_catalog_json(&io.tool_catalog_json)
+        {
             eprintln!("agent_core: tool catalog merge failed: {error:?}");
         }
     }
 
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
-        let mut config = Self::default();
-        config.long_loop = LongLoopPolicy::for_policy_tier(tier);
+        let mut config = Self {
+            long_loop: LongLoopPolicy::for_policy_tier(tier),
+            ..Self::default()
+        };
         match tier {
             ContextPolicyTier::HostedMutable | ContextPolicyTier::HighContext => {
                 config.threshold_ratio = 0.80;

@@ -3,8 +3,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::Arc;
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::compact::fifo::FifoCompactionTier;
@@ -123,10 +123,12 @@ fn s1_preflight_below_threshold_skips_compaction() {
 
 #[test]
 fn s2_preflight_summary_request_carries_trigger_metadata() {
-    let mut cfg = AgentConfig::default();
-    cfg.threshold_ratio = 0.80;
-    cfg.allow_fifo_on_mid_turn = false;
-    cfg.allow_fifo_on_post_tool_result = false;
+    let cfg = AgentConfig {
+        threshold_ratio: 0.80,
+        allow_fifo_on_mid_turn: false,
+        allow_fifo_on_post_tool_result: false,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -162,9 +164,11 @@ fn s2_preflight_summary_request_carries_trigger_metadata() {
 
 #[test]
 fn s3_mid_turn_summary_resumes_pending_tool_execution() {
-    let mut cfg = AgentConfig::default();
-    cfg.threshold_ratio = 10.0;
-    cfg.mid_turn_threshold_ratio = 0.90;
+    let cfg = AgentConfig {
+        threshold_ratio: 10.0,
+        mid_turn_threshold_ratio: 0.90,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -235,8 +239,10 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
 
 #[test]
 fn post_tool_small_result_on_large_window_skips_compaction() {
-    let mut cfg = AgentConfig::default();
-    cfg.post_tool_result_threshold_ratio = 0.92;
+    let cfg = AgentConfig {
+        post_tool_result_threshold_ratio: 0.92,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -293,8 +299,10 @@ fn post_tool_small_result_on_large_window_skips_compaction() {
 
 #[test]
 fn s4_post_tool_result_compaction_runs_before_next_model_call() {
-    let mut cfg = AgentConfig::default();
-    cfg.post_tool_result_threshold_ratio = 0.85;
+    let cfg = AgentConfig {
+        post_tool_result_threshold_ratio: 0.85,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -344,7 +352,10 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
         .iter()
         .filter(|e| matches!(e, AgentEvent::CompactionApplied(ev) if ev.trigger == CompactionTrigger::PostToolResult))
         .count();
-    assert!(post_count >= 1, "expected at least one post-tool compaction event");
+    assert!(
+        post_count >= 1,
+        "expected at least one post-tool compaction event"
+    );
 }
 
 #[test]
@@ -463,20 +474,17 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
         .iter()
         .find_map(|e| match e {
             AgentEvent::CompactionApplied(ev)
-                if ev.tier == CompactionTier::Fifo
-                    || ev.tier == CompactionTier::TextTruncate =>
+                if ev.tier == CompactionTier::Fifo || ev.tier == CompactionTier::TextTruncate =>
             {
                 Some(ev.clone())
             }
             _ => None,
         })
         .expect("fifo or text_truncate CompactionApplied expected");
-    assert!(
-        matches!(
-            destructive_compact.tier,
-            CompactionTier::Fifo | CompactionTier::TextTruncate
-        )
-    );
+    assert!(matches!(
+        destructive_compact.tier,
+        CompactionTier::Fifo | CompactionTier::TextTruncate
+    ));
     let invalidated = events.iter().any(|e| {
         matches!(
             e,
@@ -502,9 +510,11 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
 
 #[test]
 fn s7_summary_request_includes_history_reference_and_ledger_snapshot() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_context_store = true;
-    cfg.enable_state_ledger = true;
+    let cfg = AgentConfig {
+        enable_context_store: true,
+        enable_state_ledger: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -550,9 +560,11 @@ fn s7_summary_request_includes_history_reference_and_ledger_snapshot() {
 
 #[test]
 fn s16_fifo_requires_history_snapshot_before_destructive_deletion() {
-    let mut cfg = AgentConfig::default();
-    cfg.require_snapshot_before_fifo = true;
-    cfg.allow_fifo_on_preflight = true;
+    let cfg = AgentConfig {
+        require_snapshot_before_fifo: true,
+        allow_fifo_on_preflight: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: false,
         kv_fixed: false,
@@ -590,7 +602,7 @@ fn s16_fifo_requires_history_snapshot_before_destructive_deletion() {
         "history_snapshot_ids": ["u0", "a0"]
     });
 
-    let outcome = FifoCompactionTier::default().apply(session, &cfg, &ctx);
+    let outcome = FifoCompactionTier.apply(session, &cfg, &ctx);
     match outcome {
         CompactionOutcome::Applied(new_session, _ev) => {
             let snaps = store.search("u0", 10);
@@ -626,7 +638,7 @@ fn e1_summary_tier_is_not_applicable_for_protected_tail_only() {
         trigger: CompactionTrigger::Preflight,
         suppress_summary_tier: false,
     };
-    let outcome = SummaryCompactionTier::default().apply(session, &AgentConfig::default(), &ctx);
+    let outcome = SummaryCompactionTier.apply(session, &AgentConfig::default(), &ctx);
     assert!(matches!(outcome, CompactionOutcome::NotApplicable));
 }
 
@@ -714,9 +726,11 @@ fn submit_model_response_while_awaiting_summary_is_invalid_transition() {
 
 #[test]
 fn e3_over_threshold_pressure_with_no_eligible_tier_fails_loudly() {
-    let mut cfg = AgentConfig::default();
-    cfg.mid_turn_threshold_ratio = 0.90;
-    cfg.allow_fifo_on_mid_turn = false;
+    let cfg = AgentConfig {
+        mid_turn_threshold_ratio: 0.90,
+        allow_fifo_on_mid_turn: false,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: false,
         kv_fixed: false,
@@ -807,9 +821,11 @@ fn fixed_kv_without_history_rewrite_support_does_not_fifo_through_engine() {
 
 #[test]
 fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
-    let mut cfg = AgentConfig::default();
-    cfg.threshold_ratio = 0.80;
-    cfg.post_tool_result_threshold_ratio = 0.85;
+    let cfg = AgentConfig {
+        threshold_ratio: 0.80,
+        post_tool_result_threshold_ratio: 0.85,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -864,7 +880,10 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
         .iter()
         .filter(|e| matches!(e, AgentEvent::CompactionApplied(ev) if ev.trigger == CompactionTrigger::Preflight))
         .count();
-    assert!(post >= 1, "expected at least one post-tool compaction event");
+    assert!(
+        post >= 1,
+        "expected at least one post-tool compaction event"
+    );
     assert_eq!(preflight, 0);
 }
 

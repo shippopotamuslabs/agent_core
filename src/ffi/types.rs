@@ -856,7 +856,8 @@ impl Default for FfiAgentConfig {
             tool_retry_limit: c.tool_retry_limit,
             model_api_retry_limit: c.model_api_retry_limit,
             model_api_retry_base_delay_ms: c.model_api_retry_base_delay_ms,
-            tool_semantics_json: serde_json::to_string(&c.tool_semantics).unwrap_or_else(|_| "{}".into()),
+            tool_semantics_json: serde_json::to_string(&c.tool_semantics)
+                .unwrap_or_else(|_| "{}".into()),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
             tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,

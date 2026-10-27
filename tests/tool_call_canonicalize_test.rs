@@ -135,7 +135,7 @@ fn faal_cp_04_double_canonicalize_is_stable() {
     )
     .expect("FAAL-CP-04 first canonicalize");
     let snapshot = first.arguments_json.clone();
-    let mut value = first.value;
+    let value = first.value;
 
     let second = canonicalize_raw_arguments_with_semantics(
         "append_blocks",

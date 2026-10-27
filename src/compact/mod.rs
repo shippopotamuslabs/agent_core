@@ -68,6 +68,9 @@ pub fn estimate_session_pressure(
 }
 
 /// Result of a single compaction tier (or whole pipeline) run.
+// large_enum_variant: variants carry owned sessions by value so the engine can
+// continue without cloning; boxing would ripple through every tier signature.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum CompactionOutcome {
     /// Tier ran successfully and session was compacted.
@@ -107,10 +110,10 @@ pub trait CompactionTier: Send + Sync {
 /// Locked tier order: Micro → ArtifactSquash → Summary → FIFO.
 pub fn default_compaction_pipeline() -> CompactionPipeline {
     CompactionPipeline::new(vec![
-        Box::new(MicroCompactionTier::default()),
-        Box::new(ArtifactSquashCompactionTier::default()),
-        Box::new(SummaryCompactionTier::default()),
-        Box::new(FifoCompactionTier::default()),
+        Box::new(MicroCompactionTier),
+        Box::new(ArtifactSquashCompactionTier),
+        Box::new(SummaryCompactionTier),
+        Box::new(FifoCompactionTier),
     ])
 }
 
@@ -118,27 +121,23 @@ pub fn compaction_pipeline_for_plan(plan: &policy::CompactionPlan) -> Compaction
     let tiers = plan
         .ordered_tiers
         .iter()
-        .filter_map(|tier| match tier {
-            CompactionTierKind::Micro => {
-                Some(Box::new(MicroCompactionTier::default()) as Box<dyn CompactionTier>)
-            }
+        .map(|tier| match tier {
+            CompactionTierKind::Micro => Box::new(MicroCompactionTier) as Box<dyn CompactionTier>,
             CompactionTierKind::ArtifactSquash => {
-                Some(Box::new(ArtifactSquashCompactionTier::default()) as Box<dyn CompactionTier>)
+                Box::new(ArtifactSquashCompactionTier) as Box<dyn CompactionTier>
             }
             CompactionTierKind::Summary => {
-                Some(Box::new(SummaryCompactionTier::default()) as Box<dyn CompactionTier>)
+                Box::new(SummaryCompactionTier) as Box<dyn CompactionTier>
             }
-            CompactionTierKind::Fifo => {
-                Some(Box::new(FifoCompactionTier::default()) as Box<dyn CompactionTier>)
-            }
+            CompactionTierKind::Fifo => Box::new(FifoCompactionTier) as Box<dyn CompactionTier>,
             CompactionTierKind::ToolSpill => {
-                Some(Box::new(ToolSpillCompactionTier) as Box<dyn CompactionTier>)
+                Box::new(ToolSpillCompactionTier) as Box<dyn CompactionTier>
             }
             CompactionTierKind::HistorySnapshot => {
-                Some(Box::new(HistorySnapshotCompactionTier) as Box<dyn CompactionTier>)
+                Box::new(HistorySnapshotCompactionTier) as Box<dyn CompactionTier>
             }
             CompactionTierKind::TextTruncate => {
-                Some(Box::new(TextTruncateCompactionTier::default()) as Box<dyn CompactionTier>)
+                Box::new(TextTruncateCompactionTier) as Box<dyn CompactionTier>
             }
         })
         .collect();

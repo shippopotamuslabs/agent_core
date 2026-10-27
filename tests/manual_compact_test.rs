@@ -35,8 +35,10 @@ fn user_msg(id: &str, body: &str) -> AgentMessage {
 
 #[test]
 fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_manual_compact = true;
+    let cfg = AgentConfig {
+        enable_manual_compact: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -92,8 +94,10 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
 
 #[test]
 fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
-    let mut cfg = AgentConfig::default();
-    cfg.threshold_ratio = 0.80;
+    let cfg = AgentConfig {
+        threshold_ratio: 0.80,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -184,8 +188,10 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
 
 #[test]
 fn e9_manual_compact_disabled_by_policy_returns_no_op() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_manual_compact = false;
+    let cfg = AgentConfig {
+        enable_manual_compact: false,
+        ..Default::default()
+    };
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
         Arc::new(PanicExec),
@@ -232,8 +238,10 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
 /// hit InvalidTransition after the summary round-trip rewrote the phase.
 #[test]
 fn manual_compact_mid_model_turn_is_deferred_as_noop() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_manual_compact = true;
+    let cfg = AgentConfig {
+        enable_manual_compact: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         summarization_allowed: true,
         kv_fixed: false,
@@ -269,7 +277,10 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
     );
 
     // Engine is now AwaitingModel.
-    assert!(matches!(eng.next_action(&handle), AgentAction::CallModel(_)));
+    assert!(matches!(
+        eng.next_action(&handle),
+        AgentAction::CallModel(_)
+    ));
 
     let action = eng.request_manual_compact(
         &handle,

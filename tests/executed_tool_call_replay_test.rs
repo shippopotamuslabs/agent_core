@@ -4,14 +4,14 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::{Arc, Mutex};
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams, SessionTestSnapshot};
 use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
-use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::session::SessionCapabilities;
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 
 const VALID_DSML_WEB_SEARCH: &str = concat!(

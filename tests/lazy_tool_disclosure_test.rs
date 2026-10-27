@@ -3,7 +3,6 @@ use std::sync::Arc;
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
@@ -12,6 +11,7 @@ use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRec
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 const CATALOG_JSON: &str = r#"[
   {"name":"tool_discovery_tool","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"capability","ty":"string","description":"capability"}],"defaults":{}}},

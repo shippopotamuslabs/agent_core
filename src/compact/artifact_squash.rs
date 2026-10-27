@@ -105,7 +105,10 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
     false
 }
 
-fn artifact_id_from_assistant_metadata(msg: &AgentMessage, semantics: &ArtifactSquashSemantics) -> Option<String> {
+fn artifact_id_from_assistant_metadata(
+    msg: &AgentMessage,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<String> {
     msg.metadata
         .get("raw_tool_calls")
         .and_then(|v| v.as_array())
@@ -371,8 +374,10 @@ mod tests {
         );
 
         let tier = ArtifactSquashCompactionTier;
-        let mut cfg = AgentConfig::default();
-        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            ..Default::default()
+        };
         match tier.apply(session, &cfg, &ctx()) {
             CompactionOutcome::Applied(s, ev) => {
                 assert_eq!(ev.tier, TierEnum::ArtifactSquash);

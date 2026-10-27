@@ -37,7 +37,9 @@ pub struct FfiToolStreamGate {
     inner: Mutex<ToolStreamGate>,
 }
 
-fn lock_tool_stream_gate(inner: &Mutex<ToolStreamGate>) -> std::sync::MutexGuard<'_, ToolStreamGate> {
+fn lock_tool_stream_gate(
+    inner: &Mutex<ToolStreamGate>,
+) -> std::sync::MutexGuard<'_, ToolStreamGate> {
     inner
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

@@ -32,8 +32,10 @@ const SCHEMAS_JSON: &str = r#"[
 
 #[test]
 fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_tool_schema_deferral = true;
+    let cfg = AgentConfig {
+        enable_tool_schema_deferral: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         tool_schema_deferral_supported: true,
         context_policy_tier: ContextPolicyTier::HostedMutable,
@@ -100,8 +102,10 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
     // spec says is the entry point that registers tool schemas into the
     // engine-owned ContextStore when deferral is enabled. Then search and
     // read back through the engine APIs so both ends share the same store.
-    let mut cfg = AgentConfig::default();
-    cfg.enable_tool_schema_deferral = true;
+    let cfg = AgentConfig {
+        enable_tool_schema_deferral: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         tool_schema_deferral_supported: true,
         ..Default::default()
@@ -154,8 +158,10 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
 
 #[test]
 fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_tool_schema_deferral = true;
+    let cfg = AgentConfig {
+        enable_tool_schema_deferral: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         tool_schema_deferral_supported: false,
         ..Default::default()
@@ -197,8 +203,10 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
 fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
     // Drive everything through the engine so the store driving the index
     // build and the store backing reads are the same instance.
-    let mut cfg = AgentConfig::default();
-    cfg.enable_tool_schema_deferral = true;
+    let cfg = AgentConfig {
+        enable_tool_schema_deferral: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         tool_schema_deferral_supported: true,
         ..Default::default()

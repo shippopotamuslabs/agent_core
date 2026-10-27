@@ -1,0 +1,72 @@
+name: CI
+
+# agent_core gates (FRG-35): formatting, lints, and both consumer feature
+# configurations. The crate has two consumers (native Rust with default
+# features, Forge/native without), so both configurations are tested on
+# every PR and every push to main.
+#
+# Caching: Swatinem/rust-cache restores the cargo registry + target dir.
+# Warm-cache target is single-digit minutes.
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: cargo clippy --all-targets -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked --no-default-features -- -D warnings
+
+  # NOTE: this job intentionally tests default features, not --all-features.
+  # --all-features additionally enables the dev-only `lalr-harness` feature,
+  # whose TDD-Red tests (tests/compaction_boundary_test.rs declares
+  # "TDD Red" in its header) fail by design until the long-loop feature
+  # work lands. The two consumer configurations below are what CI gates.
+  test-default-features:
+    name: cargo test (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  test-no-default-features:
+    name: cargo test --no-default-features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --no-default-features
+      - name: dependency-tree guard (no uniffi without the ffi feature)
+        run: |
+          echo "Checking that the --no-default-features tree contains no uniffi crates..."
+          if cargo tree --locked --no-default-features | grep -i uniffi; then
+            echo "FAIL: uniffi crates present in the --no-default-features dependency tree"
+            exit 1
+          else
+            echo "uniffi guard: no uniffi crates in the --no-default-features tree"
+          fi

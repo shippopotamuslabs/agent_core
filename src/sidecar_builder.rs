@@ -17,7 +17,7 @@ use crate::tool_context::ToolContextIndex;
 /// comparison: `pressure_ratio_at_call_model` measures how full the context window
 /// was just before the model call; `compaction_passes_this_turn` and
 /// `destructive_tiers_this_turn` record how much compaction work happened this turn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderContextSnapshot {
     pub transcript_revision: u64,
     pub sidecar_generation: u32,
@@ -35,19 +35,6 @@ pub struct ProviderContextSnapshot {
     /// to avoid f32 serialization drift. Use `value as f32 / 1000.0` to recover the ratio.
     #[serde(default)]
     pub pressure_ratio_at_call_model_millis: u32,
-}
-
-impl Default for ProviderContextSnapshot {
-    fn default() -> Self {
-        Self {
-            transcript_revision: 0,
-            sidecar_generation: 0,
-            sidecar_byte_len: 0,
-            compaction_passes_this_turn: 0,
-            destructive_tiers_this_turn: 0,
-            pressure_ratio_at_call_model_millis: 0,
-        }
-    }
 }
 
 /// Builds bounded JSON sidecar payloads per model call.
@@ -86,10 +73,9 @@ impl SidecarBuilder {
         budget: usize,
     ) -> Option<String> {
         let full = serde_json::to_string(ledger).ok()?;
-        let payload = if self.last_ledger_json.is_none() {
-            full.clone()
-        } else {
-            ledger_delta_json(self.last_ledger_json.as_ref().unwrap(), &full)
+        let payload = match self.last_ledger_json.as_ref() {
+            None => full.clone(),
+            Some(previous) => ledger_delta_json(previous, &full),
         };
 
         let bounded = enforce_byte_budget(

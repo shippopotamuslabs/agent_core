@@ -106,8 +106,8 @@ fn coerce_string(s: String, ty: &str) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::String(s)),
         "null" if trimmed.eq_ignore_ascii_case("null") => Value::Null,
-        "array" => coerce_string_to_array(trimmed).unwrap_or_else(|| Value::String(s)),
-        "object" => coerce_string_to_object(trimmed).unwrap_or_else(|| Value::String(s)),
+        "array" => coerce_string_to_array(trimmed).unwrap_or(Value::String(s)),
+        "object" => coerce_string_to_object(trimmed).unwrap_or(Value::String(s)),
         _ if trimmed.eq_ignore_ascii_case("null") => Value::Null,
         _ => Value::String(s),
     }

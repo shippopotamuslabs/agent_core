@@ -215,10 +215,12 @@ fn fb_r_004_tool_use_executes_exact_web_search_call() {
 #[test]
 fn fb_r_005_before_finish_pending_work_injects_message_and_calls_model_under_cap() {
     let eng = engine();
-    let mut config = AgentConfig::default();
-    config.enable_loop_hooks = true;
-    config.enable_pending_work_guard = true;
-    config.max_model_requests_per_turn = 2;
+    let config = AgentConfig {
+        enable_loop_hooks: true,
+        enable_pending_work_guard: true,
+        max_model_requests_per_turn: 2,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![user_message("ship")],
         config,
@@ -252,9 +254,11 @@ fn fb_r_005_before_finish_pending_work_injects_message_and_calls_model_under_cap
 #[test]
 fn fb_r_006_hooks_disabled_stop_finishes_without_second_model_call() {
     let eng = engine();
-    let mut config = AgentConfig::default();
-    config.enable_loop_hooks = false;
-    config.max_model_requests_per_turn = 1;
+    let config = AgentConfig {
+        enable_loop_hooks: false,
+        max_model_requests_per_turn: 1,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![user_message("ship")],
         config,
@@ -271,10 +275,12 @@ fn fb_r_006_hooks_disabled_stop_finishes_without_second_model_call() {
 #[test]
 fn fb_r_007_before_finish_pending_work_over_cap_fails_guardrail() {
     let eng = engine();
-    let mut config = AgentConfig::default();
-    config.enable_loop_hooks = true;
-    config.enable_pending_work_guard = true;
-    config.max_model_requests_per_turn = 1;
+    let config = AgentConfig {
+        enable_loop_hooks: true,
+        enable_pending_work_guard: true,
+        max_model_requests_per_turn: 1,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![user_message("ship")],
         config,
@@ -289,7 +295,10 @@ fn fb_r_007_before_finish_pending_work_over_cap_fails_guardrail() {
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
     match action {
-        AgentAction::Failed(AgentError::GuardrailExceeded { ref kind, detail: _ }) => {
+        AgentAction::Failed(AgentError::GuardrailExceeded {
+            ref kind,
+            detail: _,
+        }) => {
             assert_eq!("max_model_requests_per_turn", kind);
         }
         other => panic!("FB-R-007 expected max_model_requests_per_turn guardrail, got {other:?}"),
@@ -303,10 +312,12 @@ fn fb_r_007_before_finish_pending_work_over_cap_fails_guardrail() {
 #[test]
 fn fb_r_008_finish_blocked_without_injected_message_fails_guardrail() {
     let eng = engine();
-    let mut config = AgentConfig::default();
-    config.enable_loop_hooks = true;
-    config.enable_pending_work_guard = true;
-    config.max_model_requests_per_turn = 2;
+    let config = AgentConfig {
+        enable_loop_hooks: true,
+        enable_pending_work_guard: true,
+        max_model_requests_per_turn: 2,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![user_message("ship")],
         config,
@@ -321,7 +332,10 @@ fn fb_r_008_finish_blocked_without_injected_message_fails_guardrail() {
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
     match action {
-        AgentAction::Failed(AgentError::GuardrailExceeded { ref kind, detail: _ }) => {
+        AgentAction::Failed(AgentError::GuardrailExceeded {
+            ref kind,
+            detail: _,
+        }) => {
             assert_eq!("finish_blocked_without_injected_message", kind);
         }
         other => panic!(
@@ -337,10 +351,12 @@ fn fb_r_008_finish_blocked_without_injected_message_fails_guardrail() {
 #[test]
 fn fb_r_009_hook_continuation_builds_pending_request_before_awaiting_model() {
     let eng = engine();
-    let mut config = AgentConfig::default();
-    config.enable_loop_hooks = true;
-    config.enable_pending_work_guard = true;
-    config.max_model_requests_per_turn = 2;
+    let config = AgentConfig {
+        enable_loop_hooks: true,
+        enable_pending_work_guard: true,
+        max_model_requests_per_turn: 2,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![user_message("ship")],
         config,
@@ -374,12 +390,16 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
         Box::new(PanicExecutorCallback),
         None,
     );
-    let mut config = FfiAgentConfig::default();
-    config.enable_loop_hooks = true;
-    config.enable_pending_work_guard = true;
-    config.max_model_requests_per_turn = 2;
-    let mut capabilities = FfiSessionCapabilities::default();
-    capabilities.lifecycle_hooks_supported = true;
+    let config = FfiAgentConfig {
+        enable_loop_hooks: true,
+        enable_pending_work_guard: true,
+        max_model_requests_per_turn: 2,
+        ..Default::default()
+    };
+    let capabilities = FfiSessionCapabilities {
+        lifecycle_hooks_supported: true,
+        ..Default::default()
+    };
     let handle = eng.create_session(
         vec![FfiAgentMessage {
             id: "u1".into(),

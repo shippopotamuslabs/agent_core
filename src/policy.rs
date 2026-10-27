@@ -6,21 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextPolicyTier {
+    #[default]
     HostedMutable,
     HostedProxy,
     LocalMutable,
     FixedKv,
     HighContext,
     SmallContext,
-}
-
-impl Default for ContextPolicyTier {
-    fn default() -> Self {
-        ContextPolicyTier::HostedMutable
-    }
 }
 
 #[derive(Debug, Clone)]

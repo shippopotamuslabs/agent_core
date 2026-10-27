@@ -7,8 +7,8 @@
 //! retrieves the full payload via the engine's read/search APIs.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,8 +288,16 @@ mod tests {
     #[test]
     fn dedup_keeps_newest_reference_for_duplicate_content() {
         let mut store = ContextStore::default();
-        store.insert_entry(entry("old", ContextReferenceKind::ToolOutput, "dup payload"));
-        store.insert_entry(entry("new", ContextReferenceKind::ToolOutput, "dup payload"));
+        store.insert_entry(entry(
+            "old",
+            ContextReferenceKind::ToolOutput,
+            "dup payload",
+        ));
+        store.insert_entry(entry(
+            "new",
+            ContextReferenceKind::ToolOutput,
+            "dup payload",
+        ));
         assert!(store.get("old").is_none());
         assert_eq!(store.get("new").unwrap().content, "dup payload");
         assert_eq!(store.len(), 1);
@@ -308,8 +316,12 @@ mod tests {
     #[test]
     fn is_browsable_context_kind_excludes_infrastructure_refs() {
         assert!(is_browsable_context_kind(&ContextReferenceKind::ToolOutput));
-        assert!(!is_browsable_context_kind(&ContextReferenceKind::ToolSchema));
-        assert!(!is_browsable_context_kind(&ContextReferenceKind::ToolCatalogIndex));
+        assert!(!is_browsable_context_kind(
+            &ContextReferenceKind::ToolSchema
+        ));
+        assert!(!is_browsable_context_kind(
+            &ContextReferenceKind::ToolCatalogIndex
+        ));
     }
 
     #[test]
