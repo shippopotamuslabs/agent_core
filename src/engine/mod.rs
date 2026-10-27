@@ -1303,11 +1303,8 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let ctx = g.make_ctx(trigger);
         let before = g.estimate_pressure(CompactionTrigger::Manual).total_tokens;
 
-        let outcome = crate::compact::SummaryCompactionTier::default().apply(
-            g.session.clone(),
-            &g.config,
-            &ctx,
-        );
+        let outcome =
+            crate::compact::SummaryCompactionTier.apply(g.session.clone(), &g.config, &ctx);
         match outcome {
             CompactionOutcome::NeedsHostCall(mut req, sess) => {
                 g.session = sess;
@@ -2022,11 +2019,10 @@ impl InnerSession {
             .messages
             .iter()
             .filter(|m| {
-                m.metadata
+                !m.metadata
                     .get("superseded")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
-                    != true
             })
             .cloned()
             .collect();
@@ -2666,8 +2662,10 @@ mod tests {
 
     #[test]
     fn max_turns_disallows_tools_but_still_calls_model() {
-        let mut cfg = AgentConfig::default();
-        cfg.max_turns = 1;
+        let cfg = AgentConfig {
+            max_turns: 1,
+            ..Default::default()
+        };
         let eng = AgentEngine::new(
             Arc::new(PanicTransport),
             Arc::new(RecordingExecutor {

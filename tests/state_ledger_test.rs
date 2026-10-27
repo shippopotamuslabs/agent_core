@@ -64,8 +64,10 @@ fn s11_state_ledger_records_objective_constraints_decisions_open_questions() {
 
 #[test]
 fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_state_ledger = true;
+    let cfg = AgentConfig {
+        enable_state_ledger: true,
+        ..Default::default()
+    };
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
         Arc::new(PanicExec),

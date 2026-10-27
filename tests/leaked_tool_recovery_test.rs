@@ -50,9 +50,9 @@ fn cl_tr_01_recover_append_blocks_without_native_tools() {
 
 #[test]
 fn cl_tr_02_native_preferred_over_leaked_dsml() {
-    let buffered = format!(
+    let buffered =
         "preamble.<|DSML|tool_calls><|DSML|invoke name=\"append_blocks\"></|DSML|invoke></|DSML|tool_calls>"
-    );
+            .to_string();
     let native = vec![RawToolCall {
         id: Some("call_native".into()),
         name: "web_search".into(),

@@ -98,7 +98,7 @@ fn r_03_dsml_invoke_string_true_repair_false() {
                </| DSML | invoke></| DSML | tool_calls>";
     let batch = parse_tool_calls(raw);
     assert_eq!(batch.successes.len(), 1);
-    assert_eq!(batch.successes[0].repaired, false);
+    assert!(!batch.successes[0].repaired);
     assert!(batch.successes[0].repairs.is_empty());
 }
 

@@ -233,7 +233,10 @@ fn validate_required(
         }) {
             object.get(&required).is_none()
         } else {
-            object.get(&required).is_none_or(is_missing_value)
+            match object.get(&required) {
+                None => true,
+                Some(value) => is_missing_value(value),
+            }
         };
         if missing {
             return Err(ToolParseFailureReason::MissingRequiredParameter {
@@ -352,7 +355,7 @@ fn extract_litert_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeErro
         // hard-failure semantics.
         let after_open = full.end();
         let has_later_envelope = call.find_at(raw, after_open).is_some();
-        let has_argument_content = raw[after_open..].trim().len() > 0;
+        let has_argument_content = !raw[after_open..].trim().is_empty();
         if has_later_envelope || !has_argument_content {
             return Err(malformed(
                 Some(EnvelopeFormat::LiteRtCall),
@@ -504,7 +507,7 @@ fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
                     continue;
                 }
                 let body_raw = body[p_body_start..p_close.start()].trim();
-                let is_json = parameter.get(2).map_or(false, |m| m.as_str() == "false");
+                let is_json = parameter.get(2).is_some_and(|m| m.as_str() == "false");
                 args.insert(param_name, dsml_parameter_value(body_raw, is_json));
                 parameter_search_at = p_close.end().max(p_start + 1);
             }

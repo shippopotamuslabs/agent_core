@@ -176,9 +176,11 @@ mod tests {
 
     #[test]
     fn clears_old_web_search_keeps_recent_two() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
-        cfg.micro_keep_recent = 2;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            micro_keep_recent: 2,
+            ..Default::default()
+        };
 
         let session = AgentSession::new(
             vec![
@@ -192,7 +194,7 @@ mod tests {
         let before =
             super::estimate_session_pressure(&session, &cfg, &ctx(CompactionTrigger::MidTurn))
                 .total_tokens;
-        let tier = MicroCompactionTier::default();
+        let tier = MicroCompactionTier;
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::MidTurn));
         match outcome {
             CompactionOutcome::Applied(s, ev) => {
@@ -233,9 +235,11 @@ mod tests {
 
     #[test]
     fn append_blocks_never_cleared() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
-        cfg.micro_keep_recent = 0;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            micro_keep_recent: 0,
+            ..Default::default()
+        };
 
         let big = "B".repeat(400);
         let session = AgentSession::new(
@@ -243,26 +247,28 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::default();
+        let tier = MicroCompactionTier;
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::MidTurn));
         assert!(matches!(outcome, CompactionOutcome::NotApplicable));
     }
 
     #[test]
     fn micro_keep_recent_zero_clears_all_reproducible() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
-        cfg.micro_keep_recent = 0;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            micro_keep_recent: 0,
+            ..Default::default()
+        };
 
         let session = AgentSession::new(
             vec![
-                tool_msg("t1", "web_search", "first".into()),
-                tool_msg("t2", "web_extract", "second".into()),
+                tool_msg("t1", "web_search", "first"),
+                tool_msg("t2", "web_extract", "second"),
             ],
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::default();
+        let tier = MicroCompactionTier;
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::PostToolResult));
         match outcome {
             CompactionOutcome::Applied(s, ev) => {
@@ -281,19 +287,21 @@ mod tests {
 
     #[test]
     fn search_x_recent_respects_keep_window() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_semantics = crate::tool_semantics::test_fixture_enclave_semantics();
-        cfg.micro_keep_recent = 1;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            micro_keep_recent: 1,
+            ..Default::default()
+        };
 
         let session = AgentSession::new(
             vec![
-                tool_msg("a", "search_x_recent", "old".into()),
-                tool_msg("b", "search_x_recent", "new".into()),
+                tool_msg("a", "search_x_recent", "old"),
+                tool_msg("b", "search_x_recent", "new"),
             ],
             serde_json::Value::Null,
         );
 
-        let tier = MicroCompactionTier::default();
+        let tier = MicroCompactionTier;
         let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::Preflight));
         match outcome {
             CompactionOutcome::Applied(s, _) => {

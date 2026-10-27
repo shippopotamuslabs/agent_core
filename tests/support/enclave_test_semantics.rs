@@ -19,10 +19,16 @@ pub fn enclave_test_semantics() -> ToolSemanticsConfig {
     semantics
 }
 
+// Used by only some test binaries; each binary compiles this support module
+// separately, so unused-in-this-binary helpers must not fail the build.
+#[allow(dead_code)]
 pub fn enclave_test_catalog() -> ToolCatalog {
     ToolCatalog::from_semantics(&enclave_test_semantics()).expect("enclave test catalog")
 }
 
+// Used by only some test binaries; each binary compiles this support module
+// separately, so unused-in-this-binary helpers must not fail the build.
+#[allow(dead_code)]
 pub fn parse_enclave_tool_calls(raw: &str) -> ToolParseBatch {
     let semantics = enclave_test_semantics();
     let catalog = enclave_test_catalog();

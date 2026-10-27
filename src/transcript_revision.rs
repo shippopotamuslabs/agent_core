@@ -12,14 +12,8 @@ fn next_rewrite_message_id() -> String {
 }
 
 /// Monotonic destructive-rewrite counter for a session transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptRevision(pub u64);
-
-impl Default for TranscriptRevision {
-    fn default() -> Self {
-        Self(0)
-    }
-}
 
 /// Emitted once per compaction pass that applied at least one destructive tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

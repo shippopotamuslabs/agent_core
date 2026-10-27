@@ -181,7 +181,7 @@ fn is_agent_tool_budget_message(message: &AgentMessage) -> bool {
             .unwrap_or(false)
 }
 
-fn synthetic_budget_messages<'a>(messages: &'a [AgentMessage]) -> Vec<&'a AgentMessage> {
+fn synthetic_budget_messages(messages: &[AgentMessage]) -> Vec<&AgentMessage> {
     messages
         .iter()
         .filter(|m| is_agent_tool_budget_message(m))
@@ -374,8 +374,10 @@ fn tb_03_healthy_budget_skips_synthetic_injection() {
 /// TB-04 — tool-call budget exhausted.
 #[test]
 fn tb_04_budget_exhausted_disables_tools_with_reason() {
-    let mut cfg = AgentConfig::default();
-    cfg.max_turns = 1;
+    let cfg = AgentConfig {
+        max_turns: 1,
+        ..Default::default()
+    };
 
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
@@ -728,7 +730,6 @@ fn tb_11_invalid_phase_submit_tool_results_does_not_inject() {
 /// TB-12 — repair reject-only turn merges `_agent` before CallModel.
 #[test]
 fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
-    use agent_core::catalog::ToolCatalog;
     use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
 
     let reject_raw = RawToolCall {

@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 /// drained via `AgentEngine::drain_events(handle)` (AGENT-049).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// large_enum_variant: boxing a variant would change this public serde-tagged API
+// consumed by both hosts; the size cost is accepted deliberately.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentAction {
     /// Host must call the transport (provider inference) and then
     /// call `submit_model_response`.

@@ -28,9 +28,11 @@ impl AgentToolExecutor for PanicExec {
 
 #[test]
 fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_file_condensation = true;
-    cfg.file_outline_threshold_tokens = 100;
+    let cfg = AgentConfig {
+        enable_file_condensation: true,
+        file_outline_threshold_tokens: 100,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         file_backed_context_supported: true,
         ..Default::default()
@@ -62,9 +64,11 @@ fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
 
 #[test]
 fn e7_unparseable_file_context_becomes_filename_only() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_file_condensation = true;
-    cfg.file_outline_threshold_tokens = 100;
+    let cfg = AgentConfig {
+        enable_file_condensation: true,
+        file_outline_threshold_tokens: 100,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         file_backed_context_supported: true,
         ..Default::default()
@@ -95,9 +99,11 @@ fn e7_unparseable_file_context_becomes_filename_only() {
 #[test]
 fn m7_file_context_does_not_inline_full_body_into_model_messages() {
     let body = format!("pub fn alpha() {{}}\n{}", "SENTINEL_FULL_BODY".repeat(512));
-    let mut cfg = AgentConfig::default();
-    cfg.enable_file_condensation = true;
-    cfg.file_outline_threshold_tokens = 100;
+    let cfg = AgentConfig {
+        enable_file_condensation: true,
+        file_outline_threshold_tokens: 100,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         file_backed_context_supported: true,
         ..Default::default()

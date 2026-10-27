@@ -310,10 +310,11 @@ fn normalize_to_snake_case(input: &str) -> String {
         if ch.is_uppercase() {
             let prev_lower = index > 0 && chars[index - 1].is_lowercase();
             let next_lower = index + 1 < chars.len() && chars[index + 1].is_lowercase();
-            if prev_lower || (index > 0 && chars[index - 1].is_ascii_uppercase() && next_lower) {
-                if !result.ends_with('_') && !result.is_empty() {
-                    result.push('_');
-                }
+            if (prev_lower || (index > 0 && chars[index - 1].is_ascii_uppercase() && next_lower))
+                && !result.ends_with('_')
+                && !result.is_empty()
+            {
+                result.push('_');
             }
             for lower in ch.to_lowercase() {
                 result.push(lower);
@@ -596,7 +597,7 @@ fn strip_json_fences(s: &str) -> String {
     if let Some(rest) = trimmed.strip_prefix("```") {
         return strip_json_fences(rest);
     }
-    if let Some(index) = trimmed.find(|ch| ch == '{' || ch == '[') {
+    if let Some(index) = trimmed.find(['{', '[']) {
         return trimmed[index..].trim().to_string();
     }
     trimmed

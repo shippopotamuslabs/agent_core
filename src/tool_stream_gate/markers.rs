@@ -166,12 +166,11 @@ pub fn earliest_tentative_trigger(
         }
     }
 
-    if let Some(angle) = last_ambiguous_angle_bracket(text) {
-        if angle >= search_from {
-            if best.map(|(b, _)| angle < b).unwrap_or(true) {
-                best = Some((angle, TentativeKind::AngleBracket));
-            }
-        }
+    let better_angle = last_ambiguous_angle_bracket(text)
+        .filter(|angle| *angle >= search_from)
+        .filter(|angle| best.map(|(b, _)| *angle < b).unwrap_or(true));
+    if let Some(angle) = better_angle {
+        best = Some((angle, TentativeKind::AngleBracket));
     }
 
     best
@@ -312,6 +311,27 @@ pub fn last_ambiguous_angle_bracket(text: &str) -> Option<usize> {
     None
 }
 
+pub fn might_be_tool_marker_prefix(suffix: &str) -> bool {
+    if !suffix.starts_with('<') {
+        return false;
+    }
+    let tail = &suffix[1..];
+    if tail.is_empty() {
+        return true;
+    }
+    if tail
+        .chars()
+        .all(|c| c == '|' || c == '｜' || c.is_whitespace())
+    {
+        return true;
+    }
+    const PREFIXES: &[&str] = &["DSML", "tool_call", "tool_calls", "![CDATA[<tool", "tool>"];
+    PREFIXES.iter().any(|prefix| {
+        prefix.len() >= tail.len() && prefix[..tail.len()].eq_ignore_ascii_case(tail)
+            || tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,25 +365,4 @@ mod tests {
             HoldResolution::StillTentative
         );
     }
-}
-
-pub fn might_be_tool_marker_prefix(suffix: &str) -> bool {
-    if !suffix.starts_with('<') {
-        return false;
-    }
-    let tail = &suffix[1..];
-    if tail.is_empty() {
-        return true;
-    }
-    if tail
-        .chars()
-        .all(|c| c == '|' || c == '｜' || c.is_whitespace())
-    {
-        return true;
-    }
-    const PREFIXES: &[&str] = &["DSML", "tool_call", "tool_calls", "![CDATA[<tool", "tool>"];
-    PREFIXES.iter().any(|prefix| {
-        prefix.len() >= tail.len() && prefix[..tail.len()].eq_ignore_ascii_case(tail)
-            || tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix)
-    })
 }

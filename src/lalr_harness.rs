@@ -467,7 +467,7 @@ pub fn run_summary_compaction_with_objective(ledger: &mut StateLedger, session: 
     );
     let config = AgentConfig::default();
     let ctx = compaction_ctx(CompactionTrigger::Preflight);
-    let tier = SummaryCompactionTier::default();
+    let tier = SummaryCompactionTier;
     let CompactionOutcome::NeedsHostCall(req, mut working) =
         tier.apply(session.clone(), &config, &ctx)
     else {

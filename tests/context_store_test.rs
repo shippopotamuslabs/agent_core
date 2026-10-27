@@ -139,8 +139,10 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
     // Drive the spill through the engine so the engine-owned ContextStore
     // is the one that holds the entry. Use a tiny spill threshold so any
     // realistic tool result triggers a spill.
-    let mut cfg = AgentConfig::default();
-    cfg.tool_spill_threshold_bytes = 10;
+    let cfg = AgentConfig {
+        tool_spill_threshold_bytes: 10,
+        ..Default::default()
+    };
 
     let eng = AgentEngine::new(
         Arc::new(PanicTransport),
@@ -215,7 +217,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
 #[test]
 fn s10_summarized_history_range_remains_searchable() {
     // Setup: session with a key decision in message a0.
-    let msgs = vec![
+    let msgs = [
         AgentMessage {
             id: "u0".into(),
             role: AgentRole::User,
@@ -245,8 +247,10 @@ fn s10_summarized_history_range_remains_searchable() {
 
 #[test]
 fn browsable_context_references_exclude_infrastructure_kinds() {
-    let mut cfg = AgentConfig::default();
-    cfg.enable_tool_schema_deferral = true;
+    let cfg = AgentConfig {
+        enable_tool_schema_deferral: true,
+        ..Default::default()
+    };
     let caps = SessionCapabilities {
         tool_schema_deferral_supported: true,
         ..Default::default()
@@ -374,10 +378,12 @@ fn e4_missing_context_reference_read_returns_not_found() {
 
 #[test]
 fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
-    let mut cfg = AgentConfig::default();
-    cfg.require_snapshot_before_fifo = true;
-    cfg.enable_context_store = false; // disables snapshot creation
-    cfg.allow_fifo_on_preflight = true;
+    let cfg = AgentConfig {
+        require_snapshot_before_fifo: true,
+        enable_context_store: false, // disables snapshot creation
+        allow_fifo_on_preflight: true,
+        ..Default::default()
+    };
 
     let session = AgentSession::new(
         vec![
@@ -418,7 +424,7 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
         suppress_summary_tier: false,
     };
 
-    let outcome = FifoCompactionTier::default().apply(session, &cfg, &ctx);
+    let outcome = FifoCompactionTier.apply(session, &cfg, &ctx);
     // Spec: outcome is CompactionFailed with tier="fifo",
     // reason="history snapshot required before fifo".
     assert!(
@@ -437,9 +443,11 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
 /// not garbage-collect store entries that retrieval hints still point at.
 #[test]
 fn spilled_reference_remains_readable_across_turn_compaction_passes() {
-    let mut cfg = AgentConfig::default();
-    cfg.tool_spill_threshold_bytes = 10;
-    cfg.allow_fifo_on_preflight = true;
+    let cfg = AgentConfig {
+        tool_spill_threshold_bytes: 10,
+        allow_fifo_on_preflight: true,
+        ..Default::default()
+    };
 
     let filler = "history ".repeat(220);
     let mut initial: Vec<AgentMessage> = Vec::new();

@@ -269,8 +269,10 @@ impl AgentConfig {
     }
 
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
-        let mut config = Self::default();
-        config.long_loop = LongLoopPolicy::for_policy_tier(tier);
+        let mut config = Self {
+            long_loop: LongLoopPolicy::for_policy_tier(tier),
+            ..Self::default()
+        };
         match tier {
             ContextPolicyTier::HostedMutable | ContextPolicyTier::HighContext => {
                 config.threshold_ratio = 0.80;

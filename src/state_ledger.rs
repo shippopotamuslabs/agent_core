@@ -59,7 +59,7 @@ fn until_sentence_end(s: &str) -> String {
 }
 
 fn parse_lines(text: &str) -> Vec<&str> {
-    text.split(|c: char| c == '\n').collect()
+    text.split('\n').collect()
 }
 
 impl StateLedger {
