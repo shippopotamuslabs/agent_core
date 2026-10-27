@@ -94,48 +94,25 @@ fn parse_success_bool_field(
     result.get_bool_coerced(field)
 }
 
-/// Typed synthetic finalize arguments (ENC-290).
-///
-/// Carries the three finalize values without touching string keys: the
-/// configured wire names (`id_field` / `append_blocks_field` /
-/// `completion_field`) are applied exactly once in
-/// [`ArtifactFinalizeArgs::into_arguments_json`], which performs the single
-/// serialization. The [`ToolSemanticsConfig`] `Value` payload
-/// (`empty_append_payload_value`) is cloned exactly once, at this typed
-/// boundary — no other site clones config `Value`s into call arguments.
-#[derive(Debug, Clone)]
-pub struct ArtifactFinalizeArgs {
-    artifact_id: String,
-    blocks_payload: Value,
-    is_complete: bool,
-}
-
-impl ArtifactFinalizeArgs {
-    /// Builds the finalize args for one pending artifact. The empty-blocks
-    /// `Value` is cloned once here, at the config-file boundary.
-    pub fn finalize_for(artifact: &crate::tool_semantics::ArtifactToolSemantics, id: &str) -> Self {
-        Self {
-            artifact_id: id.to_string(),
-            blocks_payload: artifact.empty_append_payload_value.clone(),
-            is_complete: true,
-        }
-    }
-
-    /// Renders the arguments object with the configured wire field names and
-    /// serializes it exactly once.
-    pub fn into_arguments_json(
-        self,
-        artifact: &crate::tool_semantics::ArtifactToolSemantics,
-    ) -> String {
-        let mut args = serde_json::Map::with_capacity(3);
-        args.insert(artifact.id_field.clone(), Value::String(self.artifact_id));
-        args.insert(artifact.append_blocks_field.clone(), self.blocks_payload);
-        args.insert(
-            artifact.completion_field.clone(),
-            Value::Bool(self.is_complete),
-        );
-        Value::Object(args).to_string()
-    }
+/// Renders the synthetic finalize call's arguments JSON for one pending
+/// artifact (ENC-290): the three finalize values keyed by the configured
+/// wire names (`id_field` / `append_blocks_field` / `completion_field`),
+/// serialized exactly once. The [`ToolSemanticsConfig`] `Value` payload
+/// (`empty_append_payload_value`) is cloned exactly once, here at the
+/// typed boundary — no other site clones config `Value`s into call
+/// arguments.
+pub fn finalize_arguments_json(
+    artifact: &crate::tool_semantics::ArtifactToolSemantics,
+    id: &str,
+) -> String {
+    let mut args = serde_json::Map::with_capacity(3);
+    args.insert(artifact.id_field.clone(), Value::String(id.to_string()));
+    args.insert(
+        artifact.append_blocks_field.clone(),
+        artifact.empty_append_payload_value.clone(),
+    );
+    args.insert(artifact.completion_field.clone(), Value::Bool(true));
+    Value::Object(args).to_string()
 }
 
 pub fn synthetic_finalize_calls_with_semantics(
@@ -148,8 +125,7 @@ pub fn synthetic_finalize_calls_with_semantics(
     pending
         .iter()
         .map(|id| {
-            let arguments_json =
-                ArtifactFinalizeArgs::finalize_for(artifact, id).into_arguments_json(artifact);
+            let arguments_json = finalize_arguments_json(artifact, id);
             ToolCallRecord {
                 call_id: format!("{}{}", artifact.synthetic_call_id_prefix, id),
                 name: artifact.append_tool_name.clone(),
@@ -215,11 +191,11 @@ mod tests {
 
     #[test]
     fn synthetic_finalize_args_byte_identical() {
-        // ENC-290: the typed `ArtifactFinalizeArgs` path must emit exactly the
-        // JSON the direct-`Value` construction produced.
+        // ENC-290: the typed finalize path must emit exactly the JSON the
+        // direct-`Value` construction produced.
         let semantics = crate::tool_semantics::test_fixture_enclave_semantics();
         let artifact = semantics.artifact.as_ref().expect("artifact semantics");
-        let json = ArtifactFinalizeArgs::finalize_for(artifact, "a").into_arguments_json(artifact);
+        let json = finalize_arguments_json(artifact, "a");
         assert_eq!(json, r#"{"artifactId":"a","blocks":[],"isComplete":true}"#);
 
         let p: HashSet<_> = ["a".into()].into_iter().collect();

@@ -50,7 +50,8 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     let action = eng.request_manual_compact(
@@ -116,7 +117,8 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     // Should fire preflight summary tier.
     let _ = eng.next_action(&handle);
@@ -181,7 +183,8 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     let action = eng.request_manual_compact(
         &handle,
@@ -241,7 +244,8 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     // Engine is now AwaitingModel.

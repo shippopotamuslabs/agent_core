@@ -147,7 +147,8 @@ impl AgentEngine {
         let initial_active_tool_names = io.schemas.initial_active_names();
         let session_context = session_context.into();
         let pending_work_items: Vec<PendingWorkItem> = session_context
-            .pending_work_texts()
+            .pending_work
+            .clone()
             .into_iter()
             .map(|text| PendingWorkItem { text })
             .collect();
@@ -1107,9 +1108,7 @@ impl InnerSession {
     }
 
     fn remember_history_snapshot_ids(&mut self, message_ids: Vec<String>) {
-        self.session
-            .session_context
-            .set_history_snapshot_ids(message_ids);
+        self.session.session_context.history_snapshot_ids = message_ids;
     }
 
     fn run_compaction_pass(
@@ -1412,6 +1411,7 @@ mod tests {
             "[]".into(),
             "sys".into(),
         )
+        .expect("valid test io params")
     }
 
     fn io_large_window() -> SessionIoParams {
@@ -1423,6 +1423,7 @@ mod tests {
             "[]".into(),
             "sys".into(),
         )
+        .expect("valid test io params")
     }
 
     #[test]

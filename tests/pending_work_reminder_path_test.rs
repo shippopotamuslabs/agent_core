@@ -89,6 +89,7 @@ fn io() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn pending_request(engine: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {

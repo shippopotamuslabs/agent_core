@@ -21,6 +21,7 @@ fn io_large_window() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn caps_no_summary() -> SessionCapabilities {
@@ -180,7 +181,8 @@ fn char_reject_only_turn_returns_to_model() {
         "[]".into(),
         r#"[{"name":"web_search"}]"#.into(),
         "sys".into(),
-    );
+    )
+    .expect("valid test io params");
     let h = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),

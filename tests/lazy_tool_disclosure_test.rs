@@ -74,7 +74,8 @@ fn create_session(
             REGISTRY_JSON.into(),
             tools_schema_json.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     )
 }
 
