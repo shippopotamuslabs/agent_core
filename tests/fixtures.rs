@@ -132,7 +132,8 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
         "[]".into(),
         f.io.tools_schema_json.clone(),
         f.io.system_prompt.clone(),
-    );
+    )
+    .expect("valid test io params");
     let mut config = f.initial_session.config.clone();
     if config.tool_semantics.catalog.tools.is_empty() {
         config.tool_semantics = enclave_test_semantics();

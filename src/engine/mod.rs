@@ -1415,6 +1415,7 @@ mod tests {
             "[]".into(),
             "sys".into(),
         )
+        .expect("valid test io params")
     }
 
     fn io_large_window() -> SessionIoParams {
@@ -1426,6 +1427,7 @@ mod tests {
             "[]".into(),
             "sys".into(),
         )
+        .expect("valid test io params")
     }
 
     #[test]

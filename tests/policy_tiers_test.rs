@@ -90,7 +90,8 @@ fn s22_high_context_raises_thresholds() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {

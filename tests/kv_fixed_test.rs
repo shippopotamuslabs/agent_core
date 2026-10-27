@@ -19,6 +19,7 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
             "[]".into(),
             "sys".into(),
         )
+        .expect("valid test io params")
     };
     let msgs = vec![
         AgentMessage {
@@ -135,7 +136,8 @@ fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     let action = eng.next_action(&handle);

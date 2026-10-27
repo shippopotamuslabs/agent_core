@@ -29,6 +29,7 @@ fn io_large() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {
