@@ -57,7 +57,7 @@ use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, S
 
 use state::{EnginePhase, InnerSession, PendingToolTurn};
 
-fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
+pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
         tier,
         CompactionTier::Micro
@@ -1369,69 +1369,49 @@ impl InnerSession {
             };
 
             let pipeline = compaction_pipeline_for_plan(&effective_plan);
-            match pipeline.run_plan(
+            let outcome = pipeline.run_plan(
                 self.session.clone(),
                 &effective_ctx,
                 &self.config,
                 &effective_plan,
+            );
+            // FRG-47: the 4-arm outcome match is a decision stage; the
+            // dispatch owns the loop and the return. Post pressure is read
+            // only for the NotApplicable arm, exactly as before.
+            let post_pressure = matches!(outcome, CompactionOutcome::NotApplicable)
+                .then(|| self.estimate_pressure(trigger));
+            match compaction::decide_pipeline_outcome(
+                compaction::PipelineOutcomeInputs {
+                    session: &mut self.session,
+                    config: &self.config,
+                    capabilities: &self.capabilities,
+                    context_store: &mut self.context_store,
+                    state_ledger: &mut self.state_ledger,
+                    events: &mut self.events,
+                    pending_summary_req: &mut self.pending.summary_req,
+                    pending_summary_ctx: &mut self.pending.summary_ctx,
+                    phase: &mut self.phase,
+                    turn_index: self.turn_index,
+                    trigger,
+                    loop_ctx: ctx,
+                    forced_by_non_ratio,
+                    entered_for_long_loop_only,
+                    post_pressure,
+                    sync_applied: &mut sync_applied,
+                    last_history_ref: &mut last_history_ref,
+                    destructive_tiers: &mut destructive_tiers,
+                    destructive_tiers_this_turn: &mut self.destructive_tiers_this_turn,
+                    compaction_passes_this_turn: &mut self.compaction_passes_this_turn,
+                    defer_compaction_failure,
+                    message_count_before,
+                },
+                outcome,
             ) {
-                CompactionOutcome::NeedsHostCall(mut req, sess) => {
-                    // If we forced MidTurn context for non-ratio compaction,
-                    // restore the original trigger in the SummaryRequest.
-                    if forced_by_non_ratio {
-                        req.trigger = trigger;
-                    }
-                    // Shared staging: session replace + history/ledger refs.
-                    let req = Self::stage_summary_request(self, sess, req, trigger);
-                    self.pending.summary_req = Some(req.clone());
-                    self.pending.summary_ctx = Some(ctx);
-                    self.phase = EnginePhase::AwaitingSummary;
-                    return Ok(Some(AgentAction::RequestSummary(req)));
+                compaction::PipelineDecision::ReturnOk(action) => {
+                    return Ok(action.map(|boxed| *boxed));
                 }
-                CompactionOutcome::Applied(sess, ev) => {
-                    if is_destructive_compaction_tier(&ev.tier) {
-                        destructive_tiers.push(ev.tier.clone());
-                        self.destructive_tiers_this_turn += 1;
-                    }
-                    self.compaction_passes_this_turn += 1;
-                    self.session = sess;
-                    self.emit(AgentEvent::CompactionApplied(ev.clone()));
-                    sync_applied = true;
-                    if self.capabilities.kv_fixed {
-                        self.emit(AgentEvent::KvCacheInvalidated {
-                            reason: format!("Compacted: {}", ev.tier),
-                        });
-                    }
-                    // loop until under threshold or NeedsHostCall / stuck
-                }
-                CompactionOutcome::NotApplicable => {
-                    let p2 = self.estimate_pressure(trigger);
-                    if exceeds_hard_prompt_ceiling(&p2)
-                        && !entered_for_long_loop_only
-                        && !sync_applied
-                        && !defer_compaction_failure
-                    {
-                        return Err(AgentError::CompactionFailed {
-                            tier: "pipeline".into(),
-                            reason:
-                                "No compaction tier applied while context remains over threshold"
-                                    .into(),
-                        });
-                    }
-                    if sync_applied {
-                        self.emit_post_compact(
-                            trigger,
-                            None,
-                            last_history_ref,
-                            &destructive_tiers,
-                            message_count_before,
-                        );
-                    }
-                    return Ok(None);
-                }
-                CompactionOutcome::Failed(err) => {
-                    return Err(err);
-                }
+                compaction::PipelineDecision::ReturnErr(err) => return Err(err),
+                compaction::PipelineDecision::LoopAgain => {}
             }
         }
     }
