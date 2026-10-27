@@ -2,7 +2,7 @@
 
 use agent_core::context_store::ContextStore;
 use agent_core::lalr_harness::{
-    collect_three_call_model_snapshots, default_long_loop_io, noop_transport_engine,
+    collect_three_call_model_snapshots, default_long_loop_io, test_engine,
 };
 use agent_core::long_loop_policy::LongLoopPolicy;
 use agent_core::sidecar_builder::SidecarBuilder;
@@ -57,7 +57,7 @@ fn lalr_06_second_turn_ledger_delta_is_minimal() {
 
 #[test]
 fn lalr_10_sidecar_generation_increments_per_call_model() {
-    let engine = noop_transport_engine();
+    let engine = test_engine();
     let handle = engine.create_session(
         vec![],
         agent_core::session::AgentConfig::default(),

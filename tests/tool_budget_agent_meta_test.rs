@@ -46,7 +46,7 @@ fn default_caps() -> SessionCapabilities {
     }
 }
 
-fn new_session_with_transport(
+fn new_session(
     eng: &AgentEngine,
     config: AgentConfig,
 ) -> agent_core::engine::SessionHandle {
@@ -57,10 +57,6 @@ fn new_session_with_transport(
         serde_json::Value::Null,
         io_large(),
     )
-}
-
-fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::SessionHandle {
-    new_session_with_transport(eng, config)
 }
 
 fn parse_json(content: &str) -> Value {
@@ -854,7 +850,7 @@ fn md_04_reason_key_absent_when_allow_tool_call_true() {
 #[test]
 fn md_05_budget_injection_not_invoked_from_next_action_transport() {
     let eng = AgentEngine::new();
-    let h = new_session_with_transport(&eng, AgentConfig::default());
+    let h = new_session(&eng, AgentConfig::default());
 
     let AgentAction::CallModel(req) = eng.next_action(&h) else {
         panic!("MD-05 expected CallModel");
