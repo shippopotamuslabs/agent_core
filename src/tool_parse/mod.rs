@@ -650,7 +650,10 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
         // open tag must be the last one in the text and the payload must be
         // non-empty. GLM form requires an explicit close and never recovers.
         if open.find_at(raw, start.end()).is_some() {
-            return Err(malformed(Some(EnvelopeFormat::ToolCall), "unclosed tool_call"));
+            return Err(malformed(
+                Some(EnvelopeFormat::ToolCall),
+                "unclosed tool_call",
+            ));
         }
         let payload = raw[start.end()..].trim();
         if payload.is_empty() {
@@ -660,7 +663,10 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
             ));
         }
         if payload.contains("<arg_key>") {
-            return Err(malformed(Some(EnvelopeFormat::ToolCall), "unclosed tool_call"));
+            return Err(malformed(
+                Some(EnvelopeFormat::ToolCall),
+                "unclosed tool_call",
+            ));
         }
         return recover_truncated_tool_call(raw, &start);
     };
