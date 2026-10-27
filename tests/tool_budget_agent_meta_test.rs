@@ -6,66 +6,16 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use support::enclave_test_agent_config::enclave_test_agent_config;
 use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::Value;
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(
-        &self,
-        _: ModelRequest,
-    ) -> Result<ModelResponse, agent_core::events::AgentError> {
-        panic!("transport unused")
-    }
-}
-
-struct RecordingTransport {
-    captured_requests: Mutex<Vec<ModelRequest>>,
-}
-
-impl AgentTransport for RecordingTransport {
-    fn complete_model_turn(
-        &self,
-        request: ModelRequest,
-    ) -> Result<ModelResponse, agent_core::events::AgentError> {
-        self.captured_requests.lock().unwrap().push(request);
-        Ok(ModelResponse::text_only("done"))
-    }
-}
-
-struct RecordingExecutor {
-    results: Mutex<Vec<ToolCallRecord>>,
-}
-
-impl AgentToolExecutor for RecordingExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
-        self.results.lock().unwrap().extend(calls.clone());
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: r#"{"results":[]}"#.into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
 
 fn io_large() -> SessionIoParams {
     SessionIoParams {
@@ -96,8 +46,8 @@ fn default_caps() -> SessionCapabilities {
     }
 }
 
-fn new_session_with_transport<T: AgentTransport>(
-    eng: &AgentEngine<T, RecordingExecutor, NoOpSummarizer>,
+fn new_session_with_transport(
+    eng: &AgentEngine,
     config: AgentConfig,
 ) -> agent_core::engine::SessionHandle {
     eng.create_session(
@@ -109,10 +59,7 @@ fn new_session_with_transport<T: AgentTransport>(
     )
 }
 
-fn new_session(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
-    config: AgentConfig,
-) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::SessionHandle {
     new_session_with_transport(eng, config)
 }
 
@@ -195,7 +142,7 @@ fn latest_synthetic_budget_message(messages: &[AgentMessage]) -> &AgentMessage {
 }
 
 fn drive_model_tool_batch(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+    eng: &AgentEngine,
     handle: &agent_core::engine::SessionHandle,
     call_ids: &[&str],
     result_jsons: &[&str],
@@ -245,13 +192,7 @@ fn drive_model_tool_batch(
 /// TB-01 — single object result keeps tool bytes stable; budget on synthetic row.
 #[test]
 fn tb_01_single_tool_result_merges_agent_mid_loop() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
@@ -277,13 +218,7 @@ fn tb_01_single_tool_result_merges_agent_mid_loop() {
 /// TB-02 — parallel batch leaves tool payloads clean; one synthetic budget row.
 #[test]
 fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
@@ -348,13 +283,7 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
 /// TB-03 — healthy budget skips synthetic injection.
 #[test]
 fn tb_03_healthy_budget_skips_synthetic_injection() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
 
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"status":"ok"}"#]);
@@ -379,13 +308,7 @@ fn tb_04_budget_exhausted_disables_tools_with_reason() {
         ..Default::default()
     };
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, cfg);
 
     drive_model_tool_batch(&eng, &h, &["c1"], &[r#"{"results":[]}"#]);
@@ -416,13 +339,7 @@ fn tb_04_budget_exhausted_disables_tools_with_reason() {
 /// TB-05 — soft-failure streak exhausted.
 #[test]
 fn tb_05_soft_failure_streak_sets_reason() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     // Streak 2: allow still true for the model tool request; becomes 3 after soft-failure result.
     h.integration_test_seed_guardrails(5, 2, 0, vec![]);
@@ -450,13 +367,7 @@ fn tb_05_soft_failure_streak_sets_reason() {
 /// TB-06 — envelope-parse streak exhausted.
 #[test]
 fn tb_06_envelope_parse_streak_sets_reason() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     // Envelope streak 2: allow true for CallModel; hits limit after parse failure.
     h.integration_test_seed_guardrails(2, 0, 2, vec![]);
@@ -490,13 +401,7 @@ fn tb_06_envelope_parse_streak_sets_reason() {
 /// TB-07 — plain-text tool result appends synthetic budget message.
 #[test]
 fn tb_07_non_json_tool_result_appends_synthetic_budget_message() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
 
     drive_model_tool_batch(&eng, &h, &["c1"], &["OK: 3 files"]);
@@ -514,13 +419,7 @@ fn tb_07_non_json_tool_result_appends_synthetic_budget_message() {
 /// TB-08 — JSON array tool result appends synthetic budget message.
 #[test]
 fn tb_08_json_array_result_appends_synthetic_budget_message() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
 
     drive_model_tool_batch(&eng, &h, &["c1"], &["[1,2,3]"]);
@@ -538,13 +437,7 @@ fn tb_08_json_array_result_appends_synthetic_budget_message() {
 /// TB-09 — greedy append_blocks raises limit to 35.
 #[test]
 fn tb_09_greedy_append_blocks_raises_limit_to_35() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     h.integration_test_seed_guardrails(35, 0, 0, vec!["append_blocks".into()]);
 
@@ -595,13 +488,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
 /// TB-10 — skip_count auto-finalize path still injects budget.
 #[test]
 fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
 
     // Reach executed=4 via one normal tool batch from seeded 3.
@@ -691,13 +578,7 @@ fn tb_10_skip_count_auto_finalize_path_still_injects_budget() {
 /// TB-11 — invalid phase submit_tool_results does not inject.
 #[test]
 fn tb_11_invalid_phase_submit_tool_results_does_not_inject() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
 
     eng.submit_tool_results(
@@ -753,13 +634,7 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
     let expected_error: Value =
         serde_json::from_str(&error_json_for_model).expect("TB-12 reject json");
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
@@ -812,13 +687,7 @@ fn tb_12_reject_only_synthetic_turn_merges_agent_before_call_model() {
 /// MD-01 — at most one budget prose message per batch when injection triggers.
 #[test]
 fn md_01_only_one_tool_message_contains_agent_per_batch() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(16, 0, 0, vec![]);
 
@@ -937,13 +806,7 @@ fn md_02_production_kotlin_sources_do_not_reference_agent() {
 /// MD-03 — merge keeps original tool payload keys.
 #[test]
 fn md_03_merge_keeps_original_tool_keys() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
@@ -970,13 +833,7 @@ fn md_03_merge_keeps_original_tool_keys() {
 /// MD-04 — reason absent in prose when allow_tool_call true.
 #[test]
 fn md_04_reason_key_absent_when_allow_tool_call_true() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 
@@ -989,18 +846,14 @@ fn md_04_reason_key_absent_when_allow_tool_call_true() {
 }
 
 /// MD-05 — budget injection only on submit paths, not from next_action alone.
+///
+/// ENC-285: the engine no longer takes a transport object (driven exclusively via
+/// the polling surface), so there is no transport recording to assert on here; the
+/// remaining assertions still pin the behavior — `next_action` alone must not
+/// inject `_agent` budget metadata.
 #[test]
 fn md_05_budget_injection_not_invoked_from_next_action_transport() {
-    let transport = Arc::new(RecordingTransport {
-        captured_requests: Mutex::new(Vec::new()),
-    });
-    let eng = AgentEngine::new(
-        transport.clone(),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session_with_transport(&eng, AgentConfig::default());
 
     let AgentAction::CallModel(req) = eng.next_action(&h) else {
@@ -1013,23 +866,12 @@ fn md_05_budget_injection_not_invoked_from_next_action_transport() {
             "MD-05 no _agent before submit_tool_results"
         );
     }
-
-    assert!(
-        transport.captured_requests.lock().unwrap().is_empty(),
-        "MD-05 transport not invoked on next_action alone"
-    );
 }
 
 /// MD-06 — merge preserves executor-provided `_agent` fields.
 #[test]
 fn md_06_merge_preserves_executor_provided_agent_fields() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, AgentConfig::default());
     h.integration_test_seed_guardrails(15, 0, 0, vec![]);
 

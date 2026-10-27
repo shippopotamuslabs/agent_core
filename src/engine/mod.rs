@@ -28,14 +28,14 @@ use crate::compact::{
     apply_summary_result,
     artifact_snapshot::persist_artifact_snapshot,
     artifact_squash::extract_artifact_anchor,
-    compaction_pipeline_for_plan, default_compaction_pipeline, estimate_session_pressure,
+    compaction_pipeline_for_plan, estimate_session_pressure,
     history_snapshot::snapshot_history_range,
     policy::build_compaction_plan,
     tool_spill::{
         activation_tools_from_retrieval_hint, spill_tool_messages_in_session,
         spill_tool_result_if_needed,
     },
-    CompactionContext, CompactionOutcome, CompactionPipeline, CompactionTier as _,
+    CompactionContext, CompactionOutcome, CompactionTier as _,
 };
 use crate::context_store::{
     insert_terminal_output, is_browsable_context_kind, ContextReference, ContextStore,
@@ -43,7 +43,6 @@ use crate::context_store::{
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 use crate::file_context::condense_file_context;
 use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
-use crate::host::{AgentSummarizer, AgentToolExecutor, AgentTransport};
 use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
@@ -167,40 +166,29 @@ fn inject_tool_budget_after_batch(
     );
 }
 
-/// Generic agent loop engine (desktop-ready traits; Android drives via `submit_*`).
-pub struct AgentEngine<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> {
-    #[allow(dead_code)]
-    transport: Arc<T>,
-    #[allow(dead_code)]
-    executor: Arc<E>,
-    #[allow(dead_code)]
-    summarizer: Arc<S>,
-    #[allow(dead_code)]
-    pipeline: Arc<CompactionPipeline>,
+/// Session state machine: hosts drive it exclusively through the polling surface
+/// (`next_action` / `submit_model_response` / `submit_tool_results` / `submit_summary`).
+///
+/// ENC-285 decision (documented once, here): the `AgentEngine<T, E, S>` generic port
+/// injection (`AgentTransport` / `AgentToolExecutor` / `AgentSummarizer` Arcs) was
+/// decorative DI — the fields were `#[allow(dead_code)]` and never invoked; the only
+/// in-repo callers of `complete_model_turn` / `execute_tools` / `summarize` were the
+/// UniFFI callback shims themselves. Hosts (Kotlin via UniFFI, native Rust) already
+/// drove the polling contract, so construction no longer takes undriven trait objects.
+/// The `host.rs` port traits, the `ffi::callbacks` shims, and the UniFFI callback
+/// interfaces were removed with the generics: no concrete future direct-driver is
+/// ticketed, and retaining them would preserve the same misleading execution model.
+/// The never-read stored `CompactionPipeline` (and its zero-caller `with_pipeline`
+/// constructor) went with the same change; per-turn compaction builds its pipeline
+/// from the plan via `compaction_pipeline_for_plan`.
+#[derive(Default)]
+pub struct AgentEngine {
+    _private: (),
 }
 
-impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T, E, S> {
-    pub fn new(transport: Arc<T>, executor: Arc<E>, summarizer: Arc<S>) -> Self {
-        Self {
-            transport,
-            executor,
-            summarizer,
-            pipeline: Arc::new(default_compaction_pipeline()),
-        }
-    }
-
-    pub fn with_pipeline(
-        transport: Arc<T>,
-        executor: Arc<E>,
-        summarizer: Arc<S>,
-        pipeline: Arc<CompactionPipeline>,
-    ) -> Self {
-        Self {
-            transport,
-            executor,
-            summarizer,
-            pipeline,
-        }
+impl AgentEngine {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn create_session(
@@ -2186,39 +2174,7 @@ fn truncate_model_api_failure_reason(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::NoOpSummarizer;
     use crate::turn_io::RawToolCall;
-
-    struct PanicTransport;
-    impl AgentTransport for PanicTransport {
-        fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-            panic!("transport not used in submit-path tests");
-        }
-    }
-
-    struct RecordingExecutor {
-        pub results: Mutex<Vec<ToolCallRecord>>,
-    }
-
-    impl AgentToolExecutor for RecordingExecutor {
-        fn execute_tools(
-            &self,
-            calls: Vec<ToolCallRecord>,
-        ) -> Result<Vec<ToolResultRecord>, AgentError> {
-            self.results.lock().unwrap().extend(calls.clone());
-            Ok(calls
-                .into_iter()
-                .map(|c| ToolResultRecord {
-                    call_id: c.call_id,
-                    result_json: r#"{"status":"success","stub":true}"#.into(),
-                    truncated: false,
-                    soft_failure: false,
-                    activated_tool_names: Vec::new(),
-                    result_metadata: None,
-                })
-                .collect())
-        }
-    }
 
     fn io_small_window() -> SessionIoParams {
         SessionIoParams {
@@ -2248,13 +2204,7 @@ mod tests {
         use crate::long_loop_policy::LongLoopPolicy;
         use crate::policy::ContextPolicyTier;
 
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let hosted = eng.create_session(
             vec![],
             AgentConfig {
@@ -2295,13 +2245,7 @@ mod tests {
 
     #[test]
     fn submit_model_response_preserves_provider_reasoning_metadata() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2354,13 +2298,7 @@ mod tests {
 
     #[test]
     fn three_tool_happy_path() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2427,13 +2365,7 @@ mod tests {
 
     #[test]
     fn tool_results_matched_by_call_id_not_position() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2535,13 +2467,7 @@ mod tests {
 
     #[test]
     fn missing_tool_result_synthesizes_error_for_provider_replay() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2610,13 +2536,7 @@ mod tests {
 
     #[test]
     fn fuzzy_repair_web_seach() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2666,13 +2586,7 @@ mod tests {
             max_turns: 1,
             ..Default::default()
         };
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2727,13 +2641,7 @@ mod tests {
 
     #[test]
     fn cancel_returns_failed() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![],
             AgentConfig::default(),
@@ -2756,13 +2664,7 @@ mod tests {
     #[test]
     fn preflight_compaction_on_oversized_history() {
         let big_pair = "hello ".repeat(400);
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![
                 AgentMessage {
@@ -2801,13 +2703,7 @@ mod tests {
     #[test]
     fn kv_fixed_emits_invalidated_on_compact() {
         let big_pair = "hello ".repeat(400);
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![
                 AgentMessage {
@@ -2848,13 +2744,7 @@ mod tests {
 
     #[test]
     fn artifact_auto_finalize_then_finished() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -2943,13 +2833,7 @@ mod tests {
 
     #[test]
     fn artifact_stop_tool_response_auto_finalizes_after_tool_result() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -3051,13 +2935,7 @@ mod tests {
 
     #[test]
     fn tb_10_seed_guardrails_auto_finalize_repro() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),
@@ -3182,13 +3060,7 @@ mod tests {
 
     #[test]
     fn drain_events_clears_buffer() {
-        let eng = AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(RecordingExecutor {
-                results: Mutex::new(Vec::new()),
-            }),
-            Arc::new(NoOpSummarizer),
-        );
+        let eng = AgentEngine::new();
         let h = eng.create_session(
             vec![AgentMessage {
                 id: "u1".into(),

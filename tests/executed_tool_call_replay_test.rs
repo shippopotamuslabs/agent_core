@@ -4,56 +4,19 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::sync::{Arc, Mutex};
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams, SessionTestSnapshot};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::session::SessionCapabilities;
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
 const VALID_DSML_WEB_SEARCH: &str = concat!(
     "<|DSML|tool_calls><|DSML|invoke name=\"web_search\">",
     "<|DSML|parameter name=\"query\" string=\"true\">rust</|DSML|parameter>",
     "</|DSML|invoke></|DSML|tool_calls>"
 );
-
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(
-        &self,
-        _: ModelRequest,
-    ) -> Result<ModelResponse, agent_core::events::AgentError> {
-        panic!("transport unused")
-    }
-}
-
-struct RecordingExecutor {
-    pub results: Mutex<Vec<ToolCallRecord>>,
-}
-
-impl AgentToolExecutor for RecordingExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
-        self.results.lock().unwrap().extend(calls.clone());
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
 
 fn io_large() -> SessionIoParams {
     SessionIoParams {
@@ -75,9 +38,7 @@ fn user_msg() -> AgentMessage {
     }
 }
 
-fn new_session(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
-) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
         enclave_test_agent_config(),
@@ -132,7 +93,7 @@ fn non_budget_tool_messages(snapshot: &SessionTestSnapshot) -> Vec<&AgentMessage
 }
 
 fn submit_tool_use(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+    eng: &AgentEngine,
     h: &agent_core::engine::SessionHandle,
     tool_calls: Vec<RawToolCall>,
 ) {
@@ -152,14 +113,7 @@ fn submit_tool_use(
 
 #[test]
 fn etr_r_01_fence_wrapped_arguments_canonicalized_in_raw_tool_calls() {
-    let exec = Arc::new(RecordingExecutor {
-        results: Mutex::new(Vec::new()),
-    });
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        exec.clone(),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -193,14 +147,7 @@ fn etr_r_01_fence_wrapped_arguments_canonicalized_in_raw_tool_calls() {
 
 #[test]
 fn etr_r_02_fuzzy_tool_name_web_seach_stored_as_web_search() {
-    let exec = Arc::new(RecordingExecutor {
-        results: Mutex::new(Vec::new()),
-    });
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        exec.clone(),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -226,13 +173,7 @@ fn etr_r_02_fuzzy_tool_name_web_seach_stored_as_web_search() {
 
 #[test]
 fn etr_r_03_append_blocks_complete_alias_stored_as_is_complete() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -262,13 +203,7 @@ fn etr_r_03_append_blocks_complete_alias_stored_as_is_complete() {
 
 #[test]
 fn etr_r_04_valid_json_metadata_matches_execute_tools_record() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -300,13 +235,7 @@ fn etr_r_04_valid_json_metadata_matches_execute_tools_record() {
 
 #[test]
 fn etr_r_05_reject_only_turn_persists_empty_raw_tool_calls() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -341,13 +270,7 @@ fn etr_r_05_reject_only_turn_persists_empty_raw_tool_calls() {
 
 #[test]
 fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -414,13 +337,7 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids()
 
 #[test]
 fn etr_r_07_invalid_json_arguments_reject_empty_raw_tool_calls() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -448,13 +365,7 @@ fn etr_r_07_invalid_json_arguments_reject_empty_raw_tool_calls() {
 
 #[test]
 fn etr_r_08_unknown_tool_zzzzz_reject_empty_raw_tool_calls() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -486,13 +397,7 @@ fn etr_r_08_unknown_tool_zzzzz_reject_empty_raw_tool_calls() {
 
 #[test]
 fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -534,13 +439,7 @@ fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
 
 #[test]
 fn etr_m_01_metadata_arguments_json_equals_execute_tools_record() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -576,13 +475,7 @@ fn etr_m_01_metadata_arguments_json_equals_execute_tools_record() {
 
 #[test]
 fn etr_m_02_rust_snapshot_gate_requires_engine_patch_not_kotlin_only() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,
@@ -606,13 +499,7 @@ fn etr_m_02_rust_snapshot_gate_requires_engine_patch_not_kotlin_only() {
 
 #[test]
 fn etr_m_03_metadata_must_not_contain_web_seach_typo() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     submit_tool_use(
         &eng,

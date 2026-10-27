@@ -4,7 +4,6 @@ use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent, CompactionTrigger};
 use agent_core::forgecode_gap_compaction::destructive_eviction_ids_with_retention;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use agent_core::loop_hooks::{
     AgentLoopHook, DoomLoopReminderHook, HookCheckpoint, HookContext, PendingWorkReminderHook,
 };
@@ -85,28 +84,8 @@ fn tool_result(call_id: &str) -> ToolResultRecord {
     }
 }
 
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("red tests drive submit_model_response manually");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("red tests drive submit_tool_results manually");
-    }
-}
-
-fn red_engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn red_engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoParams {

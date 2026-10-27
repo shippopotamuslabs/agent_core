@@ -1,52 +1,13 @@
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use agent_core::{
-    create_agent_engine, AgentToolExecutorCallback, AgentTransportCallback, FfiAgentAction,
-    FfiAgentConfig, FfiAgentMessage, FfiAgentRole, FfiFinishReason, FfiModelResponse,
-    FfiSessionCapabilities, FfiSessionIoParams,
+    create_agent_engine, FfiAgentAction, FfiAgentConfig, FfiAgentMessage, FfiAgentRole,
+    FfiFinishReason, FfiModelResponse, FfiSessionCapabilities, FfiSessionIoParams,
 };
-
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport callback is not used by submit-style tests");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("tool executor callback is not used by submit-style tests");
-    }
-}
-
-struct PanicTransportCallback;
-
-impl AgentTransportCallback for PanicTransportCallback {
-    fn complete_model_turn(&self, _: agent_core::FfiModelRequest) -> agent_core::FfiModelResponse {
-        panic!("transport callback is not used by FFI submit-style tests");
-    }
-}
-
-struct PanicExecutorCallback;
-
-impl AgentToolExecutorCallback for PanicExecutorCallback {
-    fn execute_tools(
-        &self,
-        _: Vec<agent_core::FfiToolCallRecord>,
-    ) -> Vec<agent_core::FfiToolResultRecord> {
-        panic!("tool executor callback is not used by FFI submit-style tests");
-    }
-}
 
 fn user_message(content: &str) -> AgentMessage {
     AgentMessage {
@@ -57,12 +18,8 @@ fn user_message(content: &str) -> AgentMessage {
     }
 }
 
-fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn io() -> SessionIoParams {
@@ -77,7 +34,7 @@ fn io() -> SessionIoParams {
 }
 
 fn submit_no_tool_response(
-    engine: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
+    engine: &AgentEngine,
     handle: &agent_core::SessionHandle,
     finish_reason: FinishReason,
 ) -> AgentAction {
@@ -385,11 +342,7 @@ fn fb_r_009_hook_continuation_builds_pending_request_before_awaiting_model() {
 
 #[test]
 fn fb_r_010_ffi_config_enables_pending_work_continuation() {
-    let eng = create_agent_engine(
-        Box::new(PanicTransportCallback),
-        Box::new(PanicExecutorCallback),
-        None,
-    );
+    let eng = create_agent_engine();
     let config = FfiAgentConfig {
         enable_loop_hooks: true,
         enable_pending_work_guard: true,

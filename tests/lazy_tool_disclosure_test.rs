@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 #[path = "support/mod.rs"]
 mod support;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
@@ -37,28 +33,8 @@ const REGISTRY_JSON: &str = r#"[
   {"name":"search_current_artifact","parameters":{}}
 ]"#;
 
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport is not used by engine-driven red tests");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("executor is not used by engine-driven red tests");
-    }
-}
-
-fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn config(enable_deferral: bool) -> AgentConfig {
@@ -76,8 +52,8 @@ fn capabilities() -> SessionCapabilities {
     }
 }
 
-fn create_session<E: AgentToolExecutor + 'static>(
-    eng: &AgentEngine<PanicTransport, E, NoOpSummarizer>,
+fn create_session(
+    eng: &AgentEngine,
     cfg: AgentConfig,
     tools_schema_json: &str,
 ) -> agent_core::SessionHandle {
@@ -102,10 +78,7 @@ fn create_session<E: AgentToolExecutor + 'static>(
     )
 }
 
-fn model_request<E: AgentToolExecutor + 'static>(
-    eng: &AgentEngine<PanicTransport, E, NoOpSummarizer>,
-    handle: &agent_core::SessionHandle,
-) -> ModelRequest {
+fn model_request(eng: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {
     match eng.next_action(handle) {
         AgentAction::CallModel(request) => request,
         other => panic!("expected CallModel, got {other:?}"),

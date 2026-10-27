@@ -9,7 +9,6 @@ use crate::compact::{
 use crate::context_store::ContextStore;
 use crate::engine::{AgentEngine, SessionHandle, SessionIoParams};
 use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
-use crate::host::{AgentSummarizer, AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use crate::long_loop_policy::{effective_max_tool_turns, should_stop_tool_rounds, LongLoopPolicy};
 use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
@@ -58,45 +57,13 @@ fn tool_message(id: &str, name: &str, content: &str) -> AgentMessage {
     }
 }
 
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-
-struct NoopExecutor;
-impl AgentToolExecutor for NoopExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, AgentError> {
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: "{}".into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
-
 /// Runs 25 sequential tool round-trips with compaction enabled.
-pub fn run_twenty_five_tool_turn_loop<T, E, S>(
-    engine: &AgentEngine<T, E, S>,
+pub fn run_twenty_five_tool_turn_loop(
+    engine: &AgentEngine,
     handle: &SessionHandle,
     _config: &AgentConfig,
     tool_name: &str,
-) -> SimulatedLongLoopOutcome
-where
-    T: AgentTransport + Send + Sync + 'static,
-    E: AgentToolExecutor + Send + Sync + 'static,
-    S: AgentSummarizer + Send + Sync + 'static,
-{
+) -> SimulatedLongLoopOutcome {
     let resolved_tool = if tool_name == "noop" {
         "web_search"
     } else {
@@ -238,10 +205,7 @@ pub fn run_destructive_micro_preflight_pass(
     test_config.preflight_token_threshold = Some(1);
     test_config.micro_keep_recent = 0;
 
-    let engine = noop_transport_engine(
-        std::sync::Arc::new(PanicTransport),
-        std::sync::Arc::new(NoopExecutor),
-    );
+    let engine = noop_transport_engine();
 
     let initial = if session.messages.is_empty() {
         vec![tool_message("tool-msg-1", "web_search", &"x".repeat(500))]
@@ -278,10 +242,7 @@ pub fn run_two_destructive_compaction_passes(session: &mut AgentSession) -> (u64
     config.micro_keep_recent = 0;
     let caps = SessionCapabilities::default();
 
-    let engine = noop_transport_engine(
-        std::sync::Arc::new(PanicTransport),
-        std::sync::Arc::new(NoopExecutor),
-    );
+    let engine = noop_transport_engine();
 
     let messages = vec![tool_message("tool-pass-0", "web_search", &"x".repeat(500))];
 
@@ -332,15 +293,10 @@ pub fn run_two_destructive_compaction_passes(session: &mut AgentSession) -> (u64
 }
 
 /// Emits three CallModel actions in one user turn; collects provider snapshots.
-pub fn collect_three_call_model_snapshots<T, E, S>(
-    engine: &AgentEngine<T, E, S>,
+pub fn collect_three_call_model_snapshots(
+    engine: &AgentEngine,
     handle: &SessionHandle,
-) -> Vec<ProviderContextSnapshot>
-where
-    T: AgentTransport + Send + Sync + 'static,
-    E: AgentToolExecutor + Send + Sync + 'static,
-    S: AgentSummarizer + Send + Sync + 'static,
-{
+) -> Vec<ProviderContextSnapshot> {
     handle.lalr_seed_user_message_if_empty("seed");
 
     let tool_response = ModelResponse {
@@ -495,16 +451,11 @@ pub fn inject_semantic_fact_enclave(ledger: &mut StateLedger) {
 }
 
 /// Stops tool execution when `max_tool_turns` is reached while model still requests tools.
-pub fn next_action_at_max_tool_turns<T, E, S>(
-    engine: &AgentEngine<T, E, S>,
+pub fn next_action_at_max_tool_turns(
+    engine: &AgentEngine,
     handle: &SessionHandle,
     tool_round_index: u32,
-) -> AgentAction
-where
-    T: AgentTransport + Send + Sync + 'static,
-    E: AgentToolExecutor + Send + Sync + 'static,
-    S: AgentSummarizer + Send + Sync + 'static,
-{
+) -> AgentAction {
     handle.lalr_seed_tool_round_index(tool_round_index);
     let config = handle.lalr_config();
     let cap = effective_max_tool_turns(&config);
@@ -549,15 +500,8 @@ pub fn config_with_long_loop(long_loop: LongLoopPolicy) -> AgentConfig {
     }
 }
 
-pub fn noop_transport_engine<T, E>(
-    transport: Arc<T>,
-    executor: Arc<E>,
-) -> AgentEngine<T, E, NoOpSummarizer>
-where
-    T: AgentTransport + Send + Sync + 'static,
-    E: AgentToolExecutor + Send + Sync + 'static,
-{
-    AgentEngine::new(transport, executor, Arc::new(NoOpSummarizer))
+pub fn noop_transport_engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 pub fn guardrail_kind(err: &AgentError) -> Option<&str> {

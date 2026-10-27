@@ -4,15 +4,13 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent};
-use agent_core::host::{AgentToolExecutor, AgentTransport};
 use agent_core::message::{AgentMessage, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
+use agent_core::turn_io::ModelResponse;
 use serde::Deserialize;
 
 #[path = "support/mod.rs"]
@@ -72,14 +70,6 @@ struct InitialSession {
     session_context: serde_json::Value,
 }
 
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("fixtures drive submit_model_response manually");
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ExecMode {
     Ok,
@@ -88,7 +78,7 @@ enum ExecMode {
 
 struct FixtureExecutor(ExecMode);
 
-impl AgentToolExecutor for FixtureExecutor {
+impl FixtureExecutor {
     fn execute_tools(
         &self,
         calls: Vec<ToolCallRecord>,
@@ -134,11 +124,7 @@ fn action_name(a: &AgentAction) -> String {
 fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec<AgentEvent>) {
     let raw = fs::read_to_string(path).expect("read fixture");
     let f: FixtureFile = serde_json::from_str(&raw).expect("parse fixture");
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(FixtureExecutor(exec_mode)),
-        Arc::new(agent_core::host::NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let io = SessionIoParams {
         provider: f.io.provider.clone(),
         context_window_tokens: f.io.context_window_tokens,

@@ -4,15 +4,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::sync::{Arc, Mutex};
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse};
+use agent_core::turn_io::{FinishReason, ModelResponse};
 
 const MALFORMED_DSML: &str = r#"<|DSML|tool_calls><|DSML|invoke name="web_search"></|DSML|invoke>"#;
 
@@ -21,40 +19,6 @@ const VALID_DSML_WEB_SEARCH: &str = concat!(
     "<|DSML|parameter name=\"query\" string=\"true\">rust</|DSML|parameter>",
     "</|DSML|invoke></|DSML|tool_calls>"
 );
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(
-        &self,
-        _: ModelRequest,
-    ) -> Result<ModelResponse, agent_core::events::AgentError> {
-        panic!("transport unused")
-    }
-}
-
-struct RecordingExecutor {
-    pub results: Mutex<Vec<ToolCallRecord>>,
-}
-
-impl AgentToolExecutor for RecordingExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
-        self.results.lock().unwrap().extend(calls.clone());
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: r#"{"results":[{"title":"ok"}]}"#.into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
 
 fn io_large() -> SessionIoParams {
     SessionIoParams {
@@ -76,9 +40,7 @@ fn user_msg() -> AgentMessage {
     }
 }
 
-fn new_session(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
-) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
         enclave_test_agent_config(),
@@ -136,13 +98,7 @@ fn last_assistant_content(snapshot: &agent_core::engine::SessionTestSnapshot) ->
 
 #[test]
 fn e_01_malformed_dsml_retries_model() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(&h, malformed_response());
@@ -171,13 +127,7 @@ fn e_01_malformed_dsml_retries_model() {
 
 #[test]
 fn e_02_envelope_failure_json_shape() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
@@ -195,13 +145,7 @@ fn e_02_envelope_failure_json_shape() {
 
 #[test]
 fn e_03_valid_leaked_dsml_executes_tool() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -229,13 +173,7 @@ fn e_03_valid_leaked_dsml_executes_tool() {
 
 #[test]
 fn e_04_persisted_assistant_strips_dsml() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -256,13 +194,7 @@ fn e_04_persisted_assistant_strips_dsml() {
 
 #[test]
 fn e_05_stop_plus_malformed_not_terminal() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
@@ -276,13 +208,7 @@ fn e_05_stop_plus_malformed_not_terminal() {
 
 #[test]
 fn e_06_envelope_streak_disables_tools() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     for _ in 0..3 {
         let _ = eng.next_action(&h);
@@ -304,13 +230,7 @@ fn e_06_envelope_streak_disables_tools() {
 
 #[test]
 fn e_07_success_resets_envelope_streak() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     for _ in 0..2 {
         let _ = eng.next_action(&h);
@@ -353,13 +273,7 @@ fn e_07_success_resets_envelope_streak() {
 
 #[test]
 fn md_02_recovery_only_in_engine() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
@@ -380,13 +294,7 @@ const CL_TR_05_LEAKED_TOOL_CALL: &str = r#"<tool_call>{"name":"web_search"}</too
 
 #[test]
 fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = eng.create_session(
         vec![user_msg()],
         AgentConfig {
@@ -480,13 +388,7 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
 /// `tool_use_without_tool_calls` after pushing the user-facing fallback text.
 #[test]
 fn cl_tr_06_native_tools_blocked_fallback_finishes_with_tool_use_finish_reason() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = eng.create_session(
         vec![user_msg()],
         AgentConfig {
@@ -549,13 +451,7 @@ const APPEND_BLOCKS_LEAK: &str = r#"<tool_call>{"name":"append_blocks","argument
 
 #[test]
 fn cl_e_01_engine_executes_recovered_append_blocks() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -584,13 +480,7 @@ fn cl_e_01_engine_executes_recovered_append_blocks() {
 
 #[test]
 fn cl_e_02_native_only_when_native_and_leak_present() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -617,13 +507,7 @@ fn cl_e_02_native_only_when_native_and_leak_present() {
 
 #[test]
 fn cl_e_03_malformed_dsml_retries_model() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
@@ -647,13 +531,7 @@ fn cl_e_03_malformed_dsml_retries_model() {
 
 #[test]
 fn cl_e_04_preamble_preserved_marker_stripped() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -679,13 +557,7 @@ fn cl_e_04_preamble_preserved_marker_stripped() {
 
 #[test]
 fn cl_md_01_native_only_execution() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng);
     let _ = eng.next_action(&h);
     eng.submit_model_response(

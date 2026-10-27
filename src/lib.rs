@@ -19,25 +19,6 @@ pub use ffi::{
     FfiToolResultRecord, FfiToolStreamGate, RepairResult,
 };
 
-/// Kotlin / host transport — UniFFI callback (crate root required for UniFFI metadata).
-#[cfg(feature = "ffi")]
-#[uniffi::export(callback_interface)]
-pub trait AgentTransportCallback: Send + Sync {
-    fn complete_model_turn(&self, request: FfiModelRequest) -> FfiModelResponse;
-}
-
-#[cfg(feature = "ffi")]
-#[uniffi::export(callback_interface)]
-pub trait AgentToolExecutorCallback: Send + Sync {
-    fn execute_tools(&self, calls: Vec<FfiToolCallRecord>) -> Vec<FfiToolResultRecord>;
-}
-
-#[cfg(feature = "ffi")]
-#[uniffi::export(callback_interface)]
-pub trait AgentSummarizerCallback: Send + Sync {
-    fn summarize(&self, request: FfiSummaryRequest) -> FfiSummaryResult;
-}
-
 pub mod action;
 pub mod agent_tool_budget;
 pub mod artifact_finalize;
@@ -51,7 +32,6 @@ pub mod events;
 pub mod file_context;
 pub mod forgecode_gap_compaction;
 pub mod guardrails;
-pub mod host;
 #[cfg(feature = "lalr-harness")]
 #[doc(hidden)]
 pub mod lalr_harness;

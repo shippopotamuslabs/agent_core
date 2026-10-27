@@ -1,47 +1,13 @@
 //! TDD Red — sidecar budget scenarios LALR-05, LALR-06, LALR-10, LALR-13, LALR-18.
 
-use std::sync::Arc;
-
 use agent_core::context_store::ContextStore;
-use agent_core::host::{AgentToolExecutor, AgentTransport};
 use agent_core::lalr_harness::{
     collect_three_call_model_snapshots, default_long_loop_io, noop_transport_engine,
 };
 use agent_core::long_loop_policy::LongLoopPolicy;
-use agent_core::message::{ToolCallRecord, ToolResultRecord};
 use agent_core::sidecar_builder::SidecarBuilder;
 use agent_core::state_ledger::StateLedger;
 use agent_core::tool_context::ToolContextIndex;
-use agent_core::turn_io::ModelRequest;
-
-struct PanicTransport;
-struct NoopExecutor;
-impl AgentToolExecutor for NoopExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: "{}".into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(
-        &self,
-        _: ModelRequest,
-    ) -> Result<agent_core::turn_io::ModelResponse, agent_core::events::AgentError> {
-        panic!("unused in LALR-10 red harness");
-    }
-}
 
 fn oversized_ledger_json(byte_len: usize) -> StateLedger {
     let padding = "x".repeat(byte_len.saturating_sub(64));
@@ -91,7 +57,7 @@ fn lalr_06_second_turn_ledger_delta_is_minimal() {
 
 #[test]
 fn lalr_10_sidecar_generation_increments_per_call_model() {
-    let engine = noop_transport_engine(Arc::new(PanicTransport), Arc::new(NoopExecutor));
+    let engine = noop_transport_engine();
     let handle = engine.create_session(
         vec![],
         agent_core::session::AgentConfig::default(),

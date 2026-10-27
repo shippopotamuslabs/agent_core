@@ -1,45 +1,22 @@
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::compact::{
     ArtifactSquashCompactionTier, CompactionContext, CompactionOutcome, CompactionTier,
     MicroCompactionTier,
 };
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::{AgentError, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::events::CompactionTrigger;
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::tool_semantics::ToolSemanticsConfig;
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::{json, Value};
 
 #[path = "support/tool_semantics_support.rs"]
 mod semantics;
 
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport is not used by engine tests");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("executor is not used by engine tests");
-    }
-}
-
-fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_core::SessionHandle {
