@@ -67,6 +67,7 @@ pub mod request_pipeline;
 pub mod session;
 pub mod sidecar_builder;
 pub mod state_ledger;
+pub mod token_counter;
 pub mod tool_context;
 pub mod tool_parse;
 pub mod tool_policy;
