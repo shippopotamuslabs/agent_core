@@ -9,6 +9,7 @@ use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole};
 use crate::message::{ToolCallRecord, ToolResultRecord};
 use crate::session::{AgentConfig, AgentSession};
+use crate::tool_semantics::ArtifactSquashSemantics;
 
 use super::{CompactionContext, CompactionOutcome, CompactionTier};
 
@@ -102,6 +103,7 @@ fn tool_message_reference_id(message: &AgentMessage) -> String {
 pub fn spill_tool_messages_in_session(
     store: &mut ContextStore,
     session: &mut AgentSession,
+    artifact_squash: Option<&ArtifactSquashSemantics>,
     threshold_bytes: usize,
     turn_index: u32,
     trigger: crate::events::CompactionTrigger,
@@ -112,12 +114,17 @@ pub fn spill_tool_messages_in_session(
         .map(|message| (message.content.len() / 4) as u32)
         .sum();
     let mut changed = false;
+    let quoted_total = artifact_squash
+        .filter(|squash| !squash.total_blocks_result_field.is_empty())
+        .map(|squash| format!("\"{}\"", squash.total_blocks_result_field));
 
     for message in &mut session.messages {
         if message.role != AgentRole::Tool
             || message.content.len() <= threshold_bytes
             || message.content.contains("\"context_ref\"")
-            || message.content.contains("\"totalBlocks\"")
+            || quoted_total
+                .as_ref()
+                .is_some_and(|quoted| message.content.contains(quoted))
         {
             continue;
         }
@@ -175,5 +182,111 @@ impl CompactionTier for ToolSpillCompactionTier {
         // before the stateless pipeline executes.
         let _ = session;
         CompactionOutcome::NotApplicable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_semantics::ArtifactSquashSemantics;
+
+    fn frg14_squash(append_tool_name: &str, total_field: &str) -> ArtifactSquashSemantics {
+        ArtifactSquashSemantics {
+            append_tool_name: append_tool_name.into(),
+            id_field: "docId".into(),
+            blocks_field: "chunks".into(),
+            total_blocks_result_field: total_field.into(),
+            status_field: "status".into(),
+            success_status_value: "success".into(),
+            summary_template: "t".into(),
+            continuation_instruction: "c".into(),
+            snippet_max_chars: 200,
+        }
+    }
+
+    fn frg14_tool_session(content: &str) -> AgentSession {
+        AgentSession::new(
+            vec![AgentMessage {
+                id: "t1".into(),
+                role: AgentRole::Tool,
+                content: content.into(),
+                metadata: serde_json::Value::Null,
+            }],
+            serde_json::Value::Null,
+        )
+    }
+
+    #[test]
+    fn frg14_spill_custom_total_field_exempt() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let content =
+            r#"{"status":"success","chunkCount":3,"extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = spill_tool_messages_in_session(
+            &mut store,
+            &mut session,
+            Some(&squash),
+            16,
+            0,
+            crate::events::CompactionTrigger::PostToolResult,
+        );
+        assert!(event.is_none());
+        assert_eq!(session.messages[0].content, content);
+    }
+
+    #[test]
+    fn frg14_spill_none_spills_legacy_total() {
+        let content =
+            r#"{"status":"success","totalBlocks":3,"extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = spill_tool_messages_in_session(
+            &mut store,
+            &mut session,
+            None,
+            16,
+            0,
+            crate::events::CompactionTrigger::PostToolResult,
+        );
+        assert!(event.is_some());
+        assert!(session.messages[0].content.contains("context_ref"));
+    }
+
+    #[test]
+    fn frg14_spill_none_spills_custom_total() {
+        let content =
+            r#"{"status":"success","chunkCount":3,"extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = spill_tool_messages_in_session(
+            &mut store,
+            &mut session,
+            None,
+            16,
+            0,
+            crate::events::CompactionTrigger::PostToolResult,
+        );
+        assert!(event.is_some());
+        assert!(session.messages[0].content.contains("context_ref"));
+    }
+
+    #[test]
+    fn frg14_spill_enclave_exempts_legacy_total() {
+        let squash = frg14_squash("append_blocks", "totalBlocks");
+        let content =
+            r#"{"status":"success","totalBlocks":3,"extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = spill_tool_messages_in_session(
+            &mut store,
+            &mut session,
+            Some(&squash),
+            16,
+            0,
+            crate::events::CompactionTrigger::PostToolResult,
+        );
+        assert!(event.is_none());
+        assert_eq!(session.messages[0].content, content);
     }
 }

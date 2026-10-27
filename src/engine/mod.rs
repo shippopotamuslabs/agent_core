@@ -57,7 +57,7 @@ use crate::state_ledger::StateLedger;
 #[allow(unused_imports)]
 use crate::tool_context::build_tool_context_index;
 use crate::tool_context::build_tool_context_index_with_registry;
-use crate::tool_semantics::result_policy_for;
+use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
@@ -1405,6 +1405,38 @@ fn normalize_tool_name_hint(raw: &str) -> String {
     s.to_lowercase().replace(['-', ' '], "_")
 }
 
+fn session_has_append_context(
+    messages: &[AgentMessage],
+    artifact_squash: Option<&ArtifactSquashSemantics>,
+) -> bool {
+    let Some(squash) = artifact_squash else {
+        return false;
+    };
+    let quoted_total = (!squash.total_blocks_result_field.is_empty())
+        .then(|| format!("\"{}\"", squash.total_blocks_result_field));
+    messages.iter().any(|message| {
+        (!squash.append_tool_name.is_empty()
+            && message.content.contains(squash.append_tool_name.as_str()))
+            || quoted_total
+                .as_ref()
+                .is_some_and(|quoted| message.content.contains(quoted))
+            || (!squash.append_tool_name.is_empty()
+                && message
+                    .metadata
+                    .get("raw_tool_calls")
+                    .and_then(|v| v.as_array())
+                    .map(|calls| {
+                        calls.iter().any(|call| {
+                            call.get("name")
+                                .and_then(|v| v.as_str())
+                                .map(|name| name == squash.append_tool_name)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false))
+    })
+}
+
 impl InnerSession {
     fn set_terminal(&mut self, a: AgentAction) {
         self.terminal_action = Some(a);
@@ -1519,23 +1551,14 @@ impl InnerSession {
             let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
-            let has_append_context = self.session.messages.iter().any(|message| {
-                message.content.contains("append_blocks")
-                    || message.content.contains("\"totalBlocks\"")
-                    || message
-                        .metadata
-                        .get("raw_tool_calls")
-                        .and_then(|v| v.as_array())
-                        .map(|calls| {
-                            calls.iter().any(|call| {
-                                call.get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|name| name == "append_blocks")
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
-            });
+            let artifact_squash = self
+                .config
+                .tool_semantics
+                .compaction
+                .artifact_squash
+                .as_ref();
+            let has_append_context =
+                session_has_append_context(&self.session.messages, artifact_squash);
             let session_has_tool_messages = self
                 .session
                 .messages
@@ -1657,9 +1680,16 @@ impl InnerSession {
             }
 
             if self.config.enable_context_store {
+                let artifact_squash = self
+                    .config
+                    .tool_semantics
+                    .compaction
+                    .artifact_squash
+                    .as_ref();
                 if let Some(event) = spill_tool_messages_in_session(
                     &mut self.context_store,
                     &mut self.session,
+                    artifact_squash,
                     effective_tool_spill_threshold_bytes(
                         &self.config,
                         self.io.context_window_tokens,
@@ -3172,5 +3202,107 @@ mod tests {
         let _ = eng.next_action(&h);
         assert!(!eng.drain_events(&h).is_empty());
         assert!(eng.drain_events(&h).is_empty());
+    }
+
+    fn frg14_squash(
+        append_tool_name: &str,
+        total_blocks_result_field: &str,
+    ) -> ArtifactSquashSemantics {
+        ArtifactSquashSemantics {
+            append_tool_name: append_tool_name.into(),
+            id_field: "docId".into(),
+            blocks_field: "chunks".into(),
+            total_blocks_result_field: total_blocks_result_field.into(),
+            status_field: "status".into(),
+            success_status_value: "success".into(),
+            summary_template: "t".into(),
+            continuation_instruction: "c".into(),
+            snippet_max_chars: 200,
+        }
+    }
+
+    fn frg14_msg(content: &str, metadata: serde_json::Value) -> AgentMessage {
+        AgentMessage {
+            id: "m".into(),
+            role: AgentRole::Assistant,
+            content: content.into(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn frg14_append_context_custom_content_match() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let messages = vec![frg14_msg(
+            r#"call:write_doc{"docId":"1","chunks":[]}"#,
+            serde_json::Value::Null,
+        )];
+        assert!(session_has_append_context(&messages, Some(&squash)));
+    }
+
+    #[test]
+    fn frg14_append_context_custom_raw_tool_call_match() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let messages = vec![frg14_msg(
+            "plain assistant text",
+            serde_json::json!({ "raw_tool_calls": [{ "name": "write_doc" }] }),
+        )];
+        assert!(session_has_append_context(&messages, Some(&squash)));
+    }
+
+    #[test]
+    fn frg14_append_context_custom_total_field_match() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let messages = vec![frg14_msg(
+            r#"{"status":"success","chunkCount":2}"#,
+            serde_json::Value::Null,
+        )];
+        assert!(session_has_append_context(&messages, Some(&squash)));
+    }
+
+    #[test]
+    fn frg14_append_context_custom_ignores_legacy_literals() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let messages = vec![
+            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
+            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+        ];
+        assert!(!session_has_append_context(&messages, Some(&squash)));
+    }
+
+    #[test]
+    fn frg14_append_context_none_never_engages() {
+        let messages = vec![
+            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
+            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+            frg14_msg(
+                "plain text",
+                serde_json::json!({ "raw_tool_calls": [{ "name": "append_blocks" }] }),
+            ),
+        ];
+        assert!(!session_has_append_context(&messages, None));
+    }
+
+    #[test]
+    fn frg14_append_context_empty_fields_never_engage() {
+        let squash = frg14_squash("", "");
+        let messages = vec![
+            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
+            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+            frg14_msg(
+                "plain text",
+                serde_json::json!({ "raw_tool_calls": [{ "name": "append_blocks" }] }),
+            ),
+        ];
+        assert!(!session_has_append_context(&messages, Some(&squash)));
+    }
+
+    #[test]
+    fn frg14_append_context_enclave_matches_legacy_literals() {
+        let squash = frg14_squash("append_blocks", "totalBlocks");
+        let via_tool = vec![frg14_msg("call:append_blocks{}", serde_json::Value::Null)];
+        assert!(session_has_append_context(&via_tool, Some(&squash)));
+        let via_total = vec![frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null)];
+        assert!(session_has_append_context(&via_total, Some(&squash)));
     }
 }
