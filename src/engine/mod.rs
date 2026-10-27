@@ -3,6 +3,7 @@
 pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
 mod context_refs;
+pub(super) mod finish;
 pub(super) mod model_request;
 mod provider_tool_calls;
 mod state;
@@ -428,7 +429,7 @@ impl AgentEngine {
                     // The provider finish reason may be ToolUse/Other for the blocked
                     // attempt; finishing with it would fail the loop after a graceful
                     // fallback, so force Stop semantics.
-                    g.finish_after_model_stop(FinishReason::Stop);
+                    finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
                     return;
                 }
 
@@ -511,7 +512,7 @@ impl AgentEngine {
             .collect();
 
         if merged_tool_calls.is_empty() {
-            g.finish_after_model_stop(response.finish_reason);
+            finish::finish_after_model_stop(g.finish_state(), response.finish_reason);
             return;
         }
 
@@ -1237,14 +1238,6 @@ impl AgentEngine {
         }
     }
 
-    pub fn cancel(&self, handle: &SessionHandle) {
-        let mut g = handle.lock_inner();
-        g.cancelled = true;
-        g.set_terminal(AgentAction::Failed(AgentError::Internal(
-            "cancelled".into(),
-        )));
-    }
-
     pub fn drain_events(&self, handle: &SessionHandle) -> Vec<AgentEvent> {
         let mut g = handle.lock_inner();
         std::mem::take(&mut g.events)
@@ -1368,6 +1361,37 @@ fn session_has_append_context(
 }
 
 impl InnerSession {
+    /// ENC-286 slice 3: dispatch glue — bundles the disjoint finish fields for
+    /// `finish::finish_after_model_stop`. No logic lives here.
+    fn finish_state(&mut self) -> finish::FinishState<'_> {
+        finish::FinishState {
+            session: &mut self.session,
+            config: &self.config,
+            capabilities: &self.capabilities,
+            io: &self.io,
+            guardrails: &mut self.guardrails,
+            loop_metrics: &self.loop_metrics,
+            phase: &mut self.phase,
+            terminal_action: &mut self.terminal_action,
+            pending_call_model: &mut self.pending_call_model,
+            pending_execute: &mut self.pending_execute,
+            pending_execute_skip_guardrail_count: &mut self.pending_execute_skip_guardrail_count,
+            pending_auto_finalize_finish: &mut self.pending_auto_finalize_finish,
+            pending_artifact_ids: &mut self.pending_artifact_ids,
+            last_model_response_greedy_tool_names: &self.last_model_response_greedy_tool_names,
+            state_ledger: &mut self.state_ledger,
+            context_store: &mut self.context_store,
+            sidecar_builder: &mut self.sidecar_builder,
+            active_tool_names: &self.active_tool_names,
+            turn_index: self.turn_index,
+            model_requests_this_turn: &mut self.model_requests_this_turn,
+            compaction_passes_this_turn: self.compaction_passes_this_turn,
+            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+            suppress_summary_tier: self.suppress_summary_tier,
+            events: &mut self.events,
+        }
+    }
+
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
@@ -1383,7 +1407,7 @@ impl InnerSession {
         self.suppress_summary_tier = false;
     }
 
-    fn set_terminal(&mut self, a: AgentAction) {
+    pub(super) fn set_terminal(&mut self, a: AgentAction) {
         self.terminal_action = Some(a);
         self.phase = EnginePhase::Idle;
     }
@@ -1865,136 +1889,8 @@ impl InnerSession {
         Ok(AgentAction::CallModel(req))
     }
 
-    fn finish_after_model_stop(&mut self, reason: FinishReason) {
-        match reason {
-            FinishReason::Stop => {}
-            FinishReason::MaxTokens => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped {
-                    reason: "max_tokens".into(),
-                }));
-                return;
-            }
-            FinishReason::Other(reason) => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped { reason }));
-                return;
-            }
-            FinishReason::ToolUse => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped {
-                    reason: "tool_use_without_tool_calls".into(),
-                }));
-                return;
-            }
-        }
 
-        let synth = synthetic_finalize_calls_with_semantics(
-            &self.pending_artifact_ids,
-            &self.config.tool_semantics,
-        );
-        if !synth.is_empty() {
-            self.pending_execute = Some(synth);
-            self.pending_execute_skip_guardrail_count = true;
-            self.pending_auto_finalize_finish = true;
-            self.phase = EnginePhase::AwaitingTools;
-            return;
-        }
 
-        if self.config.enable_loop_hooks && self.capabilities.lifecycle_hooks_supported {
-            self.emit(AgentEvent::HookInvoked {
-                checkpoint: "before_finish".into(),
-            });
-        }
-
-        if self.config.enable_loop_hooks
-            && self.capabilities.lifecycle_hooks_supported
-            && self.config.enable_pending_work_guard
-        {
-            if let Some(action) = self.before_finish_pending_work_action() {
-                self.set_terminal_or_pending(action);
-                return;
-            }
-        }
-
-        self.terminal_action = Some(AgentAction::Finished);
-        let ti = self.turn_index;
-        let tc = self.guardrails.tool_calls_executed;
-        self.emit(AgentEvent::TurnCompleted {
-            turn_index: ti,
-            tool_call_count: tc,
-            terminal: true,
-        });
-    }
-
-    fn before_finish_pending_work_action(&mut self) -> Option<AgentAction> {
-        let pending_items = self
-            .loop_metrics
-            .pending_work_items
-            .iter()
-            .map(|item| item.text.clone())
-            .collect::<Vec<_>>();
-        let force_blocked = self
-            .session
-            .session_context
-            .get("force_finish_blocked")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        if pending_items.is_empty() {
-            return force_blocked.then(|| {
-                AgentAction::Failed(AgentError::GuardrailExceeded {
-                    kind: "finish_blocked_without_injected_message".into(),
-                    detail: None,
-                })
-            });
-        }
-        if self.model_requests_this_turn >= self.config.max_model_requests_per_turn {
-            return Some(AgentAction::Failed(AgentError::GuardrailExceeded {
-                kind: "max_model_requests_per_turn".into(),
-                detail: None,
-            }));
-        }
-
-        let injected_message = AgentMessage {
-            id: format!("pending-work-reminder-{}", self.turn_index),
-            role: AgentRole::User,
-            content: format!("Pending work remains: {}", pending_items.join(", ")),
-            metadata: MessageMeta::new(),
-        };
-        self.session.messages.push(injected_message.clone());
-        if self.config.enable_state_ledger {
-            self.state_ledger.observe_user_message(&injected_message);
-        }
-        let allow = self
-            .guardrails
-            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
-        let request =
-            model_request::build_model_request(model_request::ModelRequestInputs {
-                session: &self.session,
-                config: &self.config,
-                capabilities: &self.capabilities,
-                io: &self.io,
-                active_tool_names: &self.active_tool_names,
-                context_store: &mut self.context_store,
-                state_ledger: &self.state_ledger,
-                sidecar_builder: &mut self.sidecar_builder,
-                turn_index: self.turn_index,
-                compaction_passes_this_turn: self.compaction_passes_this_turn,
-                destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-                suppress_summary_tier: self.suppress_summary_tier,
-                allow_tool_call: allow,
-                cache_hints: vec![],
-                loop_metrics: &self.loop_metrics,
-            });
-        self.pending_call_model = Some(request.clone());
-        self.model_requests_this_turn += 1;
-        self.phase = EnginePhase::AwaitingModel;
-        Some(AgentAction::CallModel(request))
-    }
-
-    fn set_terminal_or_pending(&mut self, action: AgentAction) {
-        match action {
-            AgentAction::CallModel(_) => {}
-            other => self.set_terminal(other),
-        }
-    }
 }
 
 fn truncate_model_api_failure_reason(message: &str) -> String {
