@@ -14,7 +14,7 @@ pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
 pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
 
-use std::collections::{HashMap, HashSet};
+
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -58,7 +58,7 @@ use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
 
-use state::{EnginePhase, InnerSession};
+use state::{EnginePhase, InnerSession, PendingToolTurn};
 
 fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
@@ -219,27 +219,25 @@ impl AgentEngine {
                     ..LoopMetrics::default()
                 },
                 phase: EnginePhase::Idle,
-                pending_call_model: None,
-                pending_execute: None,
-                pending_execute_skip_guardrail_count: false,
-                pending_auto_finalize_finish: false,
-                pending_finalize_after_tool_stop: false,
-                pending_summary_req: None,
-                pending_summary_ctx: None,
+                pending: PendingToolTurn {
+                    call_model: None,
+                    execute: None,
+                    execute_skip_guardrail_count: false,
+                    auto_finalize_finish: false,
+                    finalize_after_tool_stop: false,
+                    summary_req: None,
+                    summary_ctx: None,
+                    ..PendingToolTurn::default()
+                },
                 context_store: ContextStore::default(),
                 state_ledger,
-                pending_tool_turn_parallel: 0,
-                pending_reject_count_this_turn: 0,
                 model_requests_this_turn: 0,
                 events: Vec::new(),
                 turn_index: 0,
                 cancelled: false,
                 terminal_action: None,
                 last_model_response_greedy_tool_names: Vec::new(),
-                pending_artifact_ids: HashSet::new(),
                 tools_blocked_nudges_this_turn: 0,
-                pending_tool_turn_request_order: Vec::new(),
-                pending_reject_tool_by_call_id: HashMap::new(),
                 active_tool_names: parse_tool_names_from_schema(&initial_active_tool_names_source),
                 sidecar_builder: SidecarBuilder::new(),
                 compaction_passes_this_turn: 0,
@@ -261,15 +259,15 @@ impl AgentEngine {
         match g.phase {
             EnginePhase::AwaitingModel => {
                 return AgentAction::CallModel(
-                    g.pending_call_model.clone().expect("awaiting model"),
+                    g.pending.call_model.clone().expect("awaiting model"),
                 );
             }
             EnginePhase::AwaitingTools => {
-                let calls = g.pending_execute.clone().expect("awaiting tools");
+                let calls = g.pending.execute.clone().expect("awaiting tools");
                 return AgentAction::ExecuteTools(calls);
             }
             EnginePhase::AwaitingSummary => {
-                let req = g.pending_summary_req.clone().expect("awaiting summary");
+                let req = g.pending.summary_req.clone().expect("awaiting summary");
                 return AgentAction::RequestSummary(req);
             }
             EnginePhase::Idle => {}
@@ -301,11 +299,11 @@ impl AgentEngine {
         g.phase = EnginePhase::Idle;
         g.guardrails.reset_model_api_failures();
         let allow_tool_call = g
-            .pending_call_model
+            .pending.call_model
             .as_ref()
             .map(|request| request.allow_tool_call)
             .unwrap_or(true);
-        g.pending_call_model = None;
+        g.pending.call_model = None;
 
         // ENC-286 slice 5: the catalog is built once here and passed into the
         // repair stage (previously cloned + rebuilt per tool call).
@@ -430,8 +428,8 @@ impl AgentEngine {
             return;
         }
 
-        g.pending_tool_turn_request_order = merged_tool_calls.clone();
-        g.pending_reject_tool_by_call_id.clear();
+        g.pending.tool_turn_request_order = merged_tool_calls.clone();
+        g.pending.reject_tool_by_call_id.clear();
 
         // FRG-47 stage: the repair/discovery loop returns a decision payload;
         // the dispatch owns emit ordering and every phase write below.
@@ -439,7 +437,7 @@ impl AgentEngine {
         for ev in outcome.events {
             g.emit(ev);
         }
-        g.pending_reject_tool_by_call_id = outcome.reject_by_call_id;
+        g.pending.reject_tool_by_call_id = outcome.reject_by_call_id;
         let repaired = outcome.repaired;
         let parallel = outcome.parallel;
         let rejects = outcome.rejects;
@@ -473,12 +471,12 @@ impl AgentEngine {
                     g.state_ledger.observe_tool_call(call);
                 }
             }
-            g.pending_tool_turn_parallel = parallel;
-            g.pending_reject_count_this_turn = rejects;
-            g.pending_execute = Some(repaired);
-            g.pending_execute_skip_guardrail_count = false;
-            g.pending_auto_finalize_finish = false;
-            g.pending_finalize_after_tool_stop =
+            g.pending.tool_turn_parallel = parallel;
+            g.pending.reject_count_this_turn = rejects;
+            g.pending.execute = Some(repaired);
+            g.pending.execute_skip_guardrail_count = false;
+            g.pending.auto_finalize_finish = false;
+            g.pending.finalize_after_tool_stop =
                 matches!(response.finish_reason, FinishReason::Stop);
 
             match g.run_compaction_pass(CompactionTrigger::MidTurn) {
@@ -566,7 +564,7 @@ impl AgentEngine {
             reason,
         });
 
-        if let Some(request) = g.pending_call_model.as_mut() {
+        if let Some(request) = g.pending.call_model.as_mut() {
             request.retry_after_ms = Some(delay_ms);
             request.model_retry_attempt = Some(attempt);
         }
@@ -586,16 +584,16 @@ impl AgentEngine {
             return;
         }
 
-        let calls = g.pending_execute.take().expect("tools");
-        let skip_count = g.pending_execute_skip_guardrail_count;
-        let finalize_after_tool_stop = g.pending_finalize_after_tool_stop;
-        let pending_parallel = g.pending_tool_turn_parallel;
-        let pending_rejects = g.pending_reject_count_this_turn;
+        let calls = g.pending.execute.take().expect("tools");
+        let skip_count = g.pending.execute_skip_guardrail_count;
+        let finalize_after_tool_stop = g.pending.finalize_after_tool_stop;
+        let pending_parallel = g.pending.tool_turn_parallel;
+        let pending_rejects = g.pending.reject_count_this_turn;
         g.phase = EnginePhase::Idle;
-        g.pending_finalize_after_tool_stop = false;
+        g.pending.finalize_after_tool_stop = false;
 
-        let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
-        let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
+        let turn_order = std::mem::take(&mut g.pending.tool_turn_request_order);
+        let mut reject_by_call_id = std::mem::take(&mut g.pending.reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
         for res in &results {
             merge_active_tool_names(
@@ -677,8 +675,8 @@ impl AgentEngine {
                 non_soft_outcome,
                 "agent_engine",
             );
-            g.pending_tool_turn_parallel = 0;
-            g.pending_reject_count_this_turn = 0;
+            g.pending.tool_turn_parallel = 0;
+            g.pending.reject_count_this_turn = 0;
         }
 
         let budget_meta = g
@@ -692,8 +690,8 @@ impl AgentEngine {
             last_batch_tool_message_index,
         );
 
-        if g.pending_auto_finalize_finish {
-            g.pending_auto_finalize_finish = false;
+        if g.pending.auto_finalize_finish {
+            g.pending.auto_finalize_finish = false;
             g.terminal_action = Some(AgentAction::Finished);
             let ti = g.turn_index;
             let tc = g.guardrails.tool_calls_executed;
@@ -707,19 +705,19 @@ impl AgentEngine {
 
         if finalize_after_tool_stop {
             let synth = synthetic_finalize_calls_with_semantics(
-                &g.pending_artifact_ids,
+                &g.pending.artifact_ids,
                 &g.config.tool_semantics,
             );
             if !synth.is_empty() {
-                g.pending_execute = Some(synth);
-                g.pending_execute_skip_guardrail_count = true;
-                g.pending_auto_finalize_finish = true;
+                g.pending.execute = Some(synth);
+                g.pending.execute_skip_guardrail_count = true;
+                g.pending.auto_finalize_finish = true;
                 g.phase = EnginePhase::AwaitingTools;
             }
         }
 
         let auto_finalize_queued =
-            g.pending_execute_skip_guardrail_count && g.pending_execute.is_some();
+            g.pending.execute_skip_guardrail_count && g.pending.execute.is_some();
         if !auto_finalize_queued {
             match g.run_compaction_pass(CompactionTrigger::PostToolResult) {
                 Ok(Some(_)) => return,
@@ -815,8 +813,8 @@ impl AgentEngine {
             session: &mut g.session,
             guardrails: &mut g.guardrails,
             config: &g.config,
-            pending_tool_turn_request_order: &mut g.pending_tool_turn_request_order,
-            pending_reject_tool_by_call_id: &mut g.pending_reject_tool_by_call_id,
+            pending_tool_turn_request_order: &mut g.pending.tool_turn_request_order,
+            pending_reject_tool_by_call_id: &mut g.pending.reject_tool_by_call_id,
             turn_index: g.turn_index,
             parallel,
             rejects,
@@ -862,7 +860,7 @@ impl AgentEngine {
                 truncation_budget,
                 turn_index: g.turn_index,
                 context_store: &mut g.context_store,
-                pending_artifact_ids: &mut g.pending_artifact_ids,
+                pending_artifact_ids: &mut g.pending.artifact_ids,
             },
         );
         let spill_tokens_after = if processed.spilled_inline {
@@ -901,8 +899,8 @@ impl AgentEngine {
             return;
         }
 
-        let req = g.pending_summary_req.take().expect("summary req");
-        let ctx = g.pending_summary_ctx.take().expect("summary ctx");
+        let req = g.pending.summary_req.take().expect("summary req");
+        let ctx = g.pending.summary_ctx.take().expect("summary ctx");
         g.phase = EnginePhase::Idle;
 
         if summary.summary_text.trim().is_empty() {
@@ -951,7 +949,7 @@ impl AgentEngine {
             message_count_before,
         );
 
-        if g.pending_execute.is_some() {
+        if g.pending.execute.is_some() {
             g.phase = EnginePhase::AwaitingTools;
         }
     }
@@ -992,8 +990,8 @@ impl AgentEngine {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
                 // Shared staging: session replace + history/ledger refs.
                 let req = InnerSession::stage_summary_request(&mut g, sess, req, trigger);
-                g.pending_summary_req = Some(req.clone());
-                g.pending_summary_ctx = Some(ctx);
+                g.pending.summary_req = Some(req.clone());
+                g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
                 AgentAction::RequestSummary(req)
             }
@@ -1075,11 +1073,7 @@ impl InnerSession {
             loop_metrics: &self.loop_metrics,
             phase: &mut self.phase,
             terminal_action: &mut self.terminal_action,
-            pending_call_model: &mut self.pending_call_model,
-            pending_execute: &mut self.pending_execute,
-            pending_execute_skip_guardrail_count: &mut self.pending_execute_skip_guardrail_count,
-            pending_auto_finalize_finish: &mut self.pending_auto_finalize_finish,
-            pending_artifact_ids: &mut self.pending_artifact_ids,
+            pending: &mut self.pending,
             last_model_response_greedy_tool_names: &self.last_model_response_greedy_tool_names,
             state_ledger: &mut self.state_ledger,
             context_store: &mut self.context_store,
@@ -1264,8 +1258,8 @@ impl InnerSession {
                 .iter()
                 .any(|m| m.role == AgentRole::Tool);
             let defer_compaction_failure = has_append_context
-                || self.pending_finalize_after_tool_stop
-                || (self.pending_execute.is_some()
+                || self.pending.finalize_after_tool_stop
+                || (self.pending.execute.is_some()
                     && !self.session.compaction_log.is_empty()
                     && session_has_tool_messages);
 
@@ -1399,8 +1393,8 @@ impl InnerSession {
                     }
                     // Shared staging: session replace + history/ledger refs.
                     let req = Self::stage_summary_request(self, sess, req, trigger);
-                    self.pending_summary_req = Some(req.clone());
-                    self.pending_summary_ctx = Some(ctx);
+                    self.pending.summary_req = Some(req.clone());
+                    self.pending.summary_ctx = Some(ctx);
                     self.phase = EnginePhase::AwaitingSummary;
                     return Ok(Some(AgentAction::RequestSummary(req)));
                 }
@@ -1526,7 +1520,7 @@ impl InnerSession {
             loop_metrics: &self.loop_metrics,
         });
 
-        self.pending_call_model = Some(req.clone());
+        self.pending.call_model = Some(req.clone());
         self.model_requests_this_turn += 1;
         self.phase = EnginePhase::AwaitingModel;
         Ok(AgentAction::CallModel(req))
