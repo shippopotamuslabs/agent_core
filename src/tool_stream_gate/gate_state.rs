@@ -31,30 +31,16 @@ pub fn reconcile_after_push(
     emitted_length: usize,
     hold: Option<ActiveHold>,
 ) -> ReconcileResult {
-    let mut hold = hold;
-    let mut disproved_flush = false;
+    // Step 1: resolve a carried-over tentative hold.
+    let (mut hold, mut disproved_flush) = match hold {
+        Some(ActiveHold {
+            start,
+            kind: HoldKind::Tentative(kind),
+        }) => resolve_hold(buffer, start, kind),
+        unchanged => (unchanged, false),
+    };
 
-    if let Some(active) = hold {
-        match active.kind {
-            HoldKind::Confirmed => {}
-            HoldKind::Tentative(kind) => {
-                match resolve_tentative_hold(&buffer[active.start..], kind) {
-                    HoldResolution::Confirmed => {
-                        hold = Some(ActiveHold {
-                            start: active.start,
-                            kind: HoldKind::Confirmed,
-                        });
-                    }
-                    HoldResolution::Disproved => {
-                        hold = None;
-                        disproved_flush = true;
-                    }
-                    HoldResolution::StillTentative => {}
-                }
-            }
-        }
-    }
-
+    // Step 2: detect a fresh hold when nothing blocks emission.
     if hold.is_none() && !disproved_flush {
         hold = detect_hold(buffer, emitted_length);
         if let Some(ActiveHold {
@@ -62,19 +48,7 @@ pub fn reconcile_after_push(
             kind: HoldKind::Tentative(kind),
         }) = hold
         {
-            match resolve_tentative_hold(&buffer[start..], kind) {
-                HoldResolution::Confirmed => {
-                    hold = Some(ActiveHold {
-                        start,
-                        kind: HoldKind::Confirmed,
-                    });
-                }
-                HoldResolution::Disproved => {
-                    hold = None;
-                    disproved_flush = true;
-                }
-                HoldResolution::StillTentative => {}
-            }
+            (hold, disproved_flush) = resolve_hold(buffer, start, kind);
         }
     }
 
@@ -87,6 +61,28 @@ pub fn reconcile_after_push(
     ReconcileResult {
         hold,
         emit_exclusive_end,
+    }
+}
+
+/// Resolve one tentative hold at `start`, returning the updated hold plus
+/// whether a disproved hold requires a full flush.
+fn resolve_hold(buffer: &str, start: usize, kind: TentativeKind) -> (Option<ActiveHold>, bool) {
+    match resolve_tentative_hold(&buffer[start..], kind) {
+        HoldResolution::Confirmed => (
+            Some(ActiveHold {
+                start,
+                kind: HoldKind::Confirmed,
+            }),
+            false,
+        ),
+        HoldResolution::Disproved => (None, true),
+        HoldResolution::StillTentative => (
+            Some(ActiveHold {
+                start,
+                kind: HoldKind::Tentative(kind),
+            }),
+            false,
+        ),
     }
 }
 
