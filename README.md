@@ -23,9 +23,28 @@ Hosts drive it two ways:
 
 ## Tests
 
+The suite compiles and passes in a standalone checkout of this repo (no
+Enclave tree required):
+
 ```bash
 cargo test
+cargo test --no-default-features
 ```
+
+Two tests touch the Enclave consumer contract and degrade gracefully outside
+the Enclave layout:
+
+- `tsd_26_default_semantics_reference_search_tools` (in
+  `tests/tool_search_discovery_test.rs`) reads a vendored snapshot at
+  `tests/support/enclave_tool_semantics.json` instead of the Enclave source
+  tree, so it runs everywhere. Refresh the snapshot by hand when the Enclave
+  production file
+  (`core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json`)
+  changes.
+- `md_02_production_kotlin_sources_do_not_reference_agent` (in
+  `tests/tool_budget_agent_meta_test.rs`) scans the Enclave Kotlin sources when
+  they are present and skips with a message when they are not. The full
+  consumer-contract check still runs inside the Enclave layout.
 
 A CI config left over from before the move to GitHub ran
 `cargo fmt --check`, clippy with warnings denied, and `cargo test
