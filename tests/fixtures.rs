@@ -125,14 +125,14 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
     let raw = fs::read_to_string(path).expect("read fixture");
     let f: FixtureFile = serde_json::from_str(&raw).expect("parse fixture");
     let eng = AgentEngine::new();
-    let io = SessionIoParams {
-        provider: f.io.provider.clone(),
-        context_window_tokens: f.io.context_window_tokens,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: f.io.tools_schema_json.clone(),
-        system_prompt: f.io.system_prompt.clone(),
-    };
+    let io = SessionIoParams::new(
+        f.io.provider.clone(),
+        f.io.context_window_tokens,
+        "[]".into(),
+        "[]".into(),
+        f.io.tools_schema_json.clone(),
+        f.io.system_prompt.clone(),
+    );
     let mut config = f.initial_session.config.clone();
     if config.tool_semantics.catalog.tools.is_empty() {
         config.tool_semantics = enclave_test_semantics();

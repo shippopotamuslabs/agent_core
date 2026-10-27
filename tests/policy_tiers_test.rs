@@ -83,14 +83,14 @@ fn s22_high_context_raises_thresholds() {
         cfg.clone(),
         caps.clone(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        ),
     );
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {

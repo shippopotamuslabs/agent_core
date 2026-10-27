@@ -23,14 +23,14 @@ fn engine() -> AgentEngine {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 200_000,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
 }
 
 fn submit_no_tool_response(
@@ -330,7 +330,7 @@ fn fb_r_009_hook_continuation_builds_pending_request_before_awaiting_model() {
     match action {
         AgentAction::CallModel(request) => {
             assert_eq!("sys", request.system_prompt);
-            assert_eq!("[]", request.tools_schema_json);
+            assert_eq!("[]", request.tools_schema_json());
             assert_eq!(
                 "Pending work remains: ship tests",
                 request.session_messages.last().unwrap().content

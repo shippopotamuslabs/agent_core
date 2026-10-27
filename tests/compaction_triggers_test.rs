@@ -22,24 +22,24 @@ use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 200_000,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
 }
 fn io_small() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 256,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        256,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
 }
 fn user(id: &str, content: &str) -> AgentMessage {
     AgentMessage {

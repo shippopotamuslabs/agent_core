@@ -109,14 +109,14 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
         cfg,
         caps,
         session_context,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 8_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            8_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        ),
     );
 
     let request = match eng.next_action(&handle) {

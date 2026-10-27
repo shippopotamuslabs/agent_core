@@ -81,14 +81,14 @@ fn pending_caps() -> SessionCapabilities {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 200_000,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
 }
 
 fn pending_request(engine: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {

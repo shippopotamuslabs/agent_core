@@ -53,8 +53,8 @@ mod tests {
         ModelRequest {
             session_messages: vec![],
             system_prompt: "test".into(),
-            tools_schema_json: "[]".into(),
-            rendered_tool_catalog_json: "[]".into(),
+            tool_schemas: Vec::new(),
+            rendered_tool_catalog: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,

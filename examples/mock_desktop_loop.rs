@@ -23,14 +23,14 @@ fn main() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "openai".into(),
-            context_window_tokens: 128_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "openai".into(),
+            128_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        ),
     );
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(

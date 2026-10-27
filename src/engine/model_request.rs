@@ -12,14 +12,11 @@ use crate::compact::{estimate_session_pressure, CompactionContext};
 use crate::context_store::{is_browsable_context_kind, ContextStore};
 use crate::events::CompactionTrigger;
 use crate::file_context::condense_file_context;
-use crate::request_pipeline::render_runtime_tool_view;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
 use crate::state_ledger::StateLedger;
-use crate::tool_context::build_tool_context_index_with_registry;
+use crate::tool_context::build_tool_context_index_from_set;
 use crate::turn_io::ModelRequest;
-
-use super::render_active_schema_json;
 
 /// Disjoint-field view of `InnerSession` needed to build a `ModelRequest`.
 ///
@@ -72,33 +69,34 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     // breaking xAI/OpenAI prompt-cache prefix stability. Ledger content is already
     // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
 
-    let rendered_tool_catalog_json =
-        render_runtime_tool_view(&io.tools_schema_json, config, capabilities, loop_metrics)
-            .unwrap_or_else(|_| io.tools_schema_json.clone());
+    // All renders below work on the session-parsed entries: no schema text is
+    // parsed per turn. `rendered_tool_catalog` mirrors
+    // `request_pipeline::render_runtime_tool_view` (FRG-36 gates) over the
+    // parsed active channel; serialize at the edge.
+    let rendered_tool_catalog = io
+        .schemas
+        .render_runtime_view(config, capabilities, loop_metrics);
 
-    let has_catalog =
-        !io.tool_catalog_json.trim().is_empty() && io.tool_catalog_json.trim() != "[]";
-    let has_registry = !io.tool_schema_registry_json.trim().is_empty()
-        && io.tool_schema_registry_json.trim() != "[]";
+    let has_catalog = io.schemas.has_catalog();
+    let has_registry = io.schemas.has_registry();
 
-    let active_schema_json: String = if has_registry && !active_tool_names.is_empty() {
-        render_active_schema_json(&io.tool_schema_registry_json, active_tool_names)
+    let active_schemas = if has_registry && !active_tool_names.is_empty() {
+        io.schemas.render_active_schemas(active_tool_names)
     } else {
-        io.tools_schema_json.clone()
+        io.schemas.active.clone()
     };
 
-    let tool_context_index = build_tool_context_index_with_registry(
-        &active_schema_json,
-        &io.tool_catalog_json,
-        &io.tool_schema_registry_json,
+    let tool_context_index = build_tool_context_index_from_set(
+        &active_schemas,
+        &io.schemas,
         context_store,
         config,
         capabilities,
     );
-    let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
-        "[]".to_string()
+    let tool_schemas = if tool_context_index.is_some() && !has_catalog {
+        Vec::new()
     } else {
-        active_schema_json
+        active_schemas
     };
 
     let file_context_index = session
@@ -136,8 +134,8 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     ModelRequest {
         session_messages,
         system_prompt: io.system_prompt.clone(),
-        rendered_tool_catalog_json,
-        tools_schema_json,
+        rendered_tool_catalog,
+        tool_schemas,
         allow_tool_call,
         context_references: context_store
             .entries()
@@ -194,7 +192,7 @@ fn preflight_ctx_of(
     CompactionContext {
         provider: io.provider.clone(),
         context_window_tokens: io.context_window_tokens,
-        tools_schema_json: io.tools_schema_json.clone(),
+        tools_schema_json: io.schemas.active_json().to_string(),
         system_prompt: io.system_prompt.clone(),
         context_sidecars_estimate: String::new(),
         capabilities: capabilities.clone(),

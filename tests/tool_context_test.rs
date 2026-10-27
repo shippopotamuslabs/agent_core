@@ -34,14 +34,14 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: SCHEMAS_JSON.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            SCHEMAS_JSON.into(),
+            "sys".into(),
+        ),
     );
 
     match eng.next_action(&handle) {
@@ -63,7 +63,7 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
             );
             // Crude token estimate of tools_schema_json must drop sharply when
             // deferral is in effect.
-            let token_estimate = req.tools_schema_json.len() as u32 / 4;
+            let token_estimate = req.tools_schema_json().len() as u32 / 4;
             assert!(
                 token_estimate < 128,
                 "tools_schema_json token estimate must be < 128, got {}",
@@ -100,14 +100,14 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: SCHEMAS_JSON.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            SCHEMAS_JSON.into(),
+            "sys".into(),
+        ),
     );
 
     let schema_ref = match eng.next_action(&handle) {
@@ -151,19 +151,19 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: r#"[{"name":"web_search"}]"#.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            r#"[{"name":"web_search"}]"#.into(),
+            "sys".into(),
+        ),
     );
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
             assert!(req.tool_context_index.is_none());
-            assert_eq!(req.tools_schema_json, r#"[{"name":"web_search"}]"#);
+            assert_eq!(req.tools_schema_json(), r#"[{"name":"web_search"}]"#);
         }
         other => panic!("expected CallModel, got {other:?}"),
     }
@@ -194,14 +194,14 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: schemas.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            schemas.into(),
+            "sys".into(),
+        ),
     );
 
     // Force the engine to register schemas in its owned store.
