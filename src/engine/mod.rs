@@ -43,7 +43,7 @@ use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
 use crate::guardrails::GuardrailState;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
-use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
 
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
@@ -370,56 +370,13 @@ impl AgentEngine {
             }
         };
 
-        let assistant_id = format!(
-            "a{}",
-            g.session
-                .messages
-                .iter()
-                .filter(|message| message.role == AgentRole::Assistant)
-                .count()
+        Self::push_assistant_message(
+            &mut g,
+            &merged_tool_calls,
+            assistant_content,
+            ingest_metadata,
+            response.provider_reasoning_content.as_deref(),
         );
-        let mut metadata = MessageMeta::new();
-        if let Some(ingest_obj) = ingest_metadata.as_object() {
-            for (k, v) in ingest_obj {
-                metadata.set_extra(k.clone(), v.clone());
-            }
-        }
-        if let Some(reasoning_content) = response
-            .provider_reasoning_content
-            .as_deref()
-            .filter(|content| !content.is_empty())
-        {
-            metadata.set_extra(
-                "provider_reasoning",
-                json!({ "reasoning_content": reasoning_content }),
-            );
-        }
-        g.session.messages.push(AgentMessage {
-            id: assistant_id,
-            role: AgentRole::Assistant,
-            content: assistant_content,
-            metadata,
-        });
-        if g.config.enable_state_ledger {
-            if let Some(message) = g.session.messages.last().cloned() {
-                g.state_ledger.observe_assistant_message(&message);
-            }
-        }
-
-        // Emit after_model_response only when there are tool calls (model returned with tools)
-        if g.config.enable_loop_hooks
-            && g.capabilities.lifecycle_hooks_supported
-            && !merged_tool_calls.is_empty()
-        {
-            g.emit(AgentEvent::HookInvoked {
-                checkpoint: "after_model_response".into(),
-            });
-        }
-
-        g.last_model_response_greedy_tool_names = merged_tool_calls
-            .iter()
-            .map(|c| normalize_tool_name_hint(&c.name))
-            .collect();
 
         if merged_tool_calls.is_empty() {
             finish::finish_after_model_stop(g.finish_state(), response.finish_reason);
@@ -784,6 +741,31 @@ impl AgentEngine {
         )
     }
 
+    /// Dispatch glue for the assistant-append stage.
+    fn push_assistant_message(
+        g: &mut InnerSession,
+        merged_tool_calls: &[RawToolCall],
+        assistant_content: String,
+        ingest_metadata: serde_json::Value,
+        provider_reasoning_content: Option<&str>,
+    ) {
+        model_intake::append_assistant_message(
+            model_intake::AppendAssistantInputs {
+                session: &mut g.session,
+                state_ledger: &mut g.state_ledger,
+                enable_state_ledger: g.config.enable_state_ledger,
+                events: &mut g.events,
+                enable_loop_hooks: g.config.enable_loop_hooks,
+                lifecycle_hooks_supported: g.capabilities.lifecycle_hooks_supported,
+                greedy_tool_names: &mut g.last_model_response_greedy_tool_names,
+            },
+            merged_tool_calls,
+            assistant_content,
+            ingest_metadata,
+            provider_reasoning_content,
+        );
+    }
+
     /// Dispatch glue for slice 5 (see `intake_parse_failed`).
     fn intake_repair(
         g: &mut InnerSession,
@@ -1017,21 +999,7 @@ impl AgentEngine {
     }
 }
 
-fn normalize_tool_name_hint(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(r) = s.strip_prefix("functions.") {
-            s = r.to_string();
-        } else if let Some(r) = s.strip_prefix("tools.") {
-            s = r.to_string();
-        } else {
-            break;
-        }
-    }
-    s.to_lowercase().replace(['-', ' '], "_")
-}
-
-fn session_has_append_context(
+pub(super) fn session_has_append_context(
     messages: &[AgentMessage],
     artifact_squash: Option<&ArtifactSquashSemantics>,
 ) -> bool {
@@ -1236,24 +1204,23 @@ impl InnerSession {
             let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
-            let artifact_squash = self
-                .config
-                .tool_semantics
-                .compaction
-                .artifact_squash
-                .as_ref();
-            let has_append_context =
-                session_has_append_context(&self.session.messages, artifact_squash);
             let session_has_tool_messages = self
                 .session
                 .messages
                 .iter()
                 .any(|m| m.role == AgentRole::Tool);
-            let defer_compaction_failure = has_append_context
-                || self.pending.finalize_after_tool_stop
-                || (self.pending.execute.is_some()
-                    && !self.session.compaction_log.is_empty()
-                    && session_has_tool_messages);
+            let (has_append_context, defer_compaction_failure) = compaction::probe_turn_flags(
+                &self.session.messages,
+                self.config
+                    .tool_semantics
+                    .compaction
+                    .artifact_squash
+                    .as_ref(),
+                self.pending.finalize_after_tool_stop,
+                self.pending.execute.is_some(),
+                self.session.compaction_log.is_empty(),
+                session_has_tool_messages,
+            );
 
             if let Some(err) = mid_turn_stall_error(
                 trigger,
@@ -1352,21 +1319,8 @@ impl InnerSession {
                 self.persist_artifact_state_if_present();
             }
 
-            // When forced by absolute token threshold, turn count, or turn-end,
-            // override:
-            //  - plan.threshold_ratio = 0.0 so the pipeline's own ratio guard passes
-            //  - ctx.trigger = MidTurn so the summary tier summarizes all messages
-            //    (not just "before last user") for short sessions
-            let (effective_plan, effective_ctx) = if forced_by_non_ratio {
-                let mut p = plan.clone();
-                p.threshold_ratio = 0.0;
-                p.threshold_tokens = 0;
-                let mut c = ctx.clone();
-                c.trigger = CompactionTrigger::MidTurn;
-                (p, c)
-            } else {
-                (plan.clone(), ctx.clone())
-            };
+            let (effective_plan, effective_ctx) =
+                compaction::apply_force_override(&plan, &ctx, forced_by_non_ratio);
 
             let pipeline = compaction_pipeline_for_plan(&effective_plan);
             let outcome = pipeline.run_plan(
@@ -1508,6 +1462,7 @@ fn truncate_model_api_failure_reason(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageMeta;
     use crate::turn_io::RawToolCall;
 
     fn io_small_window() -> SessionIoParams {

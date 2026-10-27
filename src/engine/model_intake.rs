@@ -26,6 +26,96 @@ use crate::state_ledger::StateLedger;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
+/// FRG-47 stage: appends the assistant message for the continuing flow
+/// (metadata shaping, ledger observe, hook emit, greedy-name capture).
+/// Returns nothing; the dispatch continues.
+pub(super) struct AppendAssistantInputs<'a> {
+    pub session: &'a mut AgentSession,
+    pub state_ledger: &'a mut StateLedger,
+    pub enable_state_ledger: bool,
+    pub events: &'a mut Vec<AgentEvent>,
+    pub enable_loop_hooks: bool,
+    pub lifecycle_hooks_supported: bool,
+    pub greedy_tool_names: &'a mut Vec<String>,
+}
+
+pub(super) fn append_assistant_message(
+    inputs: AppendAssistantInputs<'_>,
+    merged_tool_calls: &[RawToolCall],
+    assistant_content: String,
+    ingest_metadata: serde_json::Value,
+    provider_reasoning_content: Option<&str>,
+) {
+    let AppendAssistantInputs {
+        session,
+        state_ledger,
+        enable_state_ledger,
+        events,
+        enable_loop_hooks,
+        lifecycle_hooks_supported,
+        greedy_tool_names,
+    } = inputs;
+    let assistant_id = format!(
+        "a{}",
+        session
+            .messages
+            .iter()
+            .filter(|message| message.role == AgentRole::Assistant)
+            .count()
+    );
+    let mut metadata = MessageMeta::new();
+    if let Some(ingest_obj) = ingest_metadata.as_object() {
+        for (k, v) in ingest_obj {
+            metadata.set_extra(k.clone(), v.clone());
+        }
+    }
+    if let Some(reasoning_content) = provider_reasoning_content
+        .filter(|content| !content.is_empty())
+    {
+        metadata.set_extra(
+            "provider_reasoning",
+            json!({ "reasoning_content": reasoning_content }),
+        );
+    }
+    session.messages.push(AgentMessage {
+        id: assistant_id,
+        role: AgentRole::Assistant,
+        content: assistant_content,
+        metadata,
+    });
+    if enable_state_ledger {
+        if let Some(message) = session.messages.last().cloned() {
+            state_ledger.observe_assistant_message(&message);
+        }
+    }
+
+    // Emit after_model_response only when there are tool calls (model returned with tools)
+    if enable_loop_hooks && lifecycle_hooks_supported && !merged_tool_calls.is_empty() {
+        events.push(AgentEvent::HookInvoked {
+            checkpoint: "after_model_response".into(),
+        });
+    }
+
+    *greedy_tool_names = merged_tool_calls
+        .iter()
+        .map(|c| normalize_tool_name_hint(&c.name))
+        .collect();
+}
+
+fn normalize_tool_name_hint(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    loop {
+        if let Some(r) = s.strip_prefix("functions.") {
+            s = r.to_string();
+        } else if let Some(r) = s.strip_prefix("tools.") {
+            s = r.to_string();
+        } else {
+            break;
+        }
+    }
+    s.to_lowercase().replace(['-', ' '], "_")
+}
+
 /// Inputs for the repair/discovery loop. The catalog is built once by the
 /// dispatch (hoisted out of the per-call hot loop).
 pub(super) struct RepairTurnInputs<'a> {

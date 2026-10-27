@@ -153,6 +153,45 @@ pub(super) fn apply_manual_focus_instruction(
     req
 }
 
+/// Pure turn-context probe for `run_compaction_pass`: append-context presence
+/// plus the MidTurn/PostToolResult failure-deferral condition.
+pub(super) fn probe_turn_flags(
+    messages: &[AgentMessage],
+    artifact_squash: Option<&ArtifactSquashSemantics>,
+    pending_finalize_after_tool_stop: bool,
+    pending_execute_is_some: bool,
+    compaction_log_is_empty: bool,
+    session_has_tool_messages: bool,
+) -> (bool, bool) {
+    let has_append_context = super::session_has_append_context(messages, artifact_squash);
+    let defer_compaction_failure = has_append_context
+        || pending_finalize_after_tool_stop
+        || (pending_execute_is_some && !compaction_log_is_empty && session_has_tool_messages);
+    (has_append_context, defer_compaction_failure)
+}
+
+/// Forced-entry override: when entry was forced by an absolute token
+/// threshold, turn count, or turn-end (not the ratio gate), the dispatch runs
+/// the pipeline with a zeroed ratio and a MidTurn context so the summary tier
+/// summarizes all messages (not just "before last user") for short sessions.
+/// Pure plan/ctx transform.
+pub(super) fn apply_force_override(
+    plan: &crate::compact::policy::CompactionPlan,
+    loop_ctx: &CompactionContext,
+    forced_by_non_ratio: bool,
+) -> (crate::compact::policy::CompactionPlan, CompactionContext) {
+    if forced_by_non_ratio {
+        let mut p = plan.clone();
+        p.threshold_ratio = 0.0;
+        p.threshold_tokens = 0;
+        let mut c = loop_ctx.clone();
+        c.trigger = CompactionTrigger::MidTurn;
+        (p, c)
+    } else {
+        (plan.clone(), loop_ctx.clone())
+    }
+}
+
 /// Message-role probe for the turn-end fire condition (plain data, so the
 /// policy gate never touches the session).
 pub(super) fn last_message_role(messages: &[AgentMessage]) -> Option<crate::message::AgentRole> {
