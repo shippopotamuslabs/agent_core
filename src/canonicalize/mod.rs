@@ -1,12 +1,20 @@
 //! Shared tool-call canonicalization API.
+//!
+//! Dependency direction (ENC-291): this module is the shared core —
+//! [`crate::repair`] and [`crate::tool_parse`] delegate to it. It imports
+//! only leaf modules ([`crate::json_repair`], [`crate::schema_coerce`],
+//! [`crate::tool_name_match`]) plus [`crate::catalog`],
+//! [`crate::tool_semantics`] et al, and never `repair`/`tool_parse`, so the
+//! import graph among the three stays acyclic.
 
 use serde_json::Value;
 
 use crate::catalog::{ToolCatalog, ToolSchemaHint};
 use crate::events::AgentEvent;
+use crate::json_repair::repair_json;
 use crate::message::RepairRecord;
-use crate::repair::{best_catalog_match, FUZZY_AUTO_ACCEPT};
-use crate::tool_parse::{coerce_to_schema, repair_json};
+use crate::schema_coerce::coerce_to_schema;
+use crate::tool_name_match::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 use crate::tool_semantics::{schema_hint_for_semantics, SpecialValueRepair, ToolSemanticsConfig};
 use crate::turn_io::RawToolCall;
 

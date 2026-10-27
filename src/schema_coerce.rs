@@ -1,7 +1,11 @@
 //! Schema-aware coercion modelled on Forge's `schema_coercion.rs`.
+//!
+//! Leaf module (ENC-291): depends only on [`crate::catalog`] and
+//! [`crate::json_repair`], so both [`crate::canonicalize`] and
+//! [`crate::tool_parse`] can use it without a module cycle.
 
 use crate::catalog::ToolSchemaHint;
-use crate::tool_parse::json_repair::repair_json;
+use crate::json_repair::repair_json;
 use serde_json::Value;
 
 /// Coerce a JSON value in-place to match the shape implied by a tool's

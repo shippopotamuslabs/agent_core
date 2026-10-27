@@ -1,8 +1,11 @@
 //! Tool name + argument repair before execution (see AGENT-014).
+//!
+//! Dependency direction (ENC-291): this module delegates to
+//! [`crate::canonicalize`]; the fuzzy matcher lives in the leaf module
+//! [`crate::tool_name_match`] (re-exported here for compatibility), so the
+//! `canonicalize` <-> `repair` import is one-way (`repair` -> `canonicalize`).
 
-mod fuzzy;
-
-pub use fuzzy::{best_catalog_match, FUZZY_AUTO_ACCEPT};
+pub use crate::tool_name_match::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 
 use serde::{Deserialize, Serialize};
 
