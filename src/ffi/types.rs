@@ -840,33 +840,42 @@ fn tool_schema_entry_value(
     Ok(serde_json::Value::Object(object))
 }
 
-fn tool_schema_entries_json(entries: &[FfiToolSchemaEntry]) -> Result<String, AgentException> {
-    let values: Result<Vec<serde_json::Value>, AgentException> =
-        entries.iter().map(tool_schema_entry_value).collect();
-    serde_json::to_string(&values?).map_err(|error| AgentException::Internal {
-        detail: format!("tool schema entries failed to serialize: {error}"),
-    })
+/// Convert typed boundary entries into parsed [`SchemaEntry`]s in one
+/// pass: each entry's schema object is built (and its `parameters_json`
+/// validated) by [`tool_schema_entry_value`], then wrapped directly —
+/// no serialize-to-string / re-parse round-trip.
+fn tool_schema_entries(
+    entries: &[FfiToolSchemaEntry],
+) -> Result<Vec<crate::tool_schema::SchemaEntry>, AgentException> {
+    let mut converted = Vec::with_capacity(entries.len());
+    for entry in entries {
+        converted.push(crate::tool_schema::SchemaEntry::from(
+            tool_schema_entry_value(entry)?,
+        ));
+    }
+    Ok(converted)
 }
 
 /// FFI session edge: convert the typed params into `SessionIoParams`,
-/// reconstructing the two schema channels' JSON from the typed entries.
-/// Fallible (never panics): a malformed entry is an `AgentException` the
-/// caller must handle. The reconstruction + `SessionIoParams::new` call
-/// are localized here so a future fallible `new` only touches this
-/// function.
+/// constructing the parsed schema set directly from the typed entries
+/// (only the catalog channel still arrives as JSON text). Fallible
+/// (never panics): a malformed entry is an `AgentException` the caller
+/// must handle.
 pub(crate) fn session_io_params(
     p: FfiSessionIoParams,
 ) -> Result<crate::engine::SessionIoParams, AgentException> {
-    let tool_schema_registry_json = tool_schema_entries_json(&p.tool_schema_registry)?;
-    let tools_schema_json = tool_schema_entries_json(&p.tool_schemas)?;
-    Ok(crate::engine::SessionIoParams::new(
-        p.provider,
-        p.context_window_tokens,
-        p.tool_catalog_json,
-        tool_schema_registry_json,
-        tools_schema_json,
-        p.system_prompt,
-    ))
+    let registry = tool_schema_entries(&p.tool_schema_registry)?;
+    let active = tool_schema_entries(&p.tool_schemas)?;
+    Ok(crate::engine::SessionIoParams {
+        provider: p.provider,
+        context_window_tokens: p.context_window_tokens,
+        schemas: crate::tool_schema::ToolSchemaSet::from_entries(
+            active,
+            registry,
+            &p.tool_catalog_json,
+        ),
+        system_prompt: p.system_prompt,
+    })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
