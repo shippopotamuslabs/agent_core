@@ -44,6 +44,7 @@ fn compaction_ctx(trigger: CompactionTrigger) -> CompactionContext {
             summarization_allowed: true,
             ..Default::default()
         },
+        suppress_summary_tier: false,
         trigger,
     }
 }
@@ -508,7 +509,7 @@ where
     let config = handle.lalr_config();
     let cap = effective_max_tool_turns(&config);
     assert!(
-        should_stop_tool_rounds(&config, tool_round_index, false),
+        should_stop_tool_rounds(&config, tool_round_index, &[]),
         "harness expects tool_round_index {tool_round_index} >= cap {cap}"
     );
 
