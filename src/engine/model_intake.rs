@@ -20,11 +20,11 @@ use crate::catalog::ToolCatalog;
 use crate::events::AgentEvent;
 use crate::guardrails::GuardrailState;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord};
-use crate::turn_io::RawToolCall;
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::StateLedger;
 use crate::tool_semantics::ToolSemanticsConfig;
+use crate::turn_io::RawToolCall;
 
 /// Inputs for the repair/discovery loop. The catalog is built once by the
 /// dispatch (hoisted out of the per-call hot loop).
@@ -143,7 +143,9 @@ pub(super) fn repair_tool_turn(
                     rec.attempt_metadata = Some(crate::message::ToolAttemptMetadata {
                         attempt_index: turn_index + 1,
                         attempts_remaining: Some(
-                            tool_retry_limit.saturating_sub(turn_index).saturating_sub(1),
+                            tool_retry_limit
+                                .saturating_sub(turn_index)
+                                .saturating_sub(1),
                         ),
                         timeout_ms: default_tool_timeout_ms,
                         policy_denied: false,
@@ -311,8 +313,8 @@ pub(super) fn apply_ingest_tools_blocked(
             .filter(|message| message.role == AgentRole::Assistant)
             .count()
     );
-    let can_nudge =
-        *tools_blocked_nudges_this_turn == 0 && model_requests_this_turn < max_model_requests_per_turn;
+    let can_nudge = *tools_blocked_nudges_this_turn == 0
+        && model_requests_this_turn < max_model_requests_per_turn;
 
     if !can_nudge {
         session.messages.push(AgentMessage {

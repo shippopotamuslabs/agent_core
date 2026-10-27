@@ -1,19 +1,18 @@
 //! Session state machine (`AgentEngine`) — AGENT-017, AGENT-018 preflight via idle compaction.
 
-pub mod envelope_ingest;
-pub mod leaked_tool_recovery;
-mod context_refs;
-pub(super) mod finish;
 pub(super) mod compaction;
+mod context_refs;
+pub mod envelope_ingest;
+pub(super) mod finish;
+pub mod leaked_tool_recovery;
 pub(super) mod model_intake;
 pub(super) mod model_request;
-pub(super) mod tool_results;
 mod provider_tool_calls;
 mod state;
+pub(super) mod tool_results;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
 pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
-
 
 use std::sync::{Arc, Mutex};
 
@@ -39,9 +38,7 @@ use crate::compact::{
     tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
-use crate::context_store::{
-    ContextReference, ContextStore,
-};
+use crate::context_store::{ContextReference, ContextStore};
 use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
 use crate::guardrails::GuardrailState;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
@@ -299,7 +296,8 @@ impl AgentEngine {
         g.phase = EnginePhase::Idle;
         g.guardrails.reset_model_api_failures();
         let allow_tool_call = g
-            .pending.call_model
+            .pending
+            .call_model
             .as_ref()
             .map(|request| request.allow_tool_call)
             .unwrap_or(true);
@@ -500,7 +498,6 @@ impl AgentEngine {
         // budget; the phase is already Idle so the dispatch just returns.
         Self::intake_flush_rejects(&mut g, parallel, rejects);
     }
-
 
     pub fn submit_model_turn_failure(
         &self,
@@ -884,7 +881,6 @@ impl AgentEngine {
         )
     }
 
-
     pub fn submit_summary(&self, handle: &SessionHandle, summary: SummaryResult) {
         let mut g = handle.lock_inner();
         if g.terminal_action.is_some() || g.cancelled {
@@ -1019,7 +1015,6 @@ impl AgentEngine {
             CompactionOutcome::Failed(err) => AgentAction::Failed(err),
         }
     }
-
 }
 
 fn normalize_tool_name_hint(raw: &str) -> String {
@@ -1236,11 +1231,8 @@ impl InnerSession {
                 self.suppress_summary_tier,
             );
             let threshold_tokens = plan.threshold_tokens;
-            let ratio_threshold_tokens = ratio_threshold_tokens_for_plan(
-                &self.config,
-                self.io.context_window_tokens,
-                &plan,
-            );
+            let ratio_threshold_tokens =
+                ratio_threshold_tokens_for_plan(&self.config, self.io.context_window_tokens, &plan);
             let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
@@ -1323,25 +1315,23 @@ impl InnerSession {
             if self.config.enable_context_store {
                 // Slice 6: sync spill/snapshot runs in the helper; the
                 // dispatch applies flags, ledger refs, and emits in order.
-                let effect = compaction::collect_sync_spill_effect(
-                    compaction::SyncSpillInputs {
-                        session: &mut self.session,
-                        context_store: &mut self.context_store,
-                        artifact_squash: self
-                            .config
-                            .tool_semantics
-                            .compaction
-                            .artifact_squash
-                            .as_ref(),
-                        spill_threshold_bytes: effective_tool_spill_threshold_bytes(
-                            &self.config,
-                            self.io.context_window_tokens,
-                        ),
-                        turn_index: self.turn_index,
-                        pressure_total_tokens: pressure.total_tokens,
-                        trigger,
-                    },
-                );
+                let effect = compaction::collect_sync_spill_effect(compaction::SyncSpillInputs {
+                    session: &mut self.session,
+                    context_store: &mut self.context_store,
+                    artifact_squash: self
+                        .config
+                        .tool_semantics
+                        .compaction
+                        .artifact_squash
+                        .as_ref(),
+                    spill_threshold_bytes: effective_tool_spill_threshold_bytes(
+                        &self.config,
+                        self.io.context_window_tokens,
+                    ),
+                    turn_index: self.turn_index,
+                    pressure_total_tokens: pressure.total_tokens,
+                    trigger,
+                });
                 if let Some(event) = effect.spill_event {
                     self.session.push_compaction_event(event.clone());
                     self.emit(AgentEvent::CompactionApplied(event));
@@ -1525,9 +1515,6 @@ impl InnerSession {
         self.phase = EnginePhase::AwaitingModel;
         Ok(AgentAction::CallModel(req))
     }
-
-
-
 }
 
 fn truncate_model_api_failure_reason(message: &str) -> String {

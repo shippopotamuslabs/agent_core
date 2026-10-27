@@ -8,7 +8,6 @@
 //! stays an `AgentEngine` surface method (it must acquire the guard, like
 //! `next_action` / `submit_*`).
 
-
 use super::model_request::{build_model_request, ModelRequestInputs};
 use super::state::{EnginePhase, PendingToolTurn, SessionHandle, SessionIoParams};
 use super::AgentEngine;
@@ -185,10 +184,9 @@ pub(super) fn before_finish_pending_work_action(
     if state.config.enable_state_ledger {
         state.state_ledger.observe_user_message(&injected_message);
     }
-    let allow = state.guardrails.allow_tool_call(
-        state.config,
-        state.last_model_response_greedy_tool_names,
-    );
+    let allow = state
+        .guardrails
+        .allow_tool_call(state.config, state.last_model_response_greedy_tool_names);
     let request = build_model_request(ModelRequestInputs {
         session: state.session,
         config: state.config,

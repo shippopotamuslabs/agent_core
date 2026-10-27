@@ -140,11 +140,7 @@ fn char_tool_turn_full_event_sequence() {
     let roles: Vec<_> = snap.messages.iter().map(|m| m.role.clone()).collect();
     assert_eq!(
         roles,
-        vec![
-            AgentRole::User,
-            AgentRole::Assistant,
-            AgentRole::Tool,
-        ]
+        vec![AgentRole::User, AgentRole::Assistant, AgentRole::Tool,]
     );
 }
 

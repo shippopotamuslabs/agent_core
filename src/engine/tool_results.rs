@@ -20,10 +20,10 @@ use serde_json::json;
 
 use super::activate_tools_for_spill_reference;
 use crate::artifact_finalize::record_artifact_progress_with_semantics;
-use crate::guardrails::is_soft_failure_result_json;
 use crate::compact::tool_spill::spill_tool_result_if_needed;
 use crate::context_store::{ContextReference, ContextStore};
 use crate::events::{AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
+use crate::guardrails::is_soft_failure_result_json;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use crate::session::AgentSession;
 use crate::state_ledger::StateLedger;
@@ -132,7 +132,13 @@ pub(super) fn process_one_result(
             turn_index,
         )
     } else {
-        spill_tool_result_if_needed(context_store, &mut res, call, spill_threshold_bytes, turn_index)
+        spill_tool_result_if_needed(
+            context_store,
+            &mut res,
+            call,
+            spill_threshold_bytes,
+            turn_index,
+        )
     };
 
     if let Some(budget) = truncation_budget {

@@ -268,12 +268,7 @@ pub fn ratio_threshold_tokens_for_plan(
     context_window_tokens: u32,
     plan: &CompactionPlan,
 ) -> u32 {
-    effective_threshold_tokens(
-        config,
-        context_window_tokens,
-        plan.threshold_ratio,
-        None,
-    )
+    effective_threshold_tokens(config, context_window_tokens, plan.threshold_ratio, None)
 }
 
 fn text_truncate_allowed(tier: ContextPolicyTier, context_window_tokens: u32) -> bool {

@@ -72,16 +72,12 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     // breaking xAI/OpenAI prompt-cache prefix stability. Ledger content is already
     // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
 
-    let rendered_tool_catalog_json = render_runtime_tool_view(
-        &io.tools_schema_json,
-        config,
-        capabilities,
-        loop_metrics,
-    )
-    .unwrap_or_else(|_| io.tools_schema_json.clone());
+    let rendered_tool_catalog_json =
+        render_runtime_tool_view(&io.tools_schema_json, config, capabilities, loop_metrics)
+            .unwrap_or_else(|_| io.tools_schema_json.clone());
 
-    let has_catalog = !io.tool_catalog_json.trim().is_empty()
-        && io.tool_catalog_json.trim() != "[]";
+    let has_catalog =
+        !io.tool_catalog_json.trim().is_empty() && io.tool_catalog_json.trim() != "[]";
     let has_registry = !io.tool_schema_registry_json.trim().is_empty()
         && io.tool_schema_registry_json.trim() != "[]";
 
@@ -148,9 +144,7 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
             .filter(|entry| is_browsable_context_kind(&entry.reference.kind))
             .map(|entry| entry.reference.clone())
             .collect(),
-        state_ledger: config
-            .enable_state_ledger
-            .then(|| state_ledger.clone()),
+        state_ledger: config.enable_state_ledger.then(|| state_ledger.clone()),
         tool_context_index,
         file_context_index,
         cache_hints,
@@ -166,9 +160,11 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
                     .as_ref()
                     .map(|p| p.ratio)
                     .unwrap_or_else(|| {
-                        estimate_session_pressure(session, config, &preflight_ctx_of(
-                            io, capabilities, suppress_summary_tier,
-                        ))
+                        estimate_session_pressure(
+                            session,
+                            config,
+                            &preflight_ctx_of(io, capabilities, suppress_summary_tier),
+                        )
                         .ratio
                     });
                 (ratio * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32
