@@ -3,7 +3,8 @@ use crate::long_loop_policy::LongLoopPolicy;
 use crate::message::{AgentMessage, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
 use crate::tool_semantics::ToolSemanticsConfig;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 
 const COMPACTION_LOG_CAPACITY: usize = 32;
@@ -499,6 +500,160 @@ pub struct Pressure {
     pub ratio: f32,
 }
 
+/// Typed host session context (ENC-290).
+///
+/// Replaces the previously opaque `serde_json::Value` map. Known host keys are
+/// typed fields; every other key round-trips through [`SessionContext::extras`]
+/// so host extensions survive a serialize/deserialize cycle byte-for-byte at
+/// the value level.
+///
+/// Field renames preserve the exact wire keys (`chatId`, `userMessageId`,
+/// `assistantMessageId`, `history_snapshot_ids`, `pending_work`,
+/// `force_finish_blocked`, `included_files`), and default-skipping keeps
+/// serialized output free of keys the host never sent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionContext {
+    /// Host chat identifier, plumbed into `ToolCallRequest` by the executor adapter.
+    #[serde(
+        rename = "chatId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string"
+    )]
+    pub chat_id: Option<String>,
+    /// Host user-message identifier.
+    #[serde(
+        rename = "userMessageId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string"
+    )]
+    pub user_message_id: Option<String>,
+    /// Host assistant-message identifier.
+    #[serde(
+        rename = "assistantMessageId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string"
+    )]
+    pub assistant_message_id: Option<String>,
+    /// Message ids covered by the latest history snapshot (engine bookkeeping).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "de_string_list"
+    )]
+    pub history_snapshot_ids: Vec<String>,
+    /// Host-supplied pending-work items seeding `LoopMetrics::pending_work_items`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "de_string_list"
+    )]
+    pub pending_work: Vec<String>,
+    /// Host flag forcing a finish-blocked failure when no pending work remains.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub force_finish_blocked: bool,
+    /// Host-supplied file list consumed by `condense_file_context` (kept as
+    /// JSON: the consumer re-serializes it to a string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub included_files: Option<Value>,
+    /// Forward-compatible carry for every host key without a typed field.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Lenient string option: strings map to `Some`, `null`/missing to `None`,
+/// and any other JSON shape to `None` (never fails session construction,
+/// matching the old opaque-`Value` tolerance).
+fn de_opt_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| v.as_str().map(str::to_string)))
+}
+
+/// Lenient string list: keeps string items, drops non-string items (mirrors
+/// the legacy `filter_map(as_str)` readers); `null`/missing/other shapes map
+/// to empty.
+fn de_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// Legacy `session_context: null` (the old `#[serde(default)]` `Value`
+/// default) maps to an empty context instead of failing.
+fn de_session_context<'de, D>(deserializer: D) -> Result<SessionContext, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(SessionContext::from(value))
+}
+
+impl SessionContext {
+    /// Pending-work texts (mirrors the legacy string-item filter: non-string
+    /// entries are dropped, never failed).
+    pub fn pending_work_texts(&self) -> Vec<String> {
+        self.pending_work.clone()
+    }
+
+    /// Value of the `force_finish_blocked` host flag.
+    pub fn force_finish_blocked(&self) -> bool {
+        self.force_finish_blocked
+    }
+
+    /// Serialized `included_files` payload for `condense_file_context`, if present.
+    pub fn included_files_json(&self) -> Option<String> {
+        self.included_files
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok())
+    }
+
+    /// Whether every id in `message_ids` is covered by the latest snapshot.
+    pub fn history_snapshot_covers(&self, message_ids: &[String]) -> bool {
+        message_ids.iter().all(|id| {
+            self.history_snapshot_ids
+                .iter()
+                .any(|snapshot_id| snapshot_id == id)
+        })
+    }
+
+    /// Engine history-snapshot bookkeeping: replaces the covered id set.
+    pub fn set_history_snapshot_ids(&mut self, message_ids: Vec<String>) {
+        self.history_snapshot_ids = message_ids;
+    }
+}
+
+impl From<Value> for SessionContext {
+    /// Lenient config-file boundary conversion: object keys map onto typed
+    /// fields (unknown keys land in `extras`); `null`/scalar legacy values and
+    /// type-mismatched objects fall back to empty rather than failing session
+    /// construction, matching the old opaque-`Value` tolerance.
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => Self::default(),
+            Value::Object(_) => serde_json::from_value(value).unwrap_or_default(),
+            _ => Self::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     pub messages: Vec<AgentMessage>,
@@ -506,23 +661,26 @@ pub struct AgentSession {
     /// Ring buffer capped at 32 entries.
     pub compaction_log: VecDeque<CompactionEvent>,
     pub ledger_snapshot: Option<Pressure>,
-    /// Opaque host context (e.g. `{"chatId":"...","userMessageId":"...","assistantMessageId":"..."}`).
+    /// Typed host context (e.g. `{"chatId":"...","userMessageId":"...","assistantMessageId":"..."}`).
     /// Read by `AgentToolExecutorAdapter` to plumb IDs into `ToolCallRequest`.
-    #[serde(default)]
-    pub session_context: serde_json::Value,
+    #[serde(default, deserialize_with = "de_session_context")]
+    pub session_context: SessionContext,
     /// Monotonic counter bumped on destructive compaction rewrites.
     #[serde(default)]
     pub transcript_revision: u64,
 }
 
 impl AgentSession {
-    pub fn new(initial_messages: Vec<AgentMessage>, session_context: serde_json::Value) -> Self {
+    pub fn new(
+        initial_messages: Vec<AgentMessage>,
+        session_context: impl Into<SessionContext>,
+    ) -> Self {
         Self {
             messages: initial_messages,
             tool_trace: Vec::new(),
             compaction_log: VecDeque::new(),
             ledger_snapshot: None,
-            session_context,
+            session_context: session_context.into(),
             transcript_revision: 0,
         }
     }
@@ -609,20 +767,98 @@ mod tests {
     }
 
     #[test]
-    fn session_context_opaque_value() {
+    fn session_context_typed_ids() {
         let ctx = json!({"chatId": "chat-1", "userMessageId": "msg-1"});
         let session = AgentSession::new(vec![], ctx.clone());
+        assert_eq!(session.session_context.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(
+            session.session_context.user_message_id.as_deref(),
+            Some("msg-1")
+        );
+        assert_eq!(session.session_context.assistant_message_id, None);
         let json = serde_json::to_string(&session).unwrap();
         let back: AgentSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.session_context["chatId"], "chat-1");
+        assert_eq!(back.session_context.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(
+            back.session_context.user_message_id.as_deref(),
+            Some("msg-1")
+        );
     }
 
     #[test]
-    fn session_context_defaults_null_when_missing() {
+    fn session_context_defaults_empty_when_missing() {
         let session = AgentSession::new(vec![], serde_json::Value::Null);
+        assert_eq!(session.session_context.chat_id, None);
+        assert!(session.session_context.history_snapshot_ids.is_empty());
+        assert!(session.session_context.extras.is_empty());
         let s = serde_json::to_string(&session).unwrap();
         let back: AgentSession = serde_json::from_str(&s).unwrap();
-        assert!(back.session_context.is_null());
+        assert_eq!(back.session_context.chat_id, None);
+    }
+
+    #[test]
+    fn session_context_legacy_null_deserializes_to_empty() {
+        let raw = r#"{"messages":[],"tool_trace":[],"compaction_log":[],"ledger_snapshot":null,"session_context":null,"transcript_revision":0}"#;
+        let back: AgentSession = serde_json::from_str(raw).unwrap();
+        assert_eq!(back.session_context.chat_id, None);
+        assert!(back.session_context.history_snapshot_ids.is_empty());
+    }
+
+    #[test]
+    fn session_context_roundtrips_existing_fixture_shape() {
+        // Byte-compat (ENC-290): every key of the legacy opaque object —
+        // typed fields and host extensions alike — must survive a
+        // serialize/deserialize cycle.
+        let ctx = json!({
+            "chatId": "chat-1",
+            "userMessageId": "u-1",
+            "assistantMessageId": "a-1",
+            "history_snapshot_ids": ["u0", "a0"],
+            "pending_work": ["verify failing tests"],
+            "force_finish_blocked": true,
+            "included_files": [{"path": "src/big.rs", "token_estimate": 500}],
+            "custom_host_flag": {"nested": [1, 2, 3]},
+        });
+        let session = AgentSession::new(vec![], ctx.clone());
+        assert_eq!(session.session_context.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(
+            session.session_context.history_snapshot_ids,
+            vec!["u0".to_string(), "a0".to_string()]
+        );
+        assert_eq!(
+            session.session_context.pending_work_texts(),
+            vec!["verify failing tests".to_string()]
+        );
+        assert!(session.session_context.force_finish_blocked());
+        assert!(session.session_context.included_files_json().is_some());
+        assert!(session
+            .session_context
+            .history_snapshot_covers(&["u0".to_string(), "a0".to_string()]));
+        assert!(!session
+            .session_context
+            .history_snapshot_covers(&["u9".to_string()]));
+
+        let json = serde_json::to_string(&session.session_context).unwrap();
+        let back: SessionContext = serde_json::from_str(&json).unwrap();
+        let again = serde_json::to_value(&back).unwrap();
+        // Value-level byte-compat: the re-parsed context equals the legacy object.
+        assert_eq!(again, ctx);
+
+        // Unknown host keys ride along in extras without typed access.
+        assert_eq!(
+            back.extras.get("custom_host_flag"),
+            Some(&json!({"nested": [1, 2, 3]}))
+        );
+    }
+
+    #[test]
+    fn session_context_bookkeeping_setter() {
+        let mut ctx = SessionContext::default();
+        assert!(!ctx.history_snapshot_covers(&["u0".to_string()]));
+        ctx.set_history_snapshot_ids(vec!["u0".to_string(), "a0".to_string()]);
+        assert!(ctx.history_snapshot_covers(&["u0".to_string()]));
+        // Empty query is vacuously covered (matches legacy `.all` semantics).
+        assert!(ctx.history_snapshot_covers(&[]));
     }
 
     #[test]

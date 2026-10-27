@@ -553,7 +553,8 @@ fn s16_fifo_requires_history_snapshot_before_destructive_deletion() {
     .expect("snapshot expected before FIFO drops history");
     session.session_context = serde_json::json!({
         "history_snapshot_ids": ["u0", "a0"]
-    });
+    })
+    .into();
 
     let outcome = FifoCompactionTier.apply(session, &cfg, &ctx);
     match outcome {
