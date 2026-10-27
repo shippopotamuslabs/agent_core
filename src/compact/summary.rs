@@ -54,15 +54,23 @@ fn retention_start_index(messages: &[AgentMessage], retention_window_tokens: u32
     Some(0)
 }
 
-fn messages_to_summarize(
+/// Collects summarizable candidates over `range`, skipping the retention
+/// window tail and non-content roles. Returns the picked messages plus their
+/// indices (the pre-user scan needs indices for the gap check; the post-user
+/// scan ignores them).
+fn collect_candidates(
     messages: &[AgentMessage],
-    retention_window_tokens: u32,
-) -> Option<(Vec<AgentMessage>, String)> {
-    let last_u = last_user_index(messages)?;
-    let retention_start = retention_start_index(messages, retention_window_tokens);
+    range: std::ops::Range<usize>,
+    retention_start: Option<usize>,
+) -> (Vec<AgentMessage>, Vec<usize>) {
     let mut picked = Vec::new();
     let mut picked_indices = Vec::new();
-    for (idx, msg) in messages.iter().enumerate().take(last_u) {
+    for (idx, msg) in messages
+        .iter()
+        .enumerate()
+        .take(range.end)
+        .skip(range.start)
+    {
         if retention_start.is_some_and(|start| idx >= start) {
             continue;
         }
@@ -72,26 +80,37 @@ fn messages_to_summarize(
         picked_indices.push(idx);
         picked.push(msg.clone());
     }
+    (picked, picked_indices)
+}
+
+fn messages_to_summarize(
+    messages: &[AgentMessage],
+    retention_window_tokens: u32,
+) -> Option<(Vec<AgentMessage>, String)> {
+    let last_u = last_user_index(messages)?;
+    let mut retention_start = retention_start_index(messages, retention_window_tokens);
+    let (mut picked, picked_indices) = collect_candidates(messages, 0..last_u, retention_start);
     if retention_window_tokens > 0
         && picked_indices
             .last()
             .is_some_and(|last_picked| *last_picked + 1 < last_u)
     {
-        return messages_to_summarize(messages, 0);
-    }
-    if picked.is_empty() && retention_window_tokens > 0 {
-        return messages_to_summarize(messages, 0);
+        // Gap case: the window carved a gap before the last user turn.
+        // Retry window-disabled (was: recursive call with window 0). The
+        // retry's indices are unread: the gap check runs once, up front.
+        retention_start = retention_start_index(messages, 0);
+        (picked, _) = collect_candidates(messages, 0..last_u, retention_start);
+    } else if picked.is_empty() && retention_window_tokens > 0 {
+        // Empty-pick case: nothing survived the window. Retry
+        // window-disabled (was: recursive call with window 0). The triggers
+        // are mutually exclusive (a gap needs a pick), so at most one retry
+        // fires: configured window -> window 0.
+        retention_start = retention_start_index(messages, 0);
+        (picked, _) = collect_candidates(messages, 0..last_u, retention_start);
     }
     if picked.is_empty() && last_u + 1 < messages.len() {
-        for (idx, msg) in messages.iter().enumerate().skip(last_u + 1) {
-            if retention_start.is_some_and(|start| idx >= start) {
-                continue;
-            }
-            if matches!(msg.role, AgentRole::System | AgentRole::CompactSummary) {
-                continue;
-            }
-            picked.push(msg.clone());
-        }
+        // Final fallback: assistant/tool traffic after the last user turn.
+        (picked, _) = collect_candidates(messages, last_u + 1..messages.len(), retention_start);
     }
     if picked.is_empty() {
         return None;
@@ -390,6 +409,32 @@ mod tests {
             messages_to_summarize(&messages, 0).expect("post-user assistant/tool range");
         assert_eq!(picked.len(), 2);
         assert_eq!(last_id, "t1");
+    }
+
+    #[test]
+    fn messages_to_summarize_retries_window_zero_on_retention_gap() {
+        // Gap-with-retention case: with a nonzero window the retention tail
+        // covers `a1`, so the pre-user scan picks only `u1` and leaves a gap
+        // before the last user turn. That gap must trigger the window-0
+        // retry, yielding the same pick as calling with window 0 directly.
+        let messages = vec![
+            um("u1", &"old user query ".repeat(30)),
+            am("a1", &"old assistant reply ".repeat(30)),
+            um("u2", "tail"),
+        ];
+        let (picked, last_id) =
+            messages_to_summarize(&messages, 50).expect("gap retries window-disabled");
+        let (picked_zero, last_id_zero) =
+            messages_to_summarize(&messages, 0).expect("window-0 baseline");
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].id, "u1");
+        assert_eq!(picked[1].id, "a1");
+        assert_eq!(last_id, "a1");
+        assert_eq!(
+            picked.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            picked_zero.iter().map(|m| &m.id).collect::<Vec<_>>()
+        );
+        assert_eq!(last_id, last_id_zero);
     }
 
     #[test]
