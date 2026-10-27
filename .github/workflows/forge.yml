@@ -1,0 +1,34 @@
+name: Forge Review
+
+# Forge consolidated code review (forge-reviewer reusable workflow).
+# Requires repo secrets: OPENROUTER_API_KEY, FORGE_APP_PRIVATE_KEY.
+# Optional: LINEAR_API_KEY (org-level secret) - Forge's ticket step
+# fetches linked Linear tickets with it; absence changes nothing.
+#
+# Supply-chain pinning: the reusable workflow and the forge_ref scripts
+# checkout are both pinned to the v1.1.4 release tag of forge-reviewer,
+# not a mutable branch, and only the secrets the reusable workflow
+# declares are passed — never `secrets: inherit`. Upgrade = bump both
+# pins to the new tag in one commit.
+#
+# NOTE (FRG-35): siblings (Stratum, Bloviate) have since moved to v1.1.5.
+# This caller pins v1.1.4 per the ticket spec; bump both pins to v1.1.5
+# in one commit if Sean confirms the newer tag.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  forge-review:
+    uses: shippopotamuslabs/forge-reviewer/.github/workflows/forge-review.yml@v1.1.4
+    with:
+      forge_ref: v1.1.4
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      FORGE_APP_PRIVATE_KEY: ${{ secrets.FORGE_APP_PRIVATE_KEY }}
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}

@@ -46,10 +46,27 @@ the Enclave layout:
   they are present and skips with a message when they are not. The full
   consumer-contract check still runs inside the Enclave layout.
 
-A CI config left over from before the move to GitHub ran
-`cargo fmt --check`, clippy with warnings denied, and `cargo test
---all-features`. That config is a record of the old pipeline; no GitHub Actions
-workflow replaces it yet.
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to
+`main` (required check):
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets` with warnings denied, with default features
+  and with `--no-default-features`
+- `cargo test` with default features (the Android/UniFFI consumer
+  configuration; deliberately not `--all-features`, which additionally
+  enables the dev-only `lalr-harness` feature whose TDD-Red tests fail by
+  design until the long-loop feature work lands)
+- `cargo test --no-default-features` (the native/Forge consumer
+  configuration), followed by a dependency-tree guard asserting the
+  `--no-default-features` tree contains no `uniffi` crates
+
+`.github/workflows/forge.yml` runs the shared Forge Reviewer reusable
+workflow on pull requests (opened, synchronize, reopened). It needs the
+`OPENROUTER_API_KEY` and `FORGE_APP_PRIVATE_KEY` repo secrets
+(`LINEAR_API_KEY` optional); if it fails only on missing secrets, that is
+the known-blocked state, not a code defect.
 
 ## The tool catalog lives with the consumer
 
