@@ -4,6 +4,7 @@ pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
 mod context_refs;
 pub(super) mod finish;
+pub(super) mod model_intake;
 pub(super) mod model_request;
 pub(super) mod tool_results;
 mod provider_tool_calls;
@@ -46,7 +47,7 @@ use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
-use crate::repair::{RepairOutcome, ToolRepairPipeline};
+
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
@@ -79,7 +80,7 @@ pub(super) fn merge_active_tool_names(
     }
 }
 
-fn is_companion_callable_tool(
+pub(super) fn is_companion_callable_tool(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
     tool_name: &str,
 ) -> bool {
@@ -143,22 +144,6 @@ fn render_active_schema_json(registry_json: &str, active_names: &[String]) -> St
         }
     }
     serde_json::Value::Array(out).to_string()
-}
-
-fn inject_tool_budget_after_batch(
-    session: &mut InnerSession,
-    last_batch_tool_message_index: Option<usize>,
-) {
-    let meta = session.guardrails.tool_budget_snapshot(
-        &session.config,
-        &session.last_model_response_greedy_tool_names,
-    );
-    inject_tool_budget_into_session(
-        &mut session.session,
-        session.turn_index,
-        &meta,
-        last_batch_tool_message_index,
-    );
 }
 
 /// Session state machine: hosts drive it exclusively through the polling surface
@@ -321,6 +306,8 @@ impl AgentEngine {
             .unwrap_or(true);
         g.pending_call_model = None;
 
+        // ENC-286 slice 5: the catalog is built once here and passed into the
+        // repair stage (previously cloned + rebuilt per tool call).
         let semantics = g.config.tool_semantics.clone();
         let catalog = ToolCatalog::from_semantics(&semantics)
             .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
@@ -331,6 +318,8 @@ impl AgentEngine {
             &catalog,
             &semantics,
         );
+        // FRG-47 staging: each ingest arm is a stage fn; this match only
+        // dispatches on the returned decision and owns phase/emit behavior.
         let (assistant_content, ingest_metadata) = match &ingest_outcome {
             EnvelopeIngestOutcome::NoMarkers => {
                 g.guardrails.reset_envelope_parse_failures();
@@ -353,39 +342,11 @@ impl AgentEngine {
                 visible_assistant_text,
                 error_json_for_model,
             } => {
-                g.guardrails.record_envelope_parse_failure();
-                let assistant_id = format!(
-                    "a{}",
-                    g.session
-                        .messages
-                        .iter()
-                        .filter(|message| message.role == AgentRole::Assistant)
-                        .count()
+                Self::intake_parse_failed(
+                    &mut g,
+                    visible_assistant_text.clone(),
+                    error_json_for_model.clone(),
                 );
-                let assistant_id_clone = assistant_id.clone();
-                g.session.messages.push(AgentMessage {
-                    id: assistant_id,
-                    role: AgentRole::Assistant,
-                    content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new().with_extra("envelope_ingest", json!("failed")),
-                });
-                if g.config.enable_state_ledger {
-                    if let Some(message) = g.session.messages.last().cloned() {
-                        g.state_ledger.observe_assistant_message(&message);
-                    }
-                }
-                g.session.messages.push(AgentMessage {
-                    id: format!("tool-err-envelope-{assistant_id_clone}"),
-                    role: AgentRole::Tool,
-                    content: error_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_extra("envelope_parse_failure", json!(true)),
-                });
-                let cfg = g.config.clone();
-                g.guardrails.count_tool_executed(1);
-                g.guardrails
-                    .on_tool_turn_finished(&cfg, 1, true, false, false, "agent_engine");
-                let last_tool_idx = g.session.messages.len().checked_sub(1);
-                inject_tool_budget_after_batch(&mut g, last_tool_idx);
                 return;
             }
             EnvelopeIngestOutcome::ToolsBlocked {
@@ -393,65 +354,22 @@ impl AgentEngine {
                 visible_assistant_text,
                 user_fallback_text,
             } => {
-                let assistant_id = format!(
-                    "a{}",
-                    g.session
-                        .messages
-                        .iter()
-                        .filter(|message| message.role == AgentRole::Assistant)
-                        .count()
-                );
-                let can_nudge = g.tools_blocked_nudges_this_turn == 0
-                    && g.model_requests_this_turn < g.config.max_model_requests_per_turn;
-
-                if !can_nudge {
-                    g.session.messages.push(AgentMessage {
-                        id: assistant_id,
-                        role: AgentRole::Assistant,
-                        content: user_fallback_text.clone(),
-                        metadata: MessageMeta::new()
-                            .with_extra("tools_blocked_fallback", json!(true)),
-                    });
-                    if g.config.enable_state_ledger {
-                        if let Some(message) = g.session.messages.last().cloned() {
-                            g.state_ledger.observe_assistant_message(&message);
-                        }
-                    }
-                    g.emit(AgentEvent::VisibleAssistantText {
-                        text: user_fallback_text.clone(),
-                    });
-                    // The fallback text is the final user-facing answer for this turn.
-                    // The provider finish reason may be ToolUse/Other for the blocked
-                    // attempt; finishing with it would fail the loop after a graceful
-                    // fallback, so force Stop semantics.
-                    finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
-                    return;
-                }
-
-                let assistant_id_clone = assistant_id.clone();
-                g.session.messages.push(AgentMessage {
-                    id: assistant_id,
-                    role: AgentRole::Assistant,
-                    content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new()
-                        .with_extra("envelope_ingest", json!("tools_blocked")),
-                });
-                if g.config.enable_state_ledger {
-                    if let Some(message) = g.session.messages.last().cloned() {
-                        g.state_ledger.observe_assistant_message(&message);
+                match Self::intake_tools_blocked(
+                    &mut g,
+                    visible_assistant_text.clone(),
+                    user_fallback_text.clone(),
+                    nudge_json_for_model.clone(),
+                ) {
+                    model_intake::ToolsBlockedEffect::Nudged => return,
+                    model_intake::ToolsBlockedEffect::FallbackFinished => {
+                        // The fallback text is the final user-facing answer for this turn.
+                        // The provider finish reason may be ToolUse/Other for the blocked
+                        // attempt; finishing with it would fail the loop after a graceful
+                        // fallback, so force Stop semantics.
+                        finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
+                        return;
                     }
                 }
-                g.session.messages.push(AgentMessage {
-                    id: format!("tool-nudge-tools-blocked-{assistant_id_clone}"),
-                    role: AgentRole::Tool,
-                    content: nudge_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_extra("tools_blocked_nudge", json!(true)),
-                });
-                let last_tool_idx = g.session.messages.len().checked_sub(1);
-                inject_tool_budget_after_batch(&mut g, last_tool_idx);
-                g.tools_blocked_nudges_this_turn += 1;
-                g.guardrails.reset_envelope_parse_failures();
-                return;
             }
         };
 
@@ -511,156 +429,19 @@ impl AgentEngine {
             return;
         }
 
-        let mut repaired: Vec<ToolCallRecord> = Vec::new();
-        let mut rejects = 0usize;
-        let parallel = merged_tool_calls.len();
         g.pending_tool_turn_request_order = merged_tool_calls.clone();
         g.pending_reject_tool_by_call_id.clear();
 
-        for raw in &merged_tool_calls {
-            // Tool-discovery guard: reject any call whose tool name is not part of the
-            // currently active set (the discovery tool itself is always callable).
-            // Only enforce when active_tool_names has actually been initialized — empty
-            // active set means the host has not opted into the new contract yet.
-            let discovery = g.config.tool_semantics.discovery.clone();
-            let discovery_name = discovery.as_ref().map(|d| d.tool_name.as_str());
-            let discovery_always_callable = discovery
-                .as_ref()
-                .map(|d| d.always_callable && raw.name == d.tool_name)
-                .unwrap_or(false);
-            let companion_callable = is_companion_callable_tool(&discovery, &raw.name);
-            if companion_callable {
-                merge_active_tool_names(&mut g.active_tool_names, [raw.name.clone()]);
-            }
-            let callable_now = !g.active_tool_names.is_empty()
-                && (g.active_tool_names.iter().any(|n| n == &raw.name)
-                    || discovery_always_callable
-                    || companion_callable);
-            if !g.active_tool_names.is_empty() && !callable_now {
-                let ti = g.turn_index;
-                g.emit(AgentEvent::ToolSoftFailure {
-                    tool_name: raw.name.clone(),
-                    turn_index: ti,
-                });
-                let mut available = g.active_tool_names.clone();
-                if let Some(name) = discovery_name {
-                    if !available.iter().any(|n| n == name) {
-                        available.insert(0, name.to_string());
-                    }
-                }
-                let error = if let Some(name) = discovery_name {
-                    format!("Tool '{}' is not active. Call {name} first.", raw.name)
-                } else {
-                    format!("Tool '{}' is not active.", raw.name)
-                };
-                let err = serde_json::json!({
-                    "error": error,
-                    "available_tools": available,
-                })
-                .to_string();
-                let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                g.pending_reject_tool_by_call_id.insert(
-                    call_id.clone(),
-                    AgentMessage {
-                        id: format!("tool-err-{call_id}"),
-                        role: AgentRole::Tool,
-                        content: err,
-                        metadata: MessageMeta::new().with_call_id(call_id),
-                    },
-                );
-                rejects += 1;
-                continue;
-            }
-            let semantics = g.config.tool_semantics.clone();
-            let (outcome, evs) = match ToolCatalog::from_semantics(&semantics) {
-                Ok(catalog) => ToolRepairPipeline::repair_with_semantics(raw, &catalog, &semantics),
-                Err(_) => (
-                    RepairOutcome::Reject {
-                        error_json_for_model: serde_json::json!({
-                            "error": format!("Tool '{}' is not configured.", raw.name),
-                        })
-                        .to_string(),
-                    },
-                    Vec::new(),
-                ),
-            };
-            for ev in evs {
-                g.emit(ev);
-            }
-            match outcome {
-                RepairOutcome::Repaired(mut rec) => {
-                    if g.config.default_tool_timeout_ms.is_some() {
-                        rec.attempt_metadata = Some(crate::message::ToolAttemptMetadata {
-                            attempt_index: g.turn_index + 1,
-                            attempts_remaining: Some(
-                                g.config
-                                    .tool_retry_limit
-                                    .saturating_sub(g.turn_index)
-                                    .saturating_sub(1),
-                            ),
-                            timeout_ms: g.config.default_tool_timeout_ms,
-                            policy_denied: false,
-                            requires_prior_read: g.config.require_read_before_edit,
-                        });
-                    }
-                    repaired.push(rec);
-                }
-                RepairOutcome::Reject {
-                    error_json_for_model,
-                } => {
-                    let ti = g.turn_index;
-                    g.emit(AgentEvent::ToolSoftFailure {
-                        tool_name: raw.name.clone(),
-                        turn_index: ti,
-                    });
-                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                    g.pending_reject_tool_by_call_id.insert(
-                        call_id.clone(),
-                        AgentMessage {
-                            id: format!("tool-err-{call_id}"),
-                            role: AgentRole::Tool,
-                            content: error_json_for_model,
-                            metadata: MessageMeta::new().with_call_id(call_id),
-                        },
-                    );
-                    rejects += 1;
-                }
-                RepairOutcome::Suggest {
-                    original,
-                    closest_name,
-                } => {
-                    let ti = g.turn_index;
-                    g.emit(AgentEvent::ToolSoftFailure {
-                        tool_name: raw.name.clone(),
-                        turn_index: ti,
-                    });
-                    let err = serde_json::json!({
-                        "error": format!("Ambiguous tool '{original}' (closest '{closest_name}')"),
-                        "available_tools": ToolCatalog::from_semantics(&g.config.tool_semantics)
-                            .map(|catalog| {
-                                catalog
-                                    .all()
-                                    .iter()
-                                    .map(|tool| tool.name.clone())
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default(),
-                    })
-                    .to_string();
-                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                    g.pending_reject_tool_by_call_id.insert(
-                        call_id.clone(),
-                        AgentMessage {
-                            id: format!("tool-err-{call_id}"),
-                            role: AgentRole::Tool,
-                            content: err,
-                            metadata: MessageMeta::new().with_call_id(call_id),
-                        },
-                    );
-                    rejects += 1;
-                }
-            }
+        // FRG-47 stage: the repair/discovery loop returns a decision payload;
+        // the dispatch owns emit ordering and every phase write below.
+        let outcome = Self::intake_repair(&mut g, &merged_tool_calls, &catalog);
+        for ev in outcome.events {
+            g.emit(ev);
         }
+        g.pending_reject_tool_by_call_id = outcome.reject_by_call_id;
+        let repaired = outcome.repaired;
+        let parallel = outcome.parallel;
+        let rejects = outcome.rejects;
 
         if !merged_tool_calls.is_empty() {
             provider_tool_calls::patch_last_assistant_raw_tool_calls(
@@ -716,28 +497,11 @@ impl AgentEngine {
             return;
         }
 
-        // Reject-only synthetic turn
-        let cfg = g.config.clone();
-        g.guardrails.count_tool_executed(rejects as u32);
-        g.guardrails.on_tool_turn_finished(
-            &cfg,
-            parallel,
-            parallel > 0,
-            false,
-            false,
-            "agent_engine",
-        );
-        let mut last_tool_idx = None;
-        for raw in std::mem::take(&mut g.pending_tool_turn_request_order) {
-            let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-            if let Some(message) = g.pending_reject_tool_by_call_id.remove(&call_id) {
-                g.session.messages.push(message);
-                last_tool_idx = Some(g.session.messages.len() - 1);
-            }
-        }
-        g.pending_reject_tool_by_call_id.clear();
-        inject_tool_budget_after_batch(&mut g, last_tool_idx);
+        // Reject-only synthetic turn: the stage applies counts, flush, and
+        // budget; the phase is already Idle so the dispatch just returns.
+        Self::intake_flush_rejects(&mut g, parallel, rejects);
     }
+
 
     pub fn submit_model_turn_failure(
         &self,
@@ -916,7 +680,16 @@ impl AgentEngine {
             g.pending_reject_count_this_turn = 0;
         }
 
-        inject_tool_budget_after_batch(&mut g, last_batch_tool_message_index);
+        let budget_meta = g
+            .guardrails
+            .tool_budget_snapshot(&g.config, &g.last_model_response_greedy_tool_names);
+        let turn_index = g.turn_index;
+        inject_tool_budget_into_session(
+            &mut g.session,
+            turn_index,
+            &budget_meta,
+            last_batch_tool_message_index,
+        );
 
         if g.pending_auto_finalize_finish {
             g.pending_auto_finalize_finish = false;
@@ -963,6 +736,90 @@ impl AgentEngine {
             turn_index: ti,
             tool_call_count: tc,
             terminal: false,
+        });
+    }
+
+    /// Dispatch glue for slice 5: bundle construction must go through `&mut
+    /// InnerSession` (not the `MutexGuard`), because simultaneous field
+    /// splits through the guard's autoderef do not borrow-check.
+    fn intake_parse_failed(
+        g: &mut InnerSession,
+        visible_assistant_text: String,
+        error_json_for_model: String,
+    ) {
+        model_intake::apply_ingest_parse_failed(
+            model_intake::IngestArmInputs {
+                session: &mut g.session,
+                guardrails: &mut g.guardrails,
+                config: &g.config,
+                state_ledger: &mut g.state_ledger,
+                events: &mut g.events,
+                turn_index: g.turn_index,
+                last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
+            },
+            visible_assistant_text,
+            error_json_for_model,
+        );
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_tools_blocked(
+        g: &mut InnerSession,
+        visible_assistant_text: String,
+        user_fallback_text: String,
+        nudge_json_for_model: String,
+    ) -> model_intake::ToolsBlockedEffect {
+        model_intake::apply_ingest_tools_blocked(
+            model_intake::IngestArmInputs {
+                session: &mut g.session,
+                guardrails: &mut g.guardrails,
+                config: &g.config,
+                state_ledger: &mut g.state_ledger,
+                events: &mut g.events,
+                turn_index: g.turn_index,
+                last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
+            },
+            visible_assistant_text,
+            user_fallback_text,
+            nudge_json_for_model,
+            &mut g.tools_blocked_nudges_this_turn,
+            g.model_requests_this_turn,
+            g.config.max_model_requests_per_turn,
+        )
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_repair(
+        g: &mut InnerSession,
+        merged_tool_calls: &[RawToolCall],
+        catalog: &ToolCatalog,
+    ) -> model_intake::RepairTurnOutcome {
+        model_intake::repair_tool_turn(
+            merged_tool_calls,
+            model_intake::RepairTurnInputs {
+                semantics: &g.config.tool_semantics,
+                catalog,
+                active_tool_names: &mut g.active_tool_names,
+                turn_index: g.turn_index,
+                default_tool_timeout_ms: g.config.default_tool_timeout_ms,
+                tool_retry_limit: g.config.tool_retry_limit,
+                require_read_before_edit: g.config.require_read_before_edit,
+            },
+        )
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_flush_rejects(g: &mut InnerSession, parallel: usize, rejects: usize) {
+        model_intake::flush_reject_only_turn(model_intake::RejectFlushInputs {
+            session: &mut g.session,
+            guardrails: &mut g.guardrails,
+            config: &g.config,
+            pending_tool_turn_request_order: &mut g.pending_tool_turn_request_order,
+            pending_reject_tool_by_call_id: &mut g.pending_reject_tool_by_call_id,
+            turn_index: g.turn_index,
+            parallel,
+            rejects,
+            last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
         });
     }
 
