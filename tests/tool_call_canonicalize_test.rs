@@ -7,7 +7,7 @@ use agent_core::canonicalize::{
     canonicalize_raw_arguments_with_semantics, canonicalize_tool_call_with_semantics,
     CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
 };
-use agent_core::catalog::ToolCatalog;
+use agent_core::catalog::{ToolCatalog, ToolSpec};
 use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
 use agent_core::tool_parse::coerce_provider_arguments_with_semantics;
 use agent_core::tool_semantics::ToolSemanticsConfig;
@@ -101,7 +101,8 @@ fn faal_cp_02_provider_ingress_allows_unknown_execution_rejects() {
 fn faal_cp_03_provider_ingress_matches_execution_strict_arguments() {
     let (catalog, semantics) = enclave_env();
     let args = r#"{"artifactId":"art-parity-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hi\"}]","isComplete":true}"#;
-    let ingress = coerce_provider_arguments_with_semantics("append_blocks", args, &catalog, &semantics);
+    let ingress =
+        coerce_provider_arguments_with_semantics("append_blocks", args, &catalog, &semantics);
     let (strict, _) = canonicalize_tool_call_with_semantics(
         &append_blocks_raw(args),
         &catalog,
@@ -224,10 +225,79 @@ fn faal_rc_03_bad_ingress_arguments_are_still_rejected_at_execution() {
 }
 
 #[test]
+fn frg14_slice1_no_shape_passthrough_preserves_extra_fields() {
+    let mut semantics = ToolSemanticsConfig::agnostic();
+    semantics.catalog.tools = vec![
+        ToolSpec {
+            name: "web_search".to_string(),
+            aliases: Vec::new(),
+            reproducible: true,
+            schema_hint: None,
+        },
+        ToolSpec {
+            name: "web_extract".to_string(),
+            aliases: Vec::new(),
+            reproducible: true,
+            schema_hint: None,
+        },
+    ];
+    assert!(
+        semantics.canonical_shapes.is_empty(),
+        "FRG14-SLICE1 test requires no canonical_shapes"
+    );
+    let catalog = ToolCatalog::from_semantics(&semantics).expect("FRG14-SLICE1 catalog");
+
+    let search = canonicalize_raw_arguments_with_semantics(
+        "web_search",
+        r#"{"query":"x","extra":1}"#,
+        &catalog,
+        &semantics,
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .expect("FRG14-SLICE1 web_search canonicalize");
+    let search_value: Value =
+        serde_json::from_str(&search.arguments_json).expect("FRG14-SLICE1 search JSON");
+    assert_eq!(search_value["query"], "x", "FRG14-SLICE1 search query");
+    assert_eq!(
+        search_value["extra"], 1,
+        "FRG14-SLICE1 search extra preserved"
+    );
+
+    let extract = canonicalize_raw_arguments_with_semantics(
+        "web_extract",
+        r#"{"urls":["u"],"extra":true}"#,
+        &catalog,
+        &semantics,
+        ToolCallCanonicalizeMode::ProviderIngress,
+    )
+    .expect("FRG14-SLICE1 web_extract canonicalize");
+    let extract_value: Value =
+        serde_json::from_str(&extract.arguments_json).expect("FRG14-SLICE1 extract JSON");
+    assert_eq!(
+        extract_value["urls"],
+        serde_json::json!(["u"]),
+        "FRG14-SLICE1 extract urls"
+    );
+    assert_eq!(
+        extract_value["extra"], true,
+        "FRG14-SLICE1 extract extra preserved"
+    );
+    assert!(
+        extract_value.get("extract_depth").is_none(),
+        "FRG14-SLICE1 no injected extract_depth"
+    );
+    assert!(
+        extract_value.get("format").is_none(),
+        "FRG14-SLICE1 no injected format"
+    );
+}
+
+#[test]
 fn faal_md_01_repair_provider_and_parse_paths_all_emit_array_blocks() {
     let (catalog, semantics) = enclave_env();
     let args = r#"{"artifactId":"art-md-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Parity\"}]","isComplete":false}"#;
-    let ingress = coerce_provider_arguments_with_semantics("append_blocks", args, &catalog, &semantics);
+    let ingress =
+        coerce_provider_arguments_with_semantics("append_blocks", args, &catalog, &semantics);
     let (repair, _) =
         ToolRepairPipeline::repair_with_semantics(&append_blocks_raw(args), &catalog, &semantics);
     let raw_text =
