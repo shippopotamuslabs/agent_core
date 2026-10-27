@@ -78,6 +78,15 @@ parent repo and are not in this repo. The Kotlin side of the contract lives
 in Enclave. Any catalog change here has a matching change there, made by
 hand until that tooling moves.
 
+## Vendored copy in Enclave
+
+`enclave/third_party/agent_core` is a synced copy (snapshot) of this repo,
+not a fork. The vendoring contract — the `.agent_core-source-sha` record
+file, the re-vendor procedure, and the freshness check
+(`scripts/check-vendored-freshness.sh`) — is documented in
+`docs/vendoring.md`. The re-vendor itself runs on the Enclave side
+(ENC-294 / Sean), never from this repo.
+
 ## Versioning
 
 Current version: 0.3.0 (`Cargo.toml`). Bump `version` when the serialized
