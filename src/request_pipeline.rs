@@ -37,7 +37,16 @@ pub fn render_runtime_tool_view(
     let filtered: Vec<&serde_json::Value> = arr
         .iter()
         .filter(|tool| {
-            let name = tool.as_str().unwrap_or("");
+            // Catalog entries are schema objects ({"name": ..., ...}), not
+            // bare strings, so extract the tool name from the "name" field.
+            // A bare string entry is still honored for backward compatibility.
+            let name: &str = match tool {
+                serde_json::Value::String(s) => s.as_str(),
+                serde_json::Value::Object(_) => {
+                    tool.get("name").and_then(|n| n.as_str()).unwrap_or("")
+                }
+                _ => "",
+            };
             // Remove patch_file and write_file when require_read_before_edit and no files read yet
             if config.require_read_before_edit
                 && metrics.files_read.is_empty()
@@ -54,4 +63,86 @@ pub fn render_runtime_tool_view(
         .collect();
 
     serde_json::to_string(&filtered).map_err(|e| AgentError::Internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn tool_entry(name: &str) -> String {
+        format!(r#"{{"name":{name:?},"description":"d","parameters":{{"type":"object"}}}}"#)
+    }
+
+    fn catalog(names: &[&str]) -> String {
+        let entries: Vec<String> = names.iter().map(|n| tool_entry(n)).collect();
+        format!("[{}]", entries.join(","))
+    }
+
+    fn names_in(rendered: &str) -> Vec<String> {
+        let tools: Vec<Value> = serde_json::from_str(rendered).expect("valid JSON array");
+        tools
+            .iter()
+            .map(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn edit_tools_gated_until_first_read() {
+        let config = AgentConfig {
+            require_read_before_edit: true,
+            ..AgentConfig::default()
+        };
+        let capabilities = SessionCapabilities::default();
+        let metrics = LoopMetrics::default();
+        let catalog_json = catalog(&["read_file", "patch_file", "write_file"]);
+
+        let rendered =
+            render_runtime_tool_view(&catalog_json, &config, &capabilities, &metrics).unwrap();
+        let names = names_in(&rendered);
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(!names.contains(&"patch_file".to_string()));
+        assert!(!names.contains(&"write_file".to_string()));
+
+        let mut after_read = LoopMetrics::default();
+        after_read.record_file_read("src/main.rs");
+        let rendered =
+            render_runtime_tool_view(&catalog_json, &config, &capabilities, &after_read).unwrap();
+        let names = names_in(&rendered);
+        assert!(names.contains(&"patch_file".to_string()));
+        assert!(names.contains(&"write_file".to_string()));
+    }
+
+    #[test]
+    fn delegation_gate_tracks_capability() {
+        let config = AgentConfig::default();
+        let catalog_json = catalog(&["read_file", "task_delegate"]);
+
+        let unsupported = SessionCapabilities {
+            delegation_tools_supported: false,
+            ..SessionCapabilities::default()
+        };
+        let rendered = render_runtime_tool_view(
+            &catalog_json,
+            &config,
+            &unsupported,
+            &LoopMetrics::default(),
+        )
+        .unwrap();
+        assert!(!names_in(&rendered).contains(&"task_delegate".to_string()));
+
+        let supported = SessionCapabilities {
+            delegation_tools_supported: true,
+            ..SessionCapabilities::default()
+        };
+        let rendered =
+            render_runtime_tool_view(&catalog_json, &config, &supported, &LoopMetrics::default())
+                .unwrap();
+        assert!(names_in(&rendered).contains(&"task_delegate".to_string()));
+    }
 }
