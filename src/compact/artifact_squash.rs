@@ -139,6 +139,17 @@ fn last_success_payload_index(
         .rposition(|msg| is_semantic_success_payload(&msg.content, semantics))
 }
 
+/// The assistant message immediately preceding `result_idx`, if it exists
+/// and is an assistant message. The one definition of "the message before
+/// the result" shared by the last-block and artifact-id lookups.
+fn prev_assistant_before(messages: &[AgentMessage], result_idx: usize) -> Option<&AgentMessage> {
+    if result_idx == 0 {
+        return None;
+    }
+    let prev = &messages[result_idx - 1];
+    (prev.role == AgentRole::Assistant).then_some(prev)
+}
+
 /// Last-block text comes from the assistant message immediately preceding the
 /// append result, when present.
 fn last_block_text_before(
@@ -146,13 +157,7 @@ fn last_block_text_before(
     result_idx: usize,
     semantics: &ArtifactSquashSemantics,
 ) -> Option<String> {
-    if result_idx == 0 {
-        return None;
-    }
-    let prev = &messages[result_idx - 1];
-    if prev.role != AgentRole::Assistant {
-        return None;
-    }
+    let prev = prev_assistant_before(messages, result_idx)?;
     extract_last_block_text_with_field(&prev.content, &semantics.blocks_field)
         .or_else(|| Some(prev.content.clone()).filter(|s| !s.is_empty()))
 }
@@ -173,25 +178,35 @@ fn anchor_artifact_id(
     {
         return Some(id);
     }
-    if result_idx == 0 {
-        return None;
-    }
-    let prev = &messages[result_idx - 1];
-    if prev.role != AgentRole::Assistant {
-        return None;
-    }
+    let prev = prev_assistant_before(messages, result_idx)?;
     artifact_id_from_assistant_metadata(prev, semantics)
+}
+
+/// The most recent successful append, resolved once: the result message
+/// index, its total-block count, and the preceding assistant's last-block
+/// text, if any. The one canonical definition of "most recent successful
+/// append" shared by the anchor extraction and the squash scan.
+fn last_append_lookup(
+    messages: &[AgentMessage],
+    semantics: &ArtifactSquashSemantics,
+) -> Option<(usize, i64, Option<String>)> {
+    let result_idx = last_success_payload_index(messages, semantics)?;
+    let total_blocks = serde_json::from_str::<Value>(&messages[result_idx].content)
+        .ok()
+        .and_then(|v| parse_semantic_total_blocks(&v, semantics))
+        .unwrap_or(0);
+    Some((
+        result_idx,
+        total_blocks,
+        last_block_text_before(messages, result_idx, semantics),
+    ))
 }
 
 pub fn extract_artifact_anchor(
     messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
 ) -> Option<ArtifactStateAnchor> {
-    let result_idx = last_success_payload_index(messages, semantics)?;
-    let total_blocks = serde_json::from_str::<Value>(&messages[result_idx].content)
-        .ok()
-        .and_then(|v| parse_semantic_total_blocks(&v, semantics))
-        .unwrap_or(0);
+    let (result_idx, total_blocks, last_block_text) = last_append_lookup(messages, semantics)?;
 
     if total_blocks <= 0 {
         return None;
@@ -201,7 +216,7 @@ pub fn extract_artifact_anchor(
         artifact_id: anchor_artifact_id(messages, result_idx, semantics)
             .unwrap_or_else(|| "unknown-artifact".to_string()),
         total_blocks: total_blocks as u32,
-        last_block_preview: last_block_text_before(messages, result_idx, semantics)
+        last_block_preview: last_block_text
             .map(|text| tail_chars(&text, semantics.snippet_max_chars))
             .unwrap_or_default(),
         continuation_instruction: semantics.continuation_instruction.clone(),
@@ -238,15 +253,8 @@ fn find_last_append_block(
     messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
 ) -> Option<(i64, Option<String>)> {
-    let result_idx = last_success_payload_index(messages, semantics)?;
-    let total_blocks = serde_json::from_str::<Value>(&messages[result_idx].content)
-        .ok()
-        .and_then(|v| parse_semantic_total_blocks(&v, semantics))
-        .unwrap_or(0);
-    Some((
-        total_blocks,
-        last_block_text_before(messages, result_idx, semantics),
-    ))
+    let (_, total_blocks, last_block_text) = last_append_lookup(messages, semantics)?;
+    Some((total_blocks, last_block_text))
 }
 
 /// Second pass: drop every append-loop message, emitting one summary line
