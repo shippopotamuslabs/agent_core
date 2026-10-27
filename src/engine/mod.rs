@@ -5,6 +5,7 @@ pub mod leaked_tool_recovery;
 mod context_refs;
 pub(super) mod finish;
 pub(super) mod model_request;
+pub(super) mod tool_results;
 mod provider_tool_calls;
 mod state;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
@@ -18,9 +19,7 @@ use serde_json::json;
 
 use crate::action::AgentAction;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
-use crate::artifact_finalize::{
-    record_artifact_progress_with_semantics, synthetic_finalize_calls_with_semantics,
-};
+use crate::artifact_finalize::synthetic_finalize_calls_with_semantics;
 use crate::budget::{
     effective_threshold_tokens, effective_tool_result_budget_for_window,
     effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ceiling,
@@ -34,17 +33,14 @@ use crate::compact::{
     compaction_pipeline_for_plan, estimate_session_pressure,
     history_snapshot::snapshot_history_range,
     policy::build_compaction_plan,
-    tool_spill::{
-        activation_tools_from_retrieval_hint, spill_tool_messages_in_session,
-        spill_tool_result_if_needed,
-    },
+    tool_spill::{activation_tools_from_retrieval_hint, spill_tool_messages_in_session},
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
 use crate::context_store::{
     ContextReference, ContextStore,
 };
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
-use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
+use crate::guardrails::GuardrailState;
 use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
@@ -58,7 +54,6 @@ use crate::state_ledger::StateLedger;
 use crate::tool_context::build_tool_context_index;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
-use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
@@ -73,7 +68,7 @@ fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
-fn merge_active_tool_names(
+pub(super) fn merge_active_tool_names(
     active_tool_names: &mut Vec<String>,
     names: impl IntoIterator<Item = String>,
 ) {
@@ -94,7 +89,7 @@ fn is_companion_callable_tool(
         .unwrap_or(false)
 }
 
-fn activate_tools_for_spill_reference(
+pub(super) fn activate_tools_for_spill_reference(
     active_tool_names: &mut Vec<String>,
     result: &mut ToolResultRecord,
     reference: &ContextReference,
@@ -844,48 +839,8 @@ impl AgentEngine {
             );
         }
 
-        // Pair results to calls by call_id; fall back to submission order for
-        // results the host returned with unknown ids. Calls left without any
-        // result get a synthesized error so provider replay still sees one tool
-        // message per tool_call_id (OpenAI-compatible APIs 400 otherwise).
-        let mut remaining: Vec<Option<ToolResultRecord>> = results.into_iter().map(Some).collect();
-        let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> =
-            HashMap::with_capacity(calls.len());
-        for call in &calls {
-            if let Some(slot) = remaining
-                .iter_mut()
-                .find(|slot| slot.as_ref().is_some_and(|res| res.call_id == call.call_id))
-            {
-                let res = slot.take().expect("matched result");
-                executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
-            }
-        }
-        let mut unmatched = remaining.into_iter().flatten();
-        for call in &calls {
-            if executed_by_call_id.contains_key(&call.call_id) {
-                continue;
-            }
-            let res = unmatched.next().map(|mut res| {
-                res.call_id = call.call_id.clone();
-                res
-            });
-            let res = res.unwrap_or_else(|| ToolResultRecord {
-                call_id: call.call_id.clone(),
-                result_json: json!({
-                    "error": "tool_result_missing",
-                    "message": format!(
-                        "Host returned no result for tool '{}' (call_id {}).",
-                        call.name, call.call_id
-                    ),
-                })
-                .to_string(),
-                truncated: false,
-                soft_failure: true,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            });
-            executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
-        }
+        // FRG-47 stage 1 (pure): pair host results to calls.
+        let mut executed_by_call_id = tool_results::pair_results_to_calls(&calls, results);
 
         let mut processed_results: Vec<ToolResultRecord> =
             Vec::with_capacity(executed_by_call_id.len());
@@ -911,184 +866,28 @@ impl AgentEngine {
                 last_batch_tool_message_index = Some(g.session.messages.len() - 1);
                 continue;
             }
-            let Some((call, mut res)) = executed_by_call_id.remove(&call_id) else {
+            let Some((call, res)) = executed_by_call_id.remove(&call_id) else {
                 continue;
             };
-            let spill_tokens_before = g
-                .estimate_pressure(CompactionTrigger::PostToolResult)
-                .total_tokens;
-            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
-            let spill_stored_copy_only = policy
-                .map(|policy| policy.spill_stored_copy_only)
-                .unwrap_or(false);
-            let skip_result_truncation = policy
-                .map(|policy| policy.skip_result_truncation)
-                .unwrap_or(false);
-            let spilled = if spill_stored_copy_only {
-                let mut stored_copy = res.clone();
-                let threshold =
-                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-                let turn_index = g.turn_index;
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut stored_copy,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            } else {
-                let threshold =
-                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-                let turn_index = g.turn_index;
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut res,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            };
-
-            if !skip_result_truncation {
-                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
-                let budget = effective_tool_result_budget_for_window(
-                    &pressure,
-                    &g.capabilities,
-                    &g.config,
-                    g.io.context_window_tokens,
-                );
-                let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
-                res.result_json = payload;
-                res.truncated = res.truncated || truncated;
-            }
-
-            if g.config.tool_semantics.artifact.is_some() {
-                let semantics = g.config.tool_semantics.clone();
-                record_artifact_progress_with_semantics(
-                    &mut g.pending_artifact_ids,
-                    &semantics,
-                    &call.name,
-                    &call.arguments_json,
-                    &res.result_json,
-                );
-            }
-
-            g.session.messages.push(AgentMessage {
-                id: format!("tool-{}", res.call_id),
-                role: AgentRole::Tool,
-                content: res.result_json.clone(),
-                metadata: MessageMeta::new()
-                    .with_call_id(res.call_id.clone())
-                    .with_tool_name(call.name)
-                    .with_extra("truncated", json!(res.truncated)),
-            });
-            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
-            if g.config.enable_state_ledger {
-                g.state_ledger.observe_tool_result(&res);
-            }
-            if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
-            }
-            if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = g
-                    .estimate_pressure(CompactionTrigger::PostToolResult)
-                    .total_tokens;
-                g.emit(AgentEvent::CompactionApplied(CompactionEvent {
-                    tier: CompactionTier::ToolSpill,
-                    tokens_before: spill_tokens_before,
-                    tokens_after: spill_tokens_after,
-                    trigger: CompactionTrigger::PostToolResult,
-                }));
-            }
-            processed_results.push(res);
+            processed_results.push(Self::process_and_apply_tool_result(
+                &mut g,
+                &mut last_batch_tool_message_index,
+                &call,
+                res,
+            ));
         }
 
         for (_, reject_msg) in reject_by_call_id {
             g.session.messages.push(reject_msg);
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
         }
-        for (_, (call, mut res)) in executed_by_call_id {
-            let spill_tokens_before = g
-                .estimate_pressure(CompactionTrigger::PostToolResult)
-                .total_tokens;
-            let threshold =
-                effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-            let turn_index = g.turn_index;
-            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
-            let spill_stored_copy_only = policy
-                .map(|policy| policy.spill_stored_copy_only)
-                .unwrap_or(false);
-            let skip_result_truncation = policy
-                .map(|policy| policy.skip_result_truncation)
-                .unwrap_or(false);
-            let spilled = if spill_stored_copy_only {
-                let mut stored_copy = res.clone();
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut stored_copy,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            } else {
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut res,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            };
-            if !skip_result_truncation {
-                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
-                let budget = effective_tool_result_budget_for_window(
-                    &pressure,
-                    &g.capabilities,
-                    &g.config,
-                    g.io.context_window_tokens,
-                );
-                let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
-                res.result_json = payload;
-                res.truncated = res.truncated || truncated;
-            }
-            if g.config.tool_semantics.artifact.is_some() {
-                let semantics = g.config.tool_semantics.clone();
-                record_artifact_progress_with_semantics(
-                    &mut g.pending_artifact_ids,
-                    &semantics,
-                    &call.name,
-                    &call.arguments_json,
-                    &res.result_json,
-                );
-            }
-            g.session.messages.push(AgentMessage {
-                id: format!("tool-{}", res.call_id),
-                role: AgentRole::Tool,
-                content: res.result_json.clone(),
-                metadata: MessageMeta::new()
-                    .with_call_id(res.call_id.clone())
-                    .with_tool_name(call.name)
-                    .with_extra("truncated", json!(res.truncated)),
-            });
-            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
-            if g.config.enable_state_ledger {
-                g.state_ledger.observe_tool_result(&res);
-            }
-            if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
-            }
-            if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = g
-                    .estimate_pressure(CompactionTrigger::PostToolResult)
-                    .total_tokens;
-                g.emit(AgentEvent::CompactionApplied(CompactionEvent {
-                    tier: CompactionTier::ToolSpill,
-                    tokens_before: spill_tokens_before,
-                    tokens_after: spill_tokens_after,
-                    trigger: CompactionTrigger::PostToolResult,
-                }));
-            }
-            processed_results.push(res);
+        for (_, (call, res)) in executed_by_call_id {
+            processed_results.push(Self::process_and_apply_tool_result(
+                &mut g,
+                &mut last_batch_tool_message_index,
+                &call,
+                res,
+            ));
         }
 
         if g.config.enable_loop_hooks && g.capabilities.lifecycle_hooks_supported {
@@ -1102,9 +901,7 @@ impl AgentEngine {
             g.guardrails
                 .count_tool_executed((pending_rejects + repaired_n) as u32);
 
-            let non_soft_outcome = processed_results
-                .iter()
-                .any(|res| !res.soft_failure && !is_soft_failure_result_json(&res.result_json));
+            let non_soft_outcome = tool_results::batch_has_non_soft_outcome(&processed_results);
 
             let cfg = g.config.clone();
             g.guardrails.on_tool_turn_finished(
@@ -1168,6 +965,69 @@ impl AgentEngine {
             terminal: false,
         });
     }
+
+    /// Dispatch glue for slice 4: owns every pressure read and the apply
+    /// ordering; the session-free `process_one_result` stage runs in between.
+    fn process_and_apply_tool_result(
+        g: &mut InnerSession,
+        last_batch_tool_message_index: &mut Option<usize>,
+        call: &ToolCallRecord,
+        res: ToolResultRecord,
+    ) -> ToolResultRecord {
+        let spill_tokens_before = g
+            .estimate_pressure(CompactionTrigger::PostToolResult)
+            .total_tokens;
+        let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+        let skip_result_truncation = policy
+            .map(|policy| policy.skip_result_truncation)
+            .unwrap_or(false);
+        let truncation_budget = if skip_result_truncation {
+            None
+        } else {
+            let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
+            Some(effective_tool_result_budget_for_window(
+                &pressure,
+                &g.capabilities,
+                &g.config,
+                g.io.context_window_tokens,
+            ))
+        };
+        let processed = tool_results::process_one_result(
+            call,
+            res,
+            tool_results::ProcessOneResultInputs {
+                semantics: &g.config.tool_semantics,
+                spill_threshold_bytes: effective_tool_spill_threshold_bytes(
+                    &g.config,
+                    g.io.context_window_tokens,
+                ),
+                truncation_budget,
+                turn_index: g.turn_index,
+                context_store: &mut g.context_store,
+                pending_artifact_ids: &mut g.pending_artifact_ids,
+            },
+        );
+        let spill_tokens_after = if processed.spilled_inline {
+            g.estimate_pressure(CompactionTrigger::PostToolResult)
+                .total_tokens
+        } else {
+            spill_tokens_before
+        };
+        tool_results::apply_processed_tool_result(
+            tool_results::ApplyProcessedInputs {
+                session: &mut g.session,
+                enable_state_ledger: g.config.enable_state_ledger,
+                state_ledger: &mut g.state_ledger,
+                active_tool_names: &mut g.active_tool_names,
+                events: &mut g.events,
+                last_batch_tool_message_index,
+                spill_tokens_before,
+                spill_tokens_after,
+            },
+            processed,
+        )
+    }
+
 
     pub fn submit_summary(&self, handle: &SessionHandle, summary: SummaryResult) {
         let mut g = handle.lock_inner();
