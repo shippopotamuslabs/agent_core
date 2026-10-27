@@ -139,14 +139,13 @@ pub struct FireConditionInputs<'a> {
     pub last_message_role: Option<AgentRole>,
 }
 
+/// The dispatch-facing outcome of the entry gate. Only the fields the
+/// dispatch actually reads are returned; the individual fire signals
+/// stay local to [`should_enter_compaction`], where they are combined.
 pub struct FireConditions {
     pub should_enter: bool,
     pub entered_for_long_loop_only: bool,
-    pub absolute_fires: bool,
-    pub turn_fires: bool,
-    pub turn_end_fires: bool,
     pub forced_by_non_ratio: bool,
-    pub active_threshold_tokens: u32,
 }
 
 pub fn should_enter_compaction(inputs: FireConditionInputs<'_>) -> FireConditions {
@@ -224,12 +223,21 @@ pub fn should_enter_compaction(inputs: FireConditionInputs<'_>) -> FireCondition
     FireConditions {
         should_enter,
         entered_for_long_loop_only,
-        absolute_fires,
-        turn_fires,
-        turn_end_fires,
         forced_by_non_ratio,
-        active_threshold_tokens,
     }
+}
+
+/// The gate inputs for [`mid_turn_stall_error`], as one named-field
+/// struct: five loose bools at a call site are trivially swapped, named
+/// fields are not.
+pub struct MidTurnStallGate {
+    pub allow_fifo_on_mid_turn: bool,
+    pub summarization_allowed: bool,
+    pub compaction_log_is_empty: bool,
+    pub defer_compaction_failure: bool,
+    /// Pre-gate call sites require a non-empty compaction log before the
+    /// stall error may fire; the post-emit call site does not.
+    pub require_nonempty_log: bool,
 }
 
 /// The two identical `CompactionFailed` early-error blocks in
@@ -237,22 +245,18 @@ pub fn should_enter_compaction(inputs: FireConditionInputs<'_>) -> FireCondition
 /// without). Pure constructor; the dispatch decides.
 pub fn mid_turn_stall_error(
     trigger: CompactionTrigger,
-    allow_fifo_on_mid_turn: bool,
-    summarization_allowed: bool,
-    compaction_log_is_empty: bool,
-    defer_compaction_failure: bool,
-    require_nonempty_log: bool,
+    gate: MidTurnStallGate,
 ) -> Option<AgentError> {
     if !matches!(trigger, CompactionTrigger::MidTurn) {
         return None;
     }
-    if allow_fifo_on_mid_turn || summarization_allowed {
+    if gate.allow_fifo_on_mid_turn || gate.summarization_allowed {
         return None;
     }
-    if defer_compaction_failure {
+    if gate.defer_compaction_failure {
         return None;
     }
-    if require_nonempty_log && compaction_log_is_empty {
+    if gate.require_nonempty_log && gate.compaction_log_is_empty {
         return None;
     }
     Some(AgentError::CompactionFailed {
