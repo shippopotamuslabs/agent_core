@@ -9,6 +9,7 @@ use regex::Regex;
 use super::estimate_session_pressure;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole, MessageMeta};
+use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::ArtifactStateAnchor;
 use crate::tool_semantics::ArtifactSquashSemantics;
@@ -50,12 +51,25 @@ fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
 }
 
 fn is_semantic_success_payload(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
-    let Ok(v) = serde_json::from_str::<Value>(content) else {
-        return false;
-    };
-    v.get(&semantics.status_field).and_then(|s| s.as_str())
-        == Some(semantics.success_status_value.as_str())
-        && v.get(&semantics.total_blocks_result_field).is_some()
+    semantic_success_total_blocks(content, semantics).is_some()
+}
+
+/// ENC-288: single ingress parse of a result payload; typed accessors only.
+/// Returns the total-blocks value (`0` when the field is present but not an
+/// integer, matching the previous `unwrap_or(0)` behavior).
+fn semantic_success_total_blocks(
+    content: &str,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<i64> {
+    let parsed = ParsedToolResult::parse(content);
+    let v = parsed.value();
+    if v.get(&semantics.status_field).and_then(|s| s.as_str())
+        != Some(semantics.success_status_value.as_str())
+        || v.get(&semantics.total_blocks_result_field).is_none()
+    {
+        return None;
+    }
+    Some(parse_semantic_total_blocks(v, semantics).unwrap_or(0))
 }
 
 fn parse_semantic_total_blocks(v: &Value, semantics: &ArtifactSquashSemantics) -> Option<i64> {
@@ -105,12 +119,8 @@ fn artifact_id_from_assistant_metadata(
         if call.name != semantics.append_tool_name {
             return None;
         }
-        let parsed: Value = serde_json::from_str(&call.arguments_json).ok()?;
-        parsed
-            .get(&semantics.id_field)
-            .and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .map(ToString::to_string)
+        // ENC-288: single ingress parse; typed accessor instead of re-parsing.
+        ParsedToolArgs::parse(&call.arguments_json).get_str(&semantics.id_field)
     })
 }
 
@@ -127,12 +137,10 @@ pub fn extract_artifact_anchor(
         if artifact_id.is_none() && msg.role == AgentRole::Assistant {
             artifact_id = artifact_id_from_assistant_metadata(msg, semantics);
         }
-        if !is_semantic_success_payload(&msg.content, semantics) {
+        let Some(total) = semantic_success_total_blocks(&msg.content, semantics) else {
             continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(&msg.content) {
-            total_blocks = parse_semantic_total_blocks(&v, semantics).unwrap_or(0);
-        }
+        };
+        total_blocks = total;
         if i > 0 {
             let prev = &messages[i - 1];
             if prev.role == AgentRole::Assistant {
@@ -206,16 +214,14 @@ fn apply_semantic_artifact_squash(
 
     for i in (0..session.messages.len()).rev() {
         let msg = &session.messages[i];
-        if !is_semantic_success_payload(&msg.content, semantics) {
+        let Some(total) = semantic_success_total_blocks(&msg.content, semantics) else {
             continue;
-        }
+        };
         if append_found {
             continue;
         }
         append_found = true;
-        if let Ok(v) = serde_json::from_str::<Value>(&msg.content) {
-            total_blocks = parse_semantic_total_blocks(&v, semantics).unwrap_or(0);
-        }
+        total_blocks = total;
         if i > 0 {
             let prev = &session.messages[i - 1];
             if prev.role == AgentRole::Assistant {
