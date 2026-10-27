@@ -14,8 +14,13 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use std::sync::Arc;
 
-const ENCLAVE_SEMANTICS_JSON: &str =
-    include_str!("../../../core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json");
+// FRG-37: vendored snapshot of the Enclave production semantics file
+// (`core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json`).
+// The old `include_str!("../../../core/...")` only resolved when this crate
+// sat at `enclave/third_party/agent_core`; the vendored copy keeps both
+// standalone checkouts and Enclave-layout runs green. Refresh the snapshot by
+// hand when the Enclave source changes.
+const ENCLAVE_SEMANTICS_JSON: &str = include_str!("support/enclave_tool_semantics.json");
 
 const SEARCH_ACTIVE_SCHEMA_JSON: &str = r#"[
   {"name":"tool_discovery_tool","parameters":{}},
