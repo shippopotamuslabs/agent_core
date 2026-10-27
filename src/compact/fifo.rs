@@ -158,50 +158,52 @@ fn snapshot_context_covers(session: &AgentSession, message_ids: &[String]) -> bo
         .unwrap_or(false)
 }
 
-/// Snapshot gate for destructive FIFO drops, as a named typed decision.
-///
-/// When a history snapshot is required before FIFO, the first removable unit
-/// must already be covered by one. The `Err` variant names the exact outcome
-/// for the two ways the gate can refuse, preserving the
-/// Failed-vs-NotApplicable tripwire:
-/// - `NotApplicable` — nothing removable exists, so there is nothing to protect.
-/// - `Failed` — removable history exists but no snapshot covers it.
-///
-/// The `Ok` payload is the validated first removable unit: proof the gate saw
-/// drainable work. The driver loop rediscovers it per iteration (retention
-/// shifts as messages drain), so the payload is validation evidence, not a
-/// drain cursor.
-// `CompactionOutcome` is large by design (it carries sessions); the `Err`
-// payload here is the whole point — the named NotApplicable-vs-Failed fork —
-// so boxing it would obscure the decision this helper exists to name.
-#[allow(clippy::result_large_err)]
-fn ensure_snapshot(
+/// The first removable unit under the current retention window, if any.
+/// The one canonical lookup: the snapshot gate validates against it and
+/// the drain loop removes it (recomputed per iteration, as each drain
+/// shifts the window).
+fn first_removable_range(
     session: &AgentSession,
     config: &AgentConfig,
     ctx: &CompactionContext,
-) -> Result<std::ops::Range<usize>, CompactionOutcome> {
+) -> Option<std::ops::Range<usize>> {
     let retention_start = retention_start_index(
         &session.messages,
         effective_retention_window_tokens(config, ctx.context_window_tokens),
     );
-    let Some(range) = first_removable_unit_range(
+    first_removable_unit_range(
         &session.messages,
         last_user_index(&session.messages),
         retention_start,
-    ) else {
-        return Err(CompactionOutcome::NotApplicable);
+    )
+}
+
+/// Snapshot gate for destructive FIFO drops. When a history snapshot is
+/// required before FIFO, the first removable unit must already be
+/// covered by one. Returns the outcome the caller should return early,
+/// or `None` to proceed — preserving the Failed-vs-NotApplicable
+/// tripwire:
+/// - `NotApplicable` — nothing removable exists, so there is nothing to protect.
+/// - `Failed` — removable history exists but no snapshot covers it.
+fn snapshot_gate_outcome(
+    session: &AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+) -> Option<CompactionOutcome> {
+    let Some(range) = first_removable_range(session, config, ctx) else {
+        return Some(CompactionOutcome::NotApplicable);
     };
-    let removal_ids: Vec<String> = session.messages[range.clone()]
+    let removal_ids: Vec<String> = session.messages[range]
         .iter()
         .map(|message| message.id.clone())
         .collect();
     if !config.enable_context_store || !snapshot_context_covers(session, &removal_ids) {
-        return Err(CompactionOutcome::Failed(AgentError::CompactionFailed {
+        return Some(CompactionOutcome::Failed(AgentError::CompactionFailed {
             tier: "fifo".into(),
             reason: "history snapshot required before fifo".into(),
         }));
     }
-    Ok(range)
+    None
 }
 
 /// Drain removable units until session pressure falls under
@@ -218,15 +220,7 @@ fn drain_until_under(
         &estimate_session_pressure(session, config, ctx),
         threshold_tokens,
     ) {
-        let retention_start = retention_start_index(
-            &session.messages,
-            effective_retention_window_tokens(config, ctx.context_window_tokens),
-        );
-        let Some(range) = first_removable_unit_range(
-            &session.messages,
-            last_user_index(&session.messages),
-            retention_start,
-        ) else {
+        let Some(range) = first_removable_range(session, config, ctx) else {
             break;
         };
         session.messages.drain(range);
@@ -255,10 +249,10 @@ impl CompactionTier for FifoCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
-        // Snapshot gate: the NotApplicable-vs-Failed fork is a named decision
-        // in `ensure_snapshot`; the `Ok` range is validation evidence only.
+        // Snapshot gate: the NotApplicable-vs-Failed fork is decided in
+        // `snapshot_gate_outcome`; `None` means proceed to the drain.
         if config.require_snapshot_before_fifo {
-            if let Err(outcome) = ensure_snapshot(&session, config, ctx) {
+            if let Some(outcome) = snapshot_gate_outcome(&session, config, ctx) {
                 return outcome;
             }
         }
