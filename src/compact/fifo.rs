@@ -158,6 +158,83 @@ fn snapshot_context_covers(session: &AgentSession, message_ids: &[String]) -> bo
         .unwrap_or(false)
 }
 
+/// Snapshot gate for destructive FIFO drops, as a named typed decision.
+///
+/// When a history snapshot is required before FIFO, the first removable unit
+/// must already be covered by one. The `Err` variant names the exact outcome
+/// for the two ways the gate can refuse, preserving the
+/// Failed-vs-NotApplicable tripwire:
+/// - `NotApplicable` — nothing removable exists, so there is nothing to protect.
+/// - `Failed` — removable history exists but no snapshot covers it.
+///
+/// The `Ok` payload is the validated first removable unit: proof the gate saw
+/// drainable work. The driver loop rediscovers it per iteration (retention
+/// shifts as messages drain), so the payload is validation evidence, not a
+/// drain cursor.
+// `CompactionOutcome` is large by design (it carries sessions); the `Err`
+// payload here is the whole point — the named NotApplicable-vs-Failed fork —
+// so boxing it would obscure the decision this helper exists to name.
+#[allow(clippy::result_large_err)]
+fn ensure_snapshot(
+    session: &AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+) -> Result<std::ops::Range<usize>, CompactionOutcome> {
+    let retention_start = retention_start_index(
+        &session.messages,
+        effective_retention_window_tokens(config, ctx.context_window_tokens),
+    );
+    let Some(range) = first_removable_unit_range(
+        &session.messages,
+        last_user_index(&session.messages),
+        retention_start,
+    ) else {
+        return Err(CompactionOutcome::NotApplicable);
+    };
+    let removal_ids: Vec<String> = session.messages[range.clone()]
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    if !config.enable_context_store || !snapshot_context_covers(session, &removal_ids) {
+        return Err(CompactionOutcome::Failed(AgentError::CompactionFailed {
+            tier: "fifo".into(),
+            reason: "history snapshot required before fifo".into(),
+        }));
+    }
+    Ok(range)
+}
+
+/// Drain removable units until session pressure falls under
+/// `threshold_tokens`. Retention is recomputed each iteration because each
+/// drain shifts the window. Returns whether anything was drained.
+fn drain_until_under(
+    session: &mut AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+    threshold_tokens: u32,
+) -> bool {
+    let mut changed = false;
+    while should_compact_at_token_threshold(
+        &estimate_session_pressure(session, config, ctx),
+        threshold_tokens,
+    ) {
+        let retention_start = retention_start_index(
+            &session.messages,
+            effective_retention_window_tokens(config, ctx.context_window_tokens),
+        );
+        let Some(range) = first_removable_unit_range(
+            &session.messages,
+            last_user_index(&session.messages),
+            retention_start,
+        ) else {
+            break;
+        };
+        session.messages.drain(range);
+        changed = true;
+    }
+    changed
+}
+
 impl CompactionTier for FifoCompactionTier {
     fn apply(
         &self,
@@ -165,6 +242,7 @@ impl CompactionTier for FifoCompactionTier {
         config: &AgentConfig,
         ctx: &CompactionContext,
     ) -> CompactionOutcome {
+        // Guard: below threshold → nothing to do.
         let tokens_before = estimate_session_pressure(&session, config, ctx).total_tokens;
         let threshold_ratio = threshold_ratio_for_trigger(config, ctx.trigger);
         let threshold_tokens =
@@ -177,55 +255,20 @@ impl CompactionTier for FifoCompactionTier {
             return CompactionOutcome::NotApplicable;
         }
 
-        let retention_start = retention_start_index(
-            &session.messages,
-            effective_retention_window_tokens(config, ctx.context_window_tokens),
-        );
+        // Snapshot gate: the NotApplicable-vs-Failed fork is a named decision
+        // in `ensure_snapshot`; the `Ok` range is validation evidence only.
         if config.require_snapshot_before_fifo {
-            let Some(range) = first_removable_unit_range(
-                &session.messages,
-                last_user_index(&session.messages),
-                retention_start,
-            ) else {
-                return CompactionOutcome::NotApplicable;
-            };
-            let removal_ids: Vec<String> = session.messages[range]
-                .iter()
-                .map(|message| message.id.clone())
-                .collect();
-            if !config.enable_context_store || !snapshot_context_covers(&session, &removal_ids) {
-                return CompactionOutcome::Failed(AgentError::CompactionFailed {
-                    tier: "fifo".into(),
-                    reason: "history snapshot required before fifo".into(),
-                });
+            if let Err(outcome) = ensure_snapshot(&session, config, ctx) {
+                return outcome;
             }
         }
 
-        let mut last_u = last_user_index(&session.messages);
-        let mut changed = false;
-
-        while should_compact_at_token_threshold(
-            &estimate_session_pressure(&session, config, ctx),
-            threshold_tokens,
-        ) {
-            let retention_start = retention_start_index(
-                &session.messages,
-                effective_retention_window_tokens(config, ctx.context_window_tokens),
-            );
-            let Some(range) =
-                first_removable_unit_range(&session.messages, last_u, retention_start)
-            else {
-                break;
-            };
-            session.messages.drain(range.clone());
-            changed = true;
-            last_u = last_user_index(&session.messages);
-        }
-
-        if !changed {
+        // Drain until under threshold; no progress → not applicable.
+        if !drain_until_under(&mut session, config, ctx, threshold_tokens) {
             return CompactionOutcome::NotApplicable;
         }
 
+        // Outcome.
         let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
 
         CompactionOutcome::Applied(
@@ -330,6 +373,39 @@ mod tests {
                 assert_eq!(s.messages[1].id, "a2");
             }
             o => panic!("expected Applied, got {o:?}"),
+        }
+    }
+
+    /// Characterization: the snapshot gate's Failed fork. Pressure is over
+    /// threshold and a removable unit exists, but no history snapshot covers
+    /// it, so the tier must fail (not silently skip) with the fifo tier tag.
+    #[test]
+    fn snapshot_gate_fails_without_history_snapshot() {
+        let t = long_text();
+        let session = AgentSession::new(
+            vec![
+                msg("u1", AgentRole::User, &t),
+                msg("a1", AgentRole::Assistant, &t),
+                msg("u2", AgentRole::User, &t),
+                msg("a2", AgentRole::Assistant, &t),
+            ],
+            Null,
+        );
+        let cfg = AgentConfig {
+            require_snapshot_before_fifo: true,
+            ..AgentConfig::default()
+        };
+        let tier = FifoCompactionTier;
+        let out = tier.apply(session, &cfg, &ctx(800));
+        match out {
+            CompactionOutcome::Failed(err) => match err {
+                AgentError::CompactionFailed { tier, reason } => {
+                    assert_eq!(tier, "fifo");
+                    assert_eq!(reason, "history snapshot required before fifo");
+                }
+                other => panic!("expected CompactionFailed, got {other:?}"),
+            },
+            o => panic!("expected Failed, got {o:?}"),
         }
     }
 
