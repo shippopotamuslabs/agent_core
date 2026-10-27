@@ -30,6 +30,11 @@ pub struct MessageMeta {
     raw_tool_calls: Vec<RawToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded: Option<bool>,
+    /// ENC-293: set when this message's content is a tool-output spill
+    /// envelope (see `compact::tool_spill`). The spill exemption reads this
+    /// flag instead of sniffing content for the envelope marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spilled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rewrite_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +55,7 @@ impl Default for MessageMeta {
             tool_name: None,
             raw_tool_calls: Vec::new(),
             superseded: None,
+            spilled: None,
             rewrite_of: None,
             compaction_tier: None,
             extra: default_extra(),
@@ -69,6 +75,7 @@ impl MessageMeta {
             && self.tool_name.is_none()
             && self.raw_tool_calls.is_empty()
             && self.superseded.is_none()
+            && self.spilled.is_none()
             && self.rewrite_of.is_none()
             && self.compaction_tier.is_none()
             && (matches!(&self.extra, serde_json::Value::Null)
@@ -124,6 +131,16 @@ impl MessageMeta {
 
     pub fn mark_superseded(&mut self) {
         self.superseded = Some(true);
+    }
+
+    /// True when this message's content is a tool-output spill envelope.
+    pub fn is_spilled(&self) -> bool {
+        self.spilled.unwrap_or(false)
+    }
+
+    /// Mark this message's content as a tool-output spill envelope.
+    pub fn mark_spilled(&mut self) {
+        self.spilled = Some(true);
     }
 
     pub fn rewrite_of(&self) -> Option<&str> {
@@ -230,6 +247,7 @@ pub struct AgentMessage {
     /// - `rewrite_of`: ID of the original message that this message replaces/rewrites.
     /// - `compaction_tier`: Name of the compaction tier that performed the rewrite (e.g. "micro").
     /// - `superseded`: Boolean flag set to `true` on the original message after it is rewritten.
+    /// - `spilled`: Boolean flag set to `true` when the content is a tool-output spill envelope.
     #[serde(
         default,
         deserialize_with = "deserialize_metadata",

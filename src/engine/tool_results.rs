@@ -160,7 +160,7 @@ pub(super) fn process_one_result(
         );
     }
 
-    let message = AgentMessage {
+    let mut message = AgentMessage {
         id: format!("tool-{}", res.call_id),
         role: AgentRole::Tool,
         content: res.result_json.clone(),
@@ -170,6 +170,11 @@ pub(super) fn process_one_result(
             .with_extra("truncated", json!(res.truncated)),
     };
     let spilled_inline = spilled.is_some() && !spill_stored_copy_only;
+    // ENC-293: the inline-spilled envelope carries the same metadata mark as
+    // the session spill path, so the exemption never re-spills it by content.
+    if spilled_inline {
+        message.metadata.mark_spilled();
+    }
     ProcessedToolResult {
         message,
         processed: res,

@@ -32,9 +32,9 @@ pub fn activation_tools_from_retrieval_hint(retrieval_hint: &str) -> Vec<String>
 
 /// Construct the prompt-facing JSON envelope that replaces the raw result.
 ///
-/// The envelope intentionally contains the literal string `context_ref` so
-/// downstream message-content matchers (and the test asserting on `context_ref`)
-/// can detect a spilled message.
+/// ENC-293: spilled state is marked via `MessageMeta::mark_spilled` at spill
+/// time; nothing should re-detect a spilled message by sniffing the envelope
+/// for the literal `context_ref` key.
 fn spill_envelope(reference: &ContextReference) -> String {
     serde_json::json!({
         "context_ref": reference.id,
@@ -96,6 +96,20 @@ fn tool_message_reference_id(message: &AgentMessage) -> String {
     tool_output_reference_id(call_id)
 }
 
+/// ENC-293: the spill exemption no longer sniffs content for the
+/// `context_ref` envelope marker or the configured total-blocks field.
+/// Already-spilled messages are exempt via the `MessageMeta::is_spilled` flag
+/// set at spill time; squash-claimed success payloads are exempt via the same
+/// typed parse the squash tier itself uses
+/// (`artifact_squash::is_semantic_success_payload`), so large semantic
+/// results still reach `ArtifactSquashCompactionTier` instead of being
+/// spilled out from under it (see `s5_artifact_squash_is_preferred_over_fifo`).
+fn is_squash_claimed_payload(content: &str, squash: Option<&ArtifactSquashSemantics>) -> bool {
+    squash.is_some_and(|semantics| {
+        super::artifact_squash::is_semantic_success_payload(content, semantics)
+    })
+}
+
 pub fn spill_tool_messages_in_session(
     store: &mut ContextStore,
     session: &mut AgentSession,
@@ -110,17 +124,12 @@ pub fn spill_tool_messages_in_session(
         .map(|message| (message.content.len() / 4) as u32)
         .sum();
     let mut changed = false;
-    let quoted_total = artifact_squash
-        .filter(|squash| !squash.total_blocks_result_field.is_empty())
-        .map(|squash| format!("\"{}\"", squash.total_blocks_result_field));
 
     for message in &mut session.messages {
         if message.role != AgentRole::Tool
             || message.content.len() <= threshold_bytes
-            || message.content.contains("\"context_ref\"")
-            || quoted_total
-                .as_ref()
-                .is_some_and(|quoted| message.content.contains(quoted))
+            || message.metadata.is_spilled()
+            || is_squash_claimed_payload(&message.content, artifact_squash)
         {
             continue;
         }
@@ -144,6 +153,7 @@ pub fn spill_tool_messages_in_session(
         };
         let inserted = store.insert_entry(entry);
         message.content = spill_envelope(&inserted);
+        message.metadata.mark_spilled();
         changed = true;
     }
 
@@ -202,17 +212,39 @@ mod tests {
     }
 
     fn frg14_tool_session(content: &str) -> AgentSession {
+        frg14_tool_session_meta(content, MessageMeta::new())
+    }
+
+    fn frg14_tool_session_meta(content: &str, metadata: MessageMeta) -> AgentSession {
         AgentSession::new(
             vec![AgentMessage {
                 id: "t1".into(),
                 role: AgentRole::Tool,
                 content: content.into(),
-                metadata: MessageMeta::new(),
+                metadata,
             }],
             serde_json::Value::Null,
         )
     }
 
+    fn frg14_spill(
+        session: &mut AgentSession,
+        store: &mut ContextStore,
+        squash: Option<&ArtifactSquashSemantics>,
+    ) -> Option<crate::events::CompactionEvent> {
+        spill_tool_messages_in_session(
+            store,
+            session,
+            squash,
+            16,
+            0,
+            crate::events::CompactionTrigger::PostToolResult,
+        )
+    }
+
+    // ENC-293: the total-field exemption is now the typed squash-claimed parse,
+    // not a field-name substring sniff. Squash inputs still reach the squash
+    // tier (see s5); everything else oversized spills and is flag-marked.
     #[test]
     fn frg14_spill_custom_total_field_exempt() {
         let squash = frg14_squash("write_doc", "chunkCount");
@@ -220,14 +252,7 @@ mod tests {
             r#"{"status":"success","chunkCount":3,"extra_padding":"0123456789"}"#.to_string();
         let mut session = frg14_tool_session(&content);
         let mut store = ContextStore::default();
-        let event = spill_tool_messages_in_session(
-            &mut store,
-            &mut session,
-            Some(&squash),
-            16,
-            0,
-            crate::events::CompactionTrigger::PostToolResult,
-        );
+        let event = frg14_spill(&mut session, &mut store, Some(&squash));
         assert!(event.is_none());
         assert_eq!(session.messages[0].content, content);
     }
@@ -238,16 +263,10 @@ mod tests {
             r#"{"status":"success","totalBlocks":3,"extra_padding":"0123456789"}"#.to_string();
         let mut session = frg14_tool_session(&content);
         let mut store = ContextStore::default();
-        let event = spill_tool_messages_in_session(
-            &mut store,
-            &mut session,
-            None,
-            16,
-            0,
-            crate::events::CompactionTrigger::PostToolResult,
-        );
+        let event = frg14_spill(&mut session, &mut store, None);
         assert!(event.is_some());
         assert!(session.messages[0].content.contains("context_ref"));
+        assert!(session.messages[0].metadata.is_spilled());
     }
 
     #[test]
@@ -256,34 +275,53 @@ mod tests {
             r#"{"status":"success","chunkCount":3,"extra_padding":"0123456789"}"#.to_string();
         let mut session = frg14_tool_session(&content);
         let mut store = ContextStore::default();
-        let event = spill_tool_messages_in_session(
-            &mut store,
-            &mut session,
-            None,
-            16,
-            0,
-            crate::events::CompactionTrigger::PostToolResult,
-        );
+        let event = frg14_spill(&mut session, &mut store, None);
         assert!(event.is_some());
         assert!(session.messages[0].content.contains("context_ref"));
+        assert!(session.messages[0].metadata.is_spilled());
     }
 
+    // ENC-293: the metadata path — a flagged message is exempt even when its
+    // content is not a squash-claimed payload.
     #[test]
     fn frg14_spill_enclave_exempts_legacy_total() {
         let squash = frg14_squash("append_blocks", "totalBlocks");
-        let content =
-            r#"{"status":"success","totalBlocks":3,"extra_padding":"0123456789"}"#.to_string();
-        let mut session = frg14_tool_session(&content);
+        let content = r#"{"unrelated":"payload","extra_padding":"0123456789"}"#.to_string();
+        let mut flagged = MessageMeta::new();
+        flagged.mark_spilled();
+        let mut session = frg14_tool_session_meta(&content, flagged);
         let mut store = ContextStore::default();
-        let event = spill_tool_messages_in_session(
-            &mut store,
-            &mut session,
-            Some(&squash),
-            16,
-            0,
-            crate::events::CompactionTrigger::PostToolResult,
-        );
+        let event = frg14_spill(&mut session, &mut store, Some(&squash));
         assert!(event.is_none());
         assert_eq!(session.messages[0].content, content);
+    }
+
+    // ENC-293: with squash configured, an oversized non-semantic payload still
+    // spills (the exemption is exactly flagged-or-squash-claimed).
+    #[test]
+    fn frg14_spill_nonsemantic_spills_with_squash_configured() {
+        let squash = frg14_squash("append_blocks", "totalBlocks");
+        let content = r#"{"unrelated":"payload","extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = frg14_spill(&mut session, &mut store, Some(&squash));
+        assert!(event.is_some());
+        assert!(session.messages[0].content.contains("context_ref"));
+        assert!(session.messages[0].metadata.is_spilled());
+    }
+
+    // ENC-293: a second spill pass over an already-spilled session is a no-op
+    // via the flag (previously via the `context_ref` content sniff).
+    #[test]
+    fn frg14_spill_second_pass_idempotent_via_flag() {
+        let content = r#"{"unrelated":"payload","extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let first = frg14_spill(&mut session, &mut store, None);
+        assert!(first.is_some());
+        let spilled_content = session.messages[0].content.clone();
+        let second = frg14_spill(&mut session, &mut store, None);
+        assert!(second.is_none());
+        assert_eq!(session.messages[0].content, spilled_content);
     }
 }
