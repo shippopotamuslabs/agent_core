@@ -76,6 +76,42 @@ fn target_token_budget(config: &AgentConfig, ctx: &CompactionContext) -> u32 {
     ratio_target.min(hard_ceiling)
 }
 
+/// Next single truncation step for the [`TextTruncateCompactionTier::apply`]
+/// driver loop.
+enum TruncateAction {
+    /// No truncatable message content remains.
+    Done,
+    /// Truncate `session.messages[idx].content` down to `new_content`.
+    Truncate { idx: usize, new_content: String },
+    /// A candidate exists but shrinking it further is a no-op.
+    Stalled,
+}
+
+/// Decide what the driver loop should do next. This helper only answers the
+/// candidate question; the pressure re-check stays visibly in the driver.
+fn next_truncation(session: &AgentSession) -> TruncateAction {
+    let last_user = last_user_index(&session.messages);
+    let Some(idx) = first_truncatable_index(&session.messages, last_user) else {
+        return TruncateAction::Done;
+    };
+
+    let current_content = session.messages[idx].content.clone();
+    let current_tokens = crate::budget::count_tokens(&current_content);
+    if current_tokens <= 32 {
+        return TruncateAction::Stalled;
+    }
+    let next_tokens = (current_tokens / 2).max(32);
+    let (new_content, _) = truncate_message_content_to_tokens(&current_content, next_tokens);
+    if new_content == current_content {
+        return TruncateAction::Stalled;
+    }
+    let new_message_tokens = crate::budget::count_tokens(&new_content);
+    if new_message_tokens >= current_tokens {
+        return TruncateAction::Stalled;
+    }
+    TruncateAction::Truncate { idx, new_content }
+}
+
 impl CompactionTier for TextTruncateCompactionTier {
     fn apply(
         &self,
@@ -93,47 +129,41 @@ impl CompactionTier for TextTruncateCompactionTier {
         }
 
         let mut changed = false;
+        // Pressure re-check, visibly in the driver: the loop only runs while
+        // the session is over budget, and each iteration match-dispatches one
+        // `TruncateAction` from `next_truncation`.
         while should_compact_at_token_threshold(
             &estimate_session_pressure(&session, config, ctx),
             target_tokens,
         ) {
             let pressure_before = estimate_session_pressure(&session, config, ctx).total_tokens;
-            let last_user = last_user_index(&session.messages);
-            let Some(idx) = first_truncatable_index(&session.messages, last_user) else {
-                break;
-            };
-
-            let current_content = session.messages[idx].content.clone();
-            let current_tokens = crate::budget::count_tokens(&current_content);
-            if current_tokens <= 32 {
-                break;
+            match next_truncation(&session) {
+                TruncateAction::Done => break,
+                TruncateAction::Stalled => break,
+                TruncateAction::Truncate { idx, new_content } => {
+                    let message = &mut session.messages[idx];
+                    message.content = new_content;
+                    if !message.metadata.is_object() {
+                        message.metadata = json!({});
+                    }
+                    if let Some(obj) = message.metadata.as_object_mut() {
+                        obj.insert(
+                            "compaction_tier".into(),
+                            json!(TierEnum::TextTruncate.to_string()),
+                        );
+                    }
+                    let pressure_after =
+                        estimate_session_pressure(&session, config, ctx).total_tokens;
+                    // A truncation that fails to relieve pressure stalls the
+                    // tier without counting as progress (`changed` untouched),
+                    // preserving the exact NotApplicable-vs-partial-progress
+                    // distinction.
+                    if pressure_after >= pressure_before {
+                        break;
+                    }
+                    changed = true;
+                }
             }
-            let next_tokens = (current_tokens / 2).max(32);
-            let (new_content, _) =
-                truncate_message_content_to_tokens(&current_content, next_tokens);
-            if new_content == current_content {
-                break;
-            }
-            let new_message_tokens = crate::budget::count_tokens(&new_content);
-            if new_message_tokens >= current_tokens {
-                break;
-            }
-            let message = &mut session.messages[idx];
-            message.content = new_content;
-            if !message.metadata.is_object() {
-                message.metadata = json!({});
-            }
-            if let Some(obj) = message.metadata.as_object_mut() {
-                obj.insert(
-                    "compaction_tier".into(),
-                    json!(TierEnum::TextTruncate.to_string()),
-                );
-            }
-            let pressure_after = estimate_session_pressure(&session, config, ctx).total_tokens;
-            if pressure_after >= pressure_before {
-                break;
-            }
-            changed = true;
         }
 
         if !changed {
@@ -222,6 +252,49 @@ mod tests {
                 assert_eq!(s.messages[3].content, "latest question");
             }
             o => panic!("expected Applied, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn applied_with_partial_progress_when_candidates_exhausted_while_still_over_budget() {
+        // The system prompt alone keeps pressure over budget, so once the
+        // single truncatable message is exhausted the loop stalls (breaks)
+        // with `changed == true`. That partial progress must stay Applied —
+        // never collapse into NotApplicable.
+        let system = "sys ".repeat(4000);
+        let big = "block ".repeat(500);
+        let session = AgentSession::new(
+            vec![
+                msg("a1", AgentRole::Assistant, &big),
+                msg("u1", AgentRole::User, "latest question"),
+            ],
+            Null,
+        );
+        let cfg = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
+        let tier = TextTruncateCompactionTier;
+        let compaction_ctx = ctx(4096, &system);
+        let target = target_token_budget(&cfg, &compaction_ctx);
+        assert!(crate::budget::should_compact_at_token_threshold(
+            &estimate_session_pressure(&session, &cfg, &compaction_ctx),
+            target
+        ));
+        match tier.apply(session, &cfg, &compaction_ctx) {
+            CompactionOutcome::Applied(s, ev) => {
+                assert!(ev.tokens_after < ev.tokens_before);
+                assert!(s
+                    .messages
+                    .iter()
+                    .any(|m| m.content.contains(crate::truncate::MESSAGE_TRUNCATION_NOTE)));
+                // Stall: candidates exhausted but still over budget — yet Applied.
+                assert!(
+                    crate::budget::should_compact_at_token_threshold(
+                        &estimate_session_pressure(&s, &cfg, &compaction_ctx),
+                        target
+                    ),
+                    "expected stall: session should still be over budget after exhausting candidates"
+                );
+            }
+            o => panic!("expected Applied (partial progress), got {o:?}"),
         }
     }
 
