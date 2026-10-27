@@ -1188,16 +1188,7 @@ impl AgentEngine {
         g.phase = EnginePhase::Idle;
 
         if summary.summary_text.trim().is_empty() {
-            g.suppress_summary_tier = true;
-            let trigger = ctx.trigger;
-            match g.run_compaction_pass(trigger) {
-                Ok(Some(_)) => {}
-                Ok(None) => {}
-                Err(e) => {
-                    g.set_terminal(AgentAction::Failed(e));
-                }
-            }
-            g.suppress_summary_tier = false;
+            g.retry_without_summary(ctx.trigger);
             return;
         }
 
@@ -1205,16 +1196,7 @@ impl AgentEngine {
         let message_count_before = g.session.messages.len() as u32;
         if let Err(reason) = apply_summary_result(&mut g.session, &req, &summary, &cfg, &ctx) {
             if reason == "empty summary_text" {
-                g.suppress_summary_tier = true;
-                let trigger = ctx.trigger;
-                match g.run_compaction_pass(trigger) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {}
-                    Err(e) => {
-                        g.set_terminal(AgentAction::Failed(e));
-                    }
-                }
-                g.suppress_summary_tier = false;
+                g.retry_without_summary(ctx.trigger);
                 return;
             }
             g.set_terminal(AgentAction::Failed(AgentError::CompactionFailed {
@@ -1420,6 +1402,21 @@ fn session_has_append_context(
 }
 
 impl InnerSession {
+    /// FRG-47: shared empty-summary fallback — re-runs compaction without the
+    /// summary tier so the next tier can make progress. Owns no phase
+    /// transition itself; `run_compaction_pass` does.
+    fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
+        self.suppress_summary_tier = true;
+        match self.run_compaction_pass(trigger) {
+            Ok(Some(_)) => {}
+            Ok(None) => {}
+            Err(e) => {
+                self.set_terminal(AgentAction::Failed(e));
+            }
+        }
+        self.suppress_summary_tier = false;
+    }
+
     fn set_terminal(&mut self, a: AgentAction) {
         self.terminal_action = Some(a);
         self.phase = EnginePhase::Idle;
