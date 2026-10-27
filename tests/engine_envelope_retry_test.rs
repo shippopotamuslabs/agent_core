@@ -345,11 +345,7 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
     );
     assert!(
         snapshot.messages.iter().any(|m| {
-            m.role == AgentRole::Tool
-                && m.metadata
-                    .extra("tools_blocked_nudge")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
+            m.role == AgentRole::Tool && m.metadata.tools_blocked_nudge()
         }),
         "CL-TR-05 must insert tools_blocked nudge"
     );

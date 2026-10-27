@@ -372,7 +372,7 @@ impl AgentEngine {
                     id: assistant_id,
                     role: AgentRole::Assistant,
                     content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new().with_extra("envelope_ingest", json!("failed")),
+                    metadata: MessageMeta::new().with_envelope_ingest("failed"),
                 });
                 if g.config.enable_state_ledger {
                     if let Some(message) = g.session.messages.last().cloned() {
@@ -383,7 +383,7 @@ impl AgentEngine {
                     id: format!("tool-err-envelope-{assistant_id_clone}"),
                     role: AgentRole::Tool,
                     content: error_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_extra("envelope_parse_failure", json!(true)),
+                    metadata: MessageMeta::new().with_envelope_parse_failure(),
                 });
                 let cfg = g.config.clone();
                 g.guardrails.count_tool_executed(1);
@@ -415,7 +415,7 @@ impl AgentEngine {
                         role: AgentRole::Assistant,
                         content: user_fallback_text.clone(),
                         metadata: MessageMeta::new()
-                            .with_extra("tools_blocked_fallback", json!(true)),
+                            .with_tools_blocked_fallback(),
                     });
                     if g.config.enable_state_ledger {
                         if let Some(message) = g.session.messages.last().cloned() {
@@ -439,7 +439,7 @@ impl AgentEngine {
                     role: AgentRole::Assistant,
                     content: visible_assistant_text.clone(),
                     metadata: MessageMeta::new()
-                        .with_extra("envelope_ingest", json!("tools_blocked")),
+                        .with_envelope_ingest("tools_blocked"),
                 });
                 if g.config.enable_state_ledger {
                     if let Some(message) = g.session.messages.last().cloned() {
@@ -450,7 +450,7 @@ impl AgentEngine {
                     id: format!("tool-nudge-tools-blocked-{assistant_id_clone}"),
                     role: AgentRole::Tool,
                     content: nudge_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_extra("tools_blocked_nudge", json!(true)),
+                    metadata: MessageMeta::new().with_tools_blocked_nudge(),
                 });
                 let last_tool_idx = g.session.messages.len().checked_sub(1);
                 inject_tool_budget_after_batch(&mut g, last_tool_idx);
@@ -980,7 +980,7 @@ impl AgentEngine {
                 metadata: MessageMeta::new()
                     .with_call_id(res.call_id.clone())
                     .with_tool_name(call.name)
-                    .with_extra("truncated", json!(res.truncated)),
+                    .with_truncated(res.truncated),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
@@ -1068,7 +1068,7 @@ impl AgentEngine {
                 metadata: MessageMeta::new()
                     .with_call_id(res.call_id.clone())
                     .with_tool_name(call.name)
-                    .with_extra("truncated", json!(res.truncated)),
+                    .with_truncated(res.truncated),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
@@ -2276,11 +2276,7 @@ mod tests {
             .find(|message| message.role == AgentRole::Assistant)
             .expect("assistant message");
         assert_eq!(
-            assistant
-                .metadata
-                .extra("provider_reasoning")
-                .and_then(|value| value.get("reasoning_content"))
-                .and_then(|value| value.as_str()),
+            assistant.metadata.provider_reasoning_content(),
             Some("need tool output first"),
         );
     }
