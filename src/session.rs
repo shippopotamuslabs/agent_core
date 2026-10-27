@@ -553,7 +553,11 @@ pub struct SessionContext {
     )]
     pub pending_work: Vec<String>,
     /// Host flag forcing a finish-blocked failure when no pending work remains.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_false",
+        deserialize_with = "de_lenient_bool"
+    )]
     pub force_finish_blocked: bool,
     /// Host-supplied file list consumed by `condense_file_context` (kept as
     /// JSON: the consumer re-serializes it to a string).
@@ -596,6 +600,25 @@ where
     })
 }
 
+/// Lenient bool: a real bool maps to itself, the strings `"true"`/`"1"`
+/// map to true, a non-zero number maps to true, and any other shape maps
+/// to false. Like the other `de_*` readers this never fails, so one
+/// loosely-typed host flag cannot take down the whole context parse
+/// (the `From<Value>` conversion falls back to a default context when
+/// deserialization errors).
+fn de_lenient_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Bool(b)) => b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true") || s == "1",
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        _ => false,
+    })
+}
+
 /// Legacy `session_context: null` (the old `#[serde(default)]` `Value`
 /// default) maps to an empty context instead of failing.
 fn de_session_context<'de, D>(deserializer: D) -> Result<SessionContext, D::Error>
@@ -607,17 +630,6 @@ where
 }
 
 impl SessionContext {
-    /// Pending-work texts (mirrors the legacy string-item filter: non-string
-    /// entries are dropped, never failed).
-    pub fn pending_work_texts(&self) -> Vec<String> {
-        self.pending_work.clone()
-    }
-
-    /// Value of the `force_finish_blocked` host flag.
-    pub fn force_finish_blocked(&self) -> bool {
-        self.force_finish_blocked
-    }
-
     /// Serialized `included_files` payload for `condense_file_context`, if present.
     pub fn included_files_json(&self) -> Option<String> {
         self.included_files
@@ -632,11 +644,6 @@ impl SessionContext {
                 .iter()
                 .any(|snapshot_id| snapshot_id == id)
         })
-    }
-
-    /// Engine history-snapshot bookkeeping: replaces the covered id set.
-    pub fn set_history_snapshot_ids(&mut self, message_ids: Vec<String>) {
-        self.history_snapshot_ids = message_ids;
     }
 }
 
@@ -826,10 +833,10 @@ mod tests {
             vec!["u0".to_string(), "a0".to_string()]
         );
         assert_eq!(
-            session.session_context.pending_work_texts(),
+            session.session_context.pending_work,
             vec!["verify failing tests".to_string()]
         );
-        assert!(session.session_context.force_finish_blocked());
+        assert!(session.session_context.force_finish_blocked);
         assert!(session.session_context.included_files_json().is_some());
         assert!(session
             .session_context
@@ -852,13 +859,33 @@ mod tests {
     }
 
     #[test]
-    fn session_context_bookkeeping_setter() {
+    fn session_context_bookkeeping_field() {
         let mut ctx = SessionContext::default();
         assert!(!ctx.history_snapshot_covers(&["u0".to_string()]));
-        ctx.set_history_snapshot_ids(vec!["u0".to_string(), "a0".to_string()]);
+        ctx.history_snapshot_ids = vec!["u0".to_string(), "a0".to_string()];
         assert!(ctx.history_snapshot_covers(&["u0".to_string()]));
         // Empty query is vacuously covered (matches legacy `.all` semantics).
         assert!(ctx.history_snapshot_covers(&[]));
+    }
+
+    #[test]
+    fn session_context_lenient_bool_keeps_whole_context() {
+        // A loosely-typed force_finish_blocked (string form, as a host
+        // sending raw JSON might produce) must not fail the whole struct
+        // parse: the From<Value> conversion falls back to a default
+        // context on any field error, which would silently drop chat_id,
+        // pending_work, and extras along with the flag.
+        let ctx = SessionContext::from(json!({
+            "chatId": "chat-9",
+            "pending_work": ["still here"],
+            "force_finish_blocked": "true",
+        }));
+        assert!(ctx.force_finish_blocked);
+        assert_eq!(ctx.chat_id.as_deref(), Some("chat-9"));
+        assert_eq!(ctx.pending_work, vec!["still here".to_string()]);
+        // Numeric and plain-bool forms agree; other shapes read as false.
+        assert!(SessionContext::from(json!({"force_finish_blocked": 1})).force_finish_blocked);
+        assert!(!SessionContext::from(json!({"force_finish_blocked": "yes"})).force_finish_blocked);
     }
 
     #[test]

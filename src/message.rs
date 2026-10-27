@@ -256,6 +256,18 @@ pub struct AgentMessage {
     pub metadata: MessageMeta,
 }
 
+impl AgentMessage {
+    /// Set this message's content to a spill `envelope` and flag it as
+    /// spilled, as one operation. The envelope and the flag are one fact
+    /// (ENC-293: the spill exemption trusts the flag and never re-sniffs
+    /// content), so every path that puts an envelope into a session goes
+    /// through here and the two can never diverge.
+    pub fn set_spilled_content(&mut self, envelope: String) {
+        self.content = envelope;
+        self.metadata.mark_spilled();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairRecord {
     pub original_name: String,

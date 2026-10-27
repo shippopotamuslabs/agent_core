@@ -148,7 +148,7 @@ pub(super) fn before_finish_pending_work_action(
         .iter()
         .map(|item| item.text.clone())
         .collect::<Vec<_>>();
-    let force_blocked = state.session.session_context.force_finish_blocked();
+    let force_blocked = state.session.session_context.force_finish_blocked;
     if pending_items.is_empty() {
         let action = force_blocked.then(|| {
             AgentAction::Failed(AgentError::GuardrailExceeded {

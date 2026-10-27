@@ -17,7 +17,7 @@ use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
-use crate::tool_schema::ToolSchemaSet;
+use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
@@ -37,6 +37,10 @@ impl SessionIoParams {
     /// Build session IO params, parsing the schema channels exactly once via
     /// [`ToolSchemaSet::parse`]. Parameter order mirrors the legacy struct
     /// literal field order.
+    ///
+    /// Fallible: a schema channel that violates the host contract (see
+    /// [`ToolSchemaError`]) rejects construction here, at the boundary,
+    /// instead of degrading silently during the session.
     pub fn new(
         provider: String,
         context_window_tokens: u32,
@@ -44,17 +48,17 @@ impl SessionIoParams {
         tool_schema_registry_json: String,
         tools_schema_json: String,
         system_prompt: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ToolSchemaError> {
+        Ok(Self {
             provider,
             context_window_tokens,
             schemas: ToolSchemaSet::parse(
                 &tools_schema_json,
                 &tool_schema_registry_json,
                 &tool_catalog_json,
-            ),
+            )?,
             system_prompt,
-        }
+        })
     }
 }
 

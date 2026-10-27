@@ -65,7 +65,14 @@ pub fn build_tool_context_index_with_registry(
     // boundary (a justified remaining parse — see ENC-289 notes). The
     // per-turn engine path calls `build_tool_context_index_from_set` with the
     // session-parsed entries and performs no text parsing.
-    let schemas = ToolSchemaSet::parse(tools_schema_json, registry_json, catalog_json);
+    //
+    // This wrapper is infallible by design (a preserved public boundary
+    // API, not session construction), so it parses leniently and
+    // per-channel: a contract violation degrades only its own channel,
+    // matching the legacy behavior where each channel was parsed
+    // separately. Session construction is the validating path and fails
+    // hard on any violation.
+    let schemas = ToolSchemaSet::parse_lenient(tools_schema_json, registry_json, catalog_json);
     let active = schemas.active.clone();
     build_tool_context_index_from_set(&active, &schemas, store, config, capabilities)
 }

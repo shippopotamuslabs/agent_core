@@ -41,7 +41,8 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
             "[]".into(),
             SCHEMAS_JSON.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     match eng.next_action(&handle) {
@@ -107,7 +108,8 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
             "[]".into(),
             SCHEMAS_JSON.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     let schema_ref = match eng.next_action(&handle) {
@@ -158,7 +160,8 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
             "[]".into(),
             r#"[{"name":"web_search"}]"#.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
@@ -201,7 +204,8 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
             "[]".into(),
             schemas.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     // Force the engine to register schemas in its owned store.

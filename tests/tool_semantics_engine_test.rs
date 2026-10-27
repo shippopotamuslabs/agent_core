@@ -57,7 +57,8 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
             REGISTRY_JSON.to_string(),
             active_schema.to_string(),
             "sys".to_string(),
-        ),
+        )
+        .expect("valid test io params"),
     )
 }
 

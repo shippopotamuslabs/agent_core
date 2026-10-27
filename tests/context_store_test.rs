@@ -145,7 +145,8 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     // Advance to the awaiting-tools phase so we can submit a tool result.
@@ -252,7 +253,8 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
             "[]".into(),
             r#"[{"name":"web_search"}]"#.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     let req = match eng.next_action(&handle) {
@@ -295,7 +297,8 @@ fn s23_terminal_output_references_share_retrieval_path() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     let reference = eng.insert_terminal_output(
         &handle,
@@ -330,7 +333,8 @@ fn e4_missing_context_reference_read_returns_not_found() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     let err = eng
         .read_context_reference(&handle, "missing-ref".into())
@@ -455,7 +459,8 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     // First turn: spill a tool result into the store.
