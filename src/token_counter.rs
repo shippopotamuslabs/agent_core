@@ -130,7 +130,10 @@ mod tests {
         // exists to prove count injection, and its truncation semantics
         // are word-based, so it overrides the policy method below.
         fn encode_tokens(&self, text: &str) -> Vec<u32> {
-            text.split_whitespace().enumerate().map(|(i, _)| i as u32).collect()
+            text.split_whitespace()
+                .enumerate()
+                .map(|(i, _)| i as u32)
+                .collect()
         }
 
         fn decode_tokens(&self, _tokens: &[u32]) -> Result<String, String> {

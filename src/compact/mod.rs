@@ -53,7 +53,12 @@ pub fn estimate_session_pressure(
     config: &AgentConfig,
     ctx: &CompactionContext,
 ) -> crate::session::Pressure {
-    estimate_session_pressure_with(crate::token_counter::default_counter(), session, config, ctx)
+    estimate_session_pressure_with(
+        crate::token_counter::default_counter(),
+        session,
+        config,
+        ctx,
+    )
 }
 
 /// [`estimate_session_pressure`] counted with an explicit [`TokenCounter`]
