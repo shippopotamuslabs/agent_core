@@ -4,6 +4,7 @@ pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
 mod context_refs;
 pub(super) mod finish;
+pub(super) mod compaction;
 pub(super) mod model_intake;
 pub(super) mod model_request;
 pub(super) mod tool_results;
@@ -22,9 +23,8 @@ use crate::action::AgentAction;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::artifact_finalize::synthetic_finalize_calls_with_semantics;
 use crate::budget::{
-    effective_threshold_tokens, effective_tool_result_budget_for_window,
-    effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ceiling,
-    should_compact_at_token_threshold,
+    effective_tool_result_budget_for_window, effective_tool_spill_threshold_bytes,
+    exceeds_hard_prompt_ceiling,
 };
 use crate::catalog::ToolCatalog;
 use crate::compact::{
@@ -32,17 +32,18 @@ use crate::compact::{
     artifact_snapshot::persist_artifact_snapshot,
     artifact_squash::extract_artifact_anchor,
     compaction_pipeline_for_plan, estimate_session_pressure,
-    history_snapshot::snapshot_history_range,
-    policy::build_compaction_plan,
-    tool_spill::{activation_tools_from_retrieval_hint, spill_tool_messages_in_session},
+    policy::{
+        build_compaction_plan, mid_turn_stall_error, ratio_threshold_tokens_for_plan,
+        should_enter_compaction, FireConditionInputs,
+    },
+    tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
 use crate::context_store::{
     ContextReference, ContextStore,
 };
-use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
+use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
 use crate::guardrails::GuardrailState;
-use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
@@ -55,7 +56,7 @@ use crate::state_ledger::StateLedger;
 use crate::tool_context::build_tool_context_index;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
-use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
+use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
 
@@ -987,26 +988,10 @@ impl AgentEngine {
         let outcome =
             crate::compact::SummaryCompactionTier.apply(g.session.clone(), &g.config, &ctx);
         match outcome {
-            CompactionOutcome::NeedsHostCall(mut req, sess) => {
-                g.session = sess;
-                req.focus_instruction = request.focus_instruction;
-                if g.config.enable_context_store {
-                    let turn_index = g.turn_index;
-                    if let Some(reference) = snapshot_history_range(
-                        &mut g.context_store,
-                        &req.messages_to_summarize,
-                        trigger,
-                        turn_index,
-                    ) {
-                        req.history_ref = Some(reference.id.clone());
-                        if g.config.enable_state_ledger {
-                            g.state_ledger.add_history_ref(&reference.id);
-                        }
-                    }
-                }
-                if g.config.enable_state_ledger {
-                    req.state_ledger_snapshot = Some(g.state_ledger.clone());
-                }
+            CompactionOutcome::NeedsHostCall(req, sess) => {
+                let req = compaction::apply_manual_focus_instruction(req, &request);
+                // Shared staging: session replace + history/ledger refs.
+                let req = InnerSession::stage_summary_request(&mut g, sess, req, trigger);
                 g.pending_summary_req = Some(req.clone());
                 g.pending_summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
@@ -1107,6 +1092,29 @@ impl InnerSession {
             suppress_summary_tier: self.suppress_summary_tier,
             events: &mut self.events,
         }
+    }
+
+    /// Dispatch glue for slice 6: the shared `NeedsHostCall` staging takes a
+    /// field bundle, so construction goes through `&mut InnerSession`.
+    fn stage_summary_request(
+        g: &mut InnerSession,
+        sess: AgentSession,
+        req: SummaryRequest,
+        trigger: CompactionTrigger,
+    ) -> SummaryRequest {
+        compaction::attach_summary_staging(
+            compaction::StageSummaryInputs {
+                session: &mut g.session,
+                context_store: &mut g.context_store,
+                state_ledger: &mut g.state_ledger,
+                enable_context_store: g.config.enable_context_store,
+                enable_state_ledger: g.config.enable_state_ledger,
+                turn_index: g.turn_index,
+                trigger,
+            },
+            sess,
+            req,
+        )
     }
 
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
@@ -1234,11 +1242,10 @@ impl InnerSession {
                 self.suppress_summary_tier,
             );
             let threshold_tokens = plan.threshold_tokens;
-            let ratio_threshold_tokens = effective_threshold_tokens(
+            let ratio_threshold_tokens = ratio_threshold_tokens_for_plan(
                 &self.config,
                 self.io.context_window_tokens,
-                plan.threshold_ratio,
-                None,
+                &plan,
             );
             let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
@@ -1262,86 +1269,35 @@ impl InnerSession {
                     && !self.session.compaction_log.is_empty()
                     && session_has_tool_messages);
 
-            if matches!(trigger, CompactionTrigger::MidTurn)
-                && !self.config.allow_fifo_on_mid_turn
-                && !self.capabilities.summarization_allowed
-                && !self.session.compaction_log.is_empty()
-                && !defer_compaction_failure
-            {
-                return Err(AgentError::CompactionFailed {
-                    tier: "pipeline".into(),
-                    reason: "No compaction tier applied while context remains over threshold"
-                        .into(),
-                });
+            if let Some(err) = mid_turn_stall_error(
+                trigger,
+                self.config.allow_fifo_on_mid_turn,
+                self.capabilities.summarization_allowed,
+                self.session.compaction_log.is_empty(),
+                defer_compaction_failure,
+                true,
+            ) {
+                return Err(err);
             }
 
-            let absolute_fires = match trigger {
-                CompactionTrigger::Preflight => self
-                    .config
-                    .preflight_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::MidTurn => self
-                    .config
-                    .mid_turn_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::PostToolResult => self
-                    .config
-                    .post_tool_result_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::Manual => false,
-            };
-            let has_destructive_compaction_candidate = self.capabilities.summarization_allowed
-                || (session_has_tool_messages && self.config.micro_keep_recent == 0)
-                || match trigger {
-                    CompactionTrigger::Preflight => self.config.allow_fifo_on_preflight,
-                    CompactionTrigger::MidTurn => self.config.allow_fifo_on_mid_turn,
-                    CompactionTrigger::PostToolResult => self.config.allow_fifo_on_post_tool_result,
-                    CompactionTrigger::Manual => true,
-                };
-            let absolute_fires = absolute_fires && has_destructive_compaction_candidate;
-            let active_threshold_tokens = if has_destructive_compaction_candidate {
-                threshold_tokens
-            } else {
-                ratio_threshold_tokens
-            };
-            let turn_fires = matches!(trigger, CompactionTrigger::Preflight)
-                && self
-                    .config
-                    .turn_threshold
-                    .map(|t| self.loop_metrics.turn_count >= t)
-                    .unwrap_or(false);
-            let turn_end_fires = trigger == CompactionTrigger::PostToolResult
-                && self.config.compact_on_turn_end
-                && self
-                    .session
-                    .messages
-                    .last()
-                    .map(|m| matches!(m.role, AgentRole::Tool | AgentRole::User))
-                    .unwrap_or(false);
+            // ENC-286 slice 6 / FRG-47: pure entry gate; the dispatch keeps
+            // looping, emitting, and phase wiring.
+            let fire = should_enter_compaction(FireConditionInputs {
+                config: &self.config,
+                capabilities: &self.capabilities,
+                trigger,
+                pressure: &pressure,
+                threshold_tokens,
+                ratio_threshold_tokens,
+                turn_count: self.loop_metrics.turn_count,
+                tool_calls_executed: self.guardrails.tool_calls_executed,
+                session_has_tool_messages,
+                last_message_role: compaction::last_message_role(&self.session.messages),
+            });
+            let entered_for_long_loop_only = fire.entered_for_long_loop_only;
+            let forced_by_non_ratio = fire.forced_by_non_ratio;
 
-            let tool_round_index = self.guardrails.tool_calls_executed;
-            let long_loop_fires = session_has_tool_messages
-                && should_compact_for_long_loop(
-                    &self.config,
-                    &self.capabilities,
-                    tool_round_index,
-                    trigger,
-                );
-            let entered_for_long_loop_only = long_loop_fires
-                && !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                && !absolute_fires
-                && !turn_fires
-                && !turn_end_fires;
-
-            if !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                && !absolute_fires
-                && !turn_fires
-                && !turn_end_fires
-                && !long_loop_fires
-            {
+            if !fire.should_enter {
                 if sync_applied {
                     self.emit_post_compact(
                         trigger,
@@ -1359,63 +1315,51 @@ impl InnerSession {
                 ratio: pressure.ratio,
             });
 
-            if matches!(trigger, CompactionTrigger::MidTurn)
-                && !self.config.allow_fifo_on_mid_turn
-                && !self.capabilities.summarization_allowed
-                && !defer_compaction_failure
-            {
-                return Err(AgentError::CompactionFailed {
-                    tier: "pipeline".into(),
-                    reason: "No compaction tier applied while context remains over threshold"
-                        .into(),
-                });
+            if let Some(err) = mid_turn_stall_error(
+                trigger,
+                self.config.allow_fifo_on_mid_turn,
+                self.capabilities.summarization_allowed,
+                self.session.compaction_log.is_empty(),
+                defer_compaction_failure,
+                false,
+            ) {
+                return Err(err);
             }
 
             if self.config.enable_context_store {
-                let artifact_squash = self
-                    .config
-                    .tool_semantics
-                    .compaction
-                    .artifact_squash
-                    .as_ref();
-                if let Some(event) = spill_tool_messages_in_session(
-                    &mut self.context_store,
-                    &mut self.session,
-                    artifact_squash,
-                    effective_tool_spill_threshold_bytes(
-                        &self.config,
-                        self.io.context_window_tokens,
-                    ),
-                    self.turn_index,
-                    trigger,
-                ) {
+                // Slice 6: sync spill/snapshot runs in the helper; the
+                // dispatch applies flags, ledger refs, and emits in order.
+                let effect = compaction::collect_sync_spill_effect(
+                    compaction::SyncSpillInputs {
+                        session: &mut self.session,
+                        context_store: &mut self.context_store,
+                        artifact_squash: self
+                            .config
+                            .tool_semantics
+                            .compaction
+                            .artifact_squash
+                            .as_ref(),
+                        spill_threshold_bytes: effective_tool_spill_threshold_bytes(
+                            &self.config,
+                            self.io.context_window_tokens,
+                        ),
+                        turn_index: self.turn_index,
+                        pressure_total_tokens: pressure.total_tokens,
+                        trigger,
+                    },
+                );
+                if let Some(event) = effect.spill_event {
                     self.session.push_compaction_event(event.clone());
                     self.emit(AgentEvent::CompactionApplied(event));
                     sync_applied = true;
                 }
-                let snapshot_ids: Vec<String> = self
-                    .session
-                    .messages
-                    .iter()
-                    .map(|message| message.id.clone())
-                    .collect();
-                if let Some(reference) = snapshot_history_range(
-                    &mut self.context_store,
-                    &self.session.messages,
-                    trigger,
-                    self.turn_index,
-                ) {
-                    last_history_ref = Some(reference.id.clone());
-                    self.remember_history_snapshot_ids(snapshot_ids);
+                if let Some(history_ref) = effect.history_ref {
+                    last_history_ref = Some(history_ref.clone());
+                    self.remember_history_snapshot_ids(effect.snapshot_ids);
                     if self.config.enable_state_ledger {
-                        self.state_ledger.add_history_ref(&reference.id);
+                        self.state_ledger.add_history_ref(&history_ref);
                     }
-                    let event = CompactionEvent {
-                        tier: CompactionTier::HistorySnapshot,
-                        tokens_before: pressure.total_tokens,
-                        tokens_after: pressure.total_tokens,
-                        trigger,
-                    };
+                    let event = effect.snapshot_event.expect("history snapshot event");
                     self.session.push_compaction_event(event.clone());
                     self.emit(AgentEvent::CompactionApplied(event));
                 }
@@ -1429,9 +1373,6 @@ impl InnerSession {
             //  - plan.threshold_ratio = 0.0 so the pipeline's own ratio guard passes
             //  - ctx.trigger = MidTurn so the summary tier summarizes all messages
             //    (not just "before last user") for short sessions
-            let forced_by_non_ratio =
-                !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                    && (absolute_fires || turn_fires || turn_end_fires);
             let (effective_plan, effective_ctx) = if forced_by_non_ratio {
                 let mut p = plan.clone();
                 p.threshold_ratio = 0.0;
@@ -1456,23 +1397,8 @@ impl InnerSession {
                     if forced_by_non_ratio {
                         req.trigger = trigger;
                     }
-                    self.session = sess;
-                    if self.config.enable_context_store {
-                        if let Some(reference) = snapshot_history_range(
-                            &mut self.context_store,
-                            &req.messages_to_summarize,
-                            trigger,
-                            self.turn_index,
-                        ) {
-                            if self.config.enable_state_ledger {
-                                self.state_ledger.add_history_ref(&reference.id);
-                            }
-                            req.history_ref = Some(reference.id);
-                        }
-                    }
-                    if self.config.enable_state_ledger {
-                        req.state_ledger_snapshot = Some(self.state_ledger.clone());
-                    }
+                    // Shared staging: session replace + history/ledger refs.
+                    let req = Self::stage_summary_request(self, sess, req, trigger);
                     self.pending_summary_req = Some(req.clone());
                     self.pending_summary_ctx = Some(ctx);
                     self.phase = EnginePhase::AwaitingSummary;
