@@ -2,6 +2,7 @@
 
 pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
+mod context_refs;
 mod provider_tool_calls;
 mod state;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
@@ -38,7 +39,7 @@ use crate::compact::{
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
 use crate::context_store::{
-    insert_terminal_output, is_browsable_context_kind, ContextReference, ContextStore,
+    is_browsable_context_kind, ContextReference, ContextStore,
 };
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 use crate::file_context::condense_file_context;
@@ -1328,39 +1329,6 @@ impl AgentEngine {
         }
     }
 
-    pub fn read_context_reference(
-        &self,
-        handle: &SessionHandle,
-        reference_id: String,
-    ) -> Result<String, AgentError> {
-        let g = handle.lock_inner();
-        g.context_store
-            .get(&reference_id)
-            .map(|entry| entry.content.clone())
-            .ok_or(AgentError::ContextReferenceNotFound { reference_id })
-    }
-
-    pub fn search_context_references(
-        &self,
-        handle: &SessionHandle,
-        query: String,
-        limit: usize,
-    ) -> Vec<crate::context_store::ContextReference> {
-        let g = handle.lock_inner();
-        g.context_store.search(&query, limit)
-    }
-
-    pub fn insert_terminal_output(
-        &self,
-        handle: &SessionHandle,
-        id: String,
-        title: String,
-        content: String,
-    ) -> ContextReference {
-        let mut g = handle.lock_inner();
-        let turn_index = g.turn_index;
-        insert_terminal_output(&mut g.context_store, id, title, content, turn_index)
-    }
 }
 
 fn normalize_tool_name_hint(raw: &str) -> String {
