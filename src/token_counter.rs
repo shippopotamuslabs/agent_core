@@ -13,8 +13,8 @@
 //! [`TokenCounter`] and call the `*_with` variants
 //! ([`crate::budget::TokenLedger::estimate_with`],
 //! [`crate::truncate::truncate_message_content_to_tokens_with`],
-//! [`estimate_session_pressure_with`]). Tests inject a fake counter the same
-//! way without touching domain code.
+//! [`crate::compact::estimate_session_pressure_with`]). Tests inject a fake
+//! counter the same way without touching domain code.
 
 use once_cell::sync::Lazy;
 use tiktoken_rs::CoreBPE;
@@ -23,20 +23,56 @@ use tiktoken_rs::CoreBPE;
 ///
 /// `Send + Sync` so a single instance can back concurrent sessions, matching
 /// the [`crate::host`] transport/executor/summarizer bounds.
+///
+/// Mechanism vs policy: implementors supply the tokenizer primitives
+/// (count, encode, decode) — the only parts that differ between
+/// vocabularies. The truncation policy (zero-token early return, no-op
+/// fast path, note-token reservation, the `max(1)` keep floor, note
+/// appending) is implemented once as the default
+/// [`truncate_text_to_tokens`](TokenCounter::truncate_text_to_tokens);
+/// an implementor overrides it only when its token model cannot slice
+/// by ids at all (e.g. a word-counting test fake).
 pub trait TokenCounter: Send + Sync {
     /// Token count for `text`, including special tokens (same convention as
     /// `tiktoken` `encode_with_special_tokens`).
     fn count_tokens(&self, text: &str) -> u32;
 
+    /// Encode `text` into token ids, including special tokens (the same
+    /// sequence [`count_tokens`](TokenCounter::count_tokens) counts).
+    fn encode_tokens(&self, text: &str) -> Vec<u32>;
+
+    /// Decode token ids back into text. `Err` when the ids do not form
+    /// valid text in this counter's vocabulary; the default truncation
+    /// policy falls back to a character slice in that case.
+    fn decode_tokens(&self, tokens: &[u32]) -> Result<String, String>;
+
     /// Truncate `text` to at most `max_tokens`, appending `truncation_note`
     /// when truncated. Returns the (possibly unchanged) text and whether
-    /// truncation happened.
+    /// truncation happened. Default implementation: the shared truncation
+    /// policy over this counter's primitives.
     fn truncate_text_to_tokens(
         &self,
         text: &str,
         max_tokens: u32,
         truncation_note: &str,
-    ) -> (String, bool);
+    ) -> (String, bool) {
+        if max_tokens == 0 {
+            return (truncation_note.trim_start().to_string(), true);
+        }
+        let tokens = self.encode_tokens(text);
+        if tokens.len() <= max_tokens as usize {
+            return (text.to_string(), false);
+        }
+        let note_tokens = self.count_tokens(truncation_note);
+        let keep = max_tokens.saturating_sub(note_tokens).max(1) as usize;
+        let truncated_tokens = &tokens[..keep.min(tokens.len())];
+        let decoded = self
+            .decode_tokens(truncated_tokens)
+            .unwrap_or_else(|_| text.chars().take(keep.saturating_mul(4)).collect());
+        let mut out = decoded;
+        out.push_str(truncation_note);
+        (out, true)
+    }
 }
 
 /// Default in-crate [`TokenCounter`]: OpenAI `cl100k_base` via `tiktoken-rs`.
@@ -61,51 +97,15 @@ impl TokenCounter for TiktokenTokenCounter {
         ENCODER.encode_with_special_tokens(text).len() as u32
     }
 
-    fn truncate_text_to_tokens(
-        &self,
-        text: &str,
-        max_tokens: u32,
-        truncation_note: &str,
-    ) -> (String, bool) {
-        if max_tokens == 0 {
-            return (truncation_note.trim_start().to_string(), true);
-        }
-        let tokens = ENCODER.encode_with_special_tokens(text);
-        if tokens.len() <= max_tokens as usize {
-            return (text.to_string(), false);
-        }
-        let note_tokens = self.count_tokens(truncation_note);
-        let keep = max_tokens.saturating_sub(note_tokens).max(1) as usize;
-        let truncated_tokens = tokens[..keep.min(tokens.len())].to_vec();
-        let decoded = ENCODER
-            .decode(truncated_tokens)
-            .unwrap_or_else(|_| text.chars().take(keep.saturating_mul(4)).collect());
-        let mut out = decoded;
-        out.push_str(truncation_note);
-        (out, true)
+    fn encode_tokens(&self, text: &str) -> Vec<u32> {
+        ENCODER.encode_with_special_tokens(text)
     }
-}
 
-/// Full projected prompt pressure for compaction tiers, counted with an
-/// explicit [`TokenCounter`] instead of the process default.
-pub fn estimate_session_pressure_with(
-    counter: &dyn TokenCounter,
-    session: &crate::session::AgentSession,
-    config: &crate::session::AgentConfig,
-    ctx: &crate::compact::CompactionContext,
-) -> crate::session::Pressure {
-    let parts = crate::budget::PromptBudgetParts {
-        provider: &ctx.provider,
-        context_window_tokens: ctx.context_window_tokens,
-        tools_schema_json: &ctx.tools_schema_json,
-        system_prompt: &ctx.system_prompt,
-        context_sidecars: if ctx.context_sidecars_estimate.is_empty() {
-            ""
-        } else {
-            &ctx.context_sidecars_estimate
-        },
-    };
-    crate::budget::TokenLedger::estimate_with(counter, session, config, &parts)
+    fn decode_tokens(&self, tokens: &[u32]) -> Result<String, String> {
+        ENCODER
+            .decode(tokens.to_vec())
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +124,17 @@ mod tests {
     impl TokenCounter for WordCounter {
         fn count_tokens(&self, text: &str) -> u32 {
             text.split_whitespace().count() as u32
+        }
+
+        // Word ids are positions, not a decodable vocabulary: this fake
+        // exists to prove count injection, and its truncation semantics
+        // are word-based, so it overrides the policy method below.
+        fn encode_tokens(&self, text: &str) -> Vec<u32> {
+            text.split_whitespace().enumerate().map(|(i, _)| i as u32).collect()
+        }
+
+        fn decode_tokens(&self, _tokens: &[u32]) -> Result<String, String> {
+            Err("WordCounter does not decode".to_string())
         }
 
         fn truncate_text_to_tokens(
