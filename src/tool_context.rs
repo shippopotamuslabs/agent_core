@@ -67,10 +67,12 @@ pub fn build_tool_context_index_with_registry(
     // session-parsed entries and performs no text parsing.
     //
     // This wrapper is infallible by design (a preserved public boundary
-    // API, not session construction), so a contract violation falls back
-    // to an empty set here; session construction is the validating path.
-    let schemas = ToolSchemaSet::parse(tools_schema_json, registry_json, catalog_json)
-        .unwrap_or_default();
+    // API, not session construction), so it parses leniently and
+    // per-channel: a contract violation degrades only its own channel,
+    // matching the legacy behavior where each channel was parsed
+    // separately. Session construction is the validating path and fails
+    // hard on any violation.
+    let schemas = ToolSchemaSet::parse_lenient(tools_schema_json, registry_json, catalog_json);
     let active = schemas.active.clone();
     build_tool_context_index_from_set(&active, &schemas, store, config, capabilities)
 }

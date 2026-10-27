@@ -279,6 +279,37 @@ impl ToolSchemaSet {
         })
     }
 
+    /// Parse the three channels independently: a channel that violates
+    /// the contract degrades to an empty channel (no entries, raw text
+    /// normalized to `"[]"`) without discarding the valid channels.
+    ///
+    /// This is the lenient sibling for the infallible string-boundary
+    /// render helpers in `tool_context`, whose legacy behavior parsed
+    /// each channel separately. Session construction uses the strict
+    /// [`ToolSchemaSet::parse`] and fails hard on the first violation.
+    pub fn parse_lenient(active_json: &str, registry_json: &str, catalog_json: &str) -> Self {
+        let (active, raw_active) = match parse_schema_channel(ACTIVE_CHANNEL, active_json) {
+            Ok(entries) => (entries, active_json.to_string()),
+            Err(_) => (Vec::new(), "[]".to_string()),
+        };
+        let (registry, raw_registry) = match parse_schema_channel(REGISTRY_CHANNEL, registry_json) {
+            Ok(entries) => (entries, registry_json.to_string()),
+            Err(_) => (Vec::new(), "[]".to_string()),
+        };
+        let (catalog, raw_catalog) = match parse_catalog_channel(catalog_json) {
+            Ok(entries) => (entries, catalog_json.to_string()),
+            Err(_) => (Vec::new(), "[]".to_string()),
+        };
+        Self {
+            active,
+            registry,
+            catalog,
+            raw_active,
+            raw_registry,
+            raw_catalog,
+        }
+    }
+
     /// Session-level raw text of the active channel (pressure/budget/stash).
     pub fn active_json(&self) -> &str {
         &self.raw_active
@@ -357,26 +388,41 @@ impl ToolSchemaSet {
         // once in [`ToolSchemaSet::parse`], so every entry here is a schema
         // object whose `entry.name` is its gate identity. There is no
         // bare-string naming rule: non-object entries never reach this set.
+        // The gate policy itself is shared with
+        // `request_pipeline::render_runtime_tool_view` via
+        // [`runtime_gate_allows`], so the two renders cannot drift.
         self.active
             .iter()
-            .filter(|entry| {
-                let name: &str = entry.name.as_str();
-                // Remove patch_file and write_file when require_read_before_edit and no files read yet
-                if config.require_read_before_edit
-                    && metrics.files_read.is_empty()
-                    && (name == "patch_file" || name == "write_file")
-                {
-                    return false;
-                }
-                // Remove task_delegate when delegation tools not supported
-                if !capabilities.delegation_tools_supported && name == "task_delegate" {
-                    return false;
-                }
-                true
-            })
+            .filter(|entry| runtime_gate_allows(entry.name.as_str(), config, capabilities, metrics))
             .cloned()
             .collect()
     }
+}
+
+/// The FRG-36 runtime-view gate policy, shared by
+/// [`ToolSchemaSet::render_runtime_view`] (parsed entries, per-turn path)
+/// and `request_pipeline::render_runtime_tool_view` (raw catalog text,
+/// string boundary): edit tools stay hidden until something has been
+/// read when `require_read_before_edit` is on, and the delegation tool
+/// stays hidden when the session does not support delegation.
+pub fn runtime_gate_allows(
+    name: &str,
+    config: &AgentConfig,
+    capabilities: &SessionCapabilities,
+    metrics: &LoopMetrics,
+) -> bool {
+    // Remove patch_file and write_file when require_read_before_edit and no files read yet
+    if config.require_read_before_edit
+        && metrics.files_read.is_empty()
+        && (name == "patch_file" || name == "write_file")
+    {
+        return false;
+    }
+    // Remove task_delegate when delegation tools not supported
+    if !capabilities.delegation_tools_supported && name == "task_delegate" {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -449,6 +495,33 @@ mod tests {
             .expect("catalog array");
         assert_eq!(set.catalog.len(), 1);
         assert!(set.catalog_has_entries());
+    }
+
+    #[test]
+    fn parse_lenient_degrades_only_the_bad_channel() {
+        // A malformed catalog must not erase valid active/registry entries
+        // (the legacy per-channel behavior the tool_context wrapper keeps).
+        let set = ToolSchemaSet::parse_lenient(
+            &format!("[{}]", entry("web_search")),
+            &format!("[{}]", entry("append_blocks")),
+            "{bogus",
+        );
+        assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
+        assert!(set.has_registry());
+        assert!(set.catalog.is_empty());
+        assert_eq!(set.catalog_json(), "[]");
+        // A malformed active channel degrades alone; the registry stash
+        // text survives untouched.
+        let set = ToolSchemaSet::parse_lenient(
+            "[{}]",
+            &format!("[{}]", entry("append_blocks")),
+            "[]",
+        );
+        assert!(set.active.is_empty());
+        assert_eq!(
+            set.registry_json(),
+            &format!("[{}]", entry("append_blocks"))
+        );
     }
 
     #[test]
