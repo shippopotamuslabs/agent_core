@@ -37,6 +37,9 @@ fn emoji_cot_with_spaced_dsml_and_chunked_push_does_not_panic() {
 fn strong_marker_start_is_char_boundary_for_unicode_preamble() {
     let text = "日本語 🔥 < | DSML | invoke name=\"x\"";
     if let Some(start) = first_strong_tool_marker_start(text) {
-        assert!(text.is_char_boundary(start), "start={start} not char boundary");
+        assert!(
+            text.is_char_boundary(start),
+            "start={start} not char boundary"
+        );
     }
 }

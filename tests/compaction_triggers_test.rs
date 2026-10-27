@@ -3,8 +3,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use std::sync::Arc;
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::compact::fifo::FifoCompactionTier;
@@ -344,7 +344,10 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
         .iter()
         .filter(|e| matches!(e, AgentEvent::CompactionApplied(ev) if ev.trigger == CompactionTrigger::PostToolResult))
         .count();
-    assert!(post_count >= 1, "expected at least one post-tool compaction event");
+    assert!(
+        post_count >= 1,
+        "expected at least one post-tool compaction event"
+    );
 }
 
 #[test]
@@ -463,20 +466,17 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
         .iter()
         .find_map(|e| match e {
             AgentEvent::CompactionApplied(ev)
-                if ev.tier == CompactionTier::Fifo
-                    || ev.tier == CompactionTier::TextTruncate =>
+                if ev.tier == CompactionTier::Fifo || ev.tier == CompactionTier::TextTruncate =>
             {
                 Some(ev.clone())
             }
             _ => None,
         })
         .expect("fifo or text_truncate CompactionApplied expected");
-    assert!(
-        matches!(
-            destructive_compact.tier,
-            CompactionTier::Fifo | CompactionTier::TextTruncate
-        )
-    );
+    assert!(matches!(
+        destructive_compact.tier,
+        CompactionTier::Fifo | CompactionTier::TextTruncate
+    ));
     let invalidated = events.iter().any(|e| {
         matches!(
             e,
@@ -864,7 +864,10 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
         .iter()
         .filter(|e| matches!(e, AgentEvent::CompactionApplied(ev) if ev.trigger == CompactionTrigger::Preflight))
         .count();
-    assert!(post >= 1, "expected at least one post-tool compaction event");
+    assert!(
+        post >= 1,
+        "expected at least one post-tool compaction event"
+    );
     assert_eq!(preflight, 0);
 }
 

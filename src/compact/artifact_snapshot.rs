@@ -21,7 +21,10 @@ pub fn persist_artifact_snapshot(
     let reference = ContextReference {
         id: id.clone(),
         kind: ContextReferenceKind::ArtifactSnapshot,
-        title: append_turn_suffix(format!("artifact_snapshot:{}", anchor.artifact_id), turn_index),
+        title: append_turn_suffix(
+            format!("artifact_snapshot:{}", anchor.artifact_id),
+            turn_index,
+        ),
         byte_len: content.len() as u64,
         token_estimate: (content.len() / 4) as u32,
         preview: make_preview(&content),

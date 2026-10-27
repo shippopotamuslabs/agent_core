@@ -158,12 +158,10 @@ pub fn has_tool_marker_at_finish(buffer: &str, hold: Option<ActiveHold>) -> bool
         Some(ActiveHold {
             start,
             kind: HoldKind::Tentative(kind),
-        }) => {
-            !matches!(
-                resolve_tentative_hold(&buffer[start..], kind),
-                HoldResolution::Disproved
-            )
-        }
+        }) => !matches!(
+            resolve_tentative_hold(&buffer[start..], kind),
+            HoldResolution::Disproved
+        ),
         None => false,
     }
 }
@@ -172,9 +170,7 @@ pub fn has_tool_marker_at_finish(buffer: &str, hold: Option<ActiveHold>) -> bool
 pub fn native_tool_flush_end(buffer: &str, hold: Option<ActiveHold>) -> Option<usize> {
     hold.map(|h| h.start)
         .or_else(|| earliest_confirmed_marker_start(buffer, 0))
-        .or_else(|| {
-            earliest_tentative_trigger(buffer, 0).map(|(start, _)| start)
-        })
+        .or_else(|| earliest_tentative_trigger(buffer, 0).map(|(start, _)| start))
 }
 
 #[cfg(test)]

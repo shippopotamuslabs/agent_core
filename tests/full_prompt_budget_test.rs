@@ -1,14 +1,15 @@
 //! Full projected prompt budget and text-truncation integration tests.
 
+use agent_core::action::AgentAction;
 use agent_core::budget::{
     effective_hard_prompt_ceiling_tokens, exceeds_hard_prompt_ceiling, PromptBudgetParts,
     TokenLedger,
 };
 use agent_core::compact::{
-    estimate_session_pressure, policy::build_compaction_plan, text_truncate::TextTruncateCompactionTier,
-    CompactionContext, CompactionOutcome, CompactionTier as CompactionTierTrait,
+    estimate_session_pressure, policy::build_compaction_plan,
+    text_truncate::TextTruncateCompactionTier, CompactionContext, CompactionOutcome,
+    CompactionTier as CompactionTierTrait,
 };
-use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, CompactionTier, CompactionTrigger};
 use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
@@ -52,7 +53,14 @@ fn fixed_kv_plan_includes_text_truncate_after_fifo() {
     };
     let cfg = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
     let policy = resolve_context_policy(&cfg, &caps, "LLAMA", 4096);
-    let plan = build_compaction_plan(&cfg, &caps, &policy, CompactionTrigger::Preflight, 4096, false);
+    let plan = build_compaction_plan(
+        &cfg,
+        &caps,
+        &policy,
+        CompactionTrigger::Preflight,
+        4096,
+        false,
+    );
     assert!(plan.ordered_tiers.contains(&CompactionTier::Fifo));
     assert!(plan.ordered_tiers.contains(&CompactionTier::TextTruncate));
     assert_eq!(
@@ -132,7 +140,6 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
         }
         other => panic!("expected CallModel after compaction, got {other:?}"),
     }
-
 }
 
 #[test]
@@ -183,7 +190,10 @@ fn text_truncate_shrinks_truncatable_messages_when_over_hard_ceiling() {
 #[test]
 fn hosted_plan_counts_system_prompt_in_pressure() {
     let cfg = AgentConfig::for_policy_tier(ContextPolicyTier::HostedMutable);
-    let session = AgentSession::new(vec![msg("u1", AgentRole::User, "short")], serde_json::Value::Null);
+    let session = AgentSession::new(
+        vec![msg("u1", AgentRole::User, "short")],
+        serde_json::Value::Null,
+    );
     let messages_only_parts = PromptBudgetParts {
         provider: "anthropic",
         context_window_tokens: 200_000,

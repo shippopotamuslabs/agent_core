@@ -88,8 +88,7 @@ impl GuardrailState {
     }
 
     pub fn record_model_api_failure(&mut self) {
-        self.consecutive_model_api_failures =
-            self.consecutive_model_api_failures.saturating_add(1);
+        self.consecutive_model_api_failures = self.consecutive_model_api_failures.saturating_add(1);
     }
 
     pub fn count_tool_executed(&mut self, n: u32) {
@@ -165,11 +164,10 @@ mod tests {
 
     fn greedy_cfg() -> AgentConfig {
         let mut config = AgentConfig::default();
-        config.tool_semantics.greedy_extension_tools =
-            vec![ToolGreedyExtensionSemantics {
-                tool_name: "append_blocks".into(),
-                extra_turns: 20,
-            }];
+        config.tool_semantics.greedy_extension_tools = vec![ToolGreedyExtensionSemantics {
+            tool_name: "append_blocks".into(),
+            extra_turns: 20,
+        }];
         config
     }
 

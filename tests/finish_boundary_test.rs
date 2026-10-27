@@ -289,7 +289,10 @@ fn fb_r_007_before_finish_pending_work_over_cap_fails_guardrail() {
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
     match action {
-        AgentAction::Failed(AgentError::GuardrailExceeded { ref kind, detail: _ }) => {
+        AgentAction::Failed(AgentError::GuardrailExceeded {
+            ref kind,
+            detail: _,
+        }) => {
             assert_eq!("max_model_requests_per_turn", kind);
         }
         other => panic!("FB-R-007 expected max_model_requests_per_turn guardrail, got {other:?}"),
@@ -321,7 +324,10 @@ fn fb_r_008_finish_blocked_without_injected_message_fails_guardrail() {
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
     match action {
-        AgentAction::Failed(AgentError::GuardrailExceeded { ref kind, detail: _ }) => {
+        AgentAction::Failed(AgentError::GuardrailExceeded {
+            ref kind,
+            detail: _,
+        }) => {
             assert_eq!("finish_blocked_without_injected_message", kind);
         }
         other => panic!(

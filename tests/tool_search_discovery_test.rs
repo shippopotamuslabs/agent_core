@@ -3,7 +3,6 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
@@ -13,6 +12,7 @@ use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use std::sync::Arc;
+use support::enclave_test_agent_config::enclave_test_agent_config;
 
 // FRG-37: vendored snapshot of the Enclave production semantics file
 // (`core/domain/src/main/resources/agent_loop_enclave_tool_semantics.json`).
@@ -140,11 +140,9 @@ fn tsd_26_default_semantics_reference_search_tools() {
     assert_eq!(discovery.tool_name, "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
     assert!(discovery.always_callable);
-    assert!(
-        discovery
-            .companion_callable_tools
-            .contains(&"read_context_reference".to_string())
-    );
+    assert!(discovery
+        .companion_callable_tools
+        .contains(&"read_context_reference".to_string()));
 }
 
 #[test]

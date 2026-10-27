@@ -62,10 +62,7 @@ pub fn build_budget_prose_content(meta: &AgentToolBudgetMeta) -> String {
     };
     format!(
         "<system_context>\nTool budget: {}/{} used ({} remaining). {}\n</system_context>",
-        meta.tool_calls_used,
-        meta.tool_calls_limit,
-        meta.tool_calls_remaining,
-        status
+        meta.tool_calls_used, meta.tool_calls_limit, meta.tool_calls_remaining, status
     )
 }
 

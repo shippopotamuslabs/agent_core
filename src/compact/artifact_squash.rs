@@ -105,7 +105,10 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
     false
 }
 
-fn artifact_id_from_assistant_metadata(msg: &AgentMessage, semantics: &ArtifactSquashSemantics) -> Option<String> {
+fn artifact_id_from_assistant_metadata(
+    msg: &AgentMessage,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<String> {
     msg.metadata
         .get("raw_tool_calls")
         .and_then(|v| v.as_array())

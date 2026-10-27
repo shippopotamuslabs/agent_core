@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 use agent_core::artifact_finalize::{
     record_artifact_progress_with_semantics, synthetic_finalize_calls_with_semantics,
 };
@@ -22,6 +21,7 @@ use agent_core::tool_semantics::{
 };
 use agent_core::turn_io::RawToolCall;
 use serde_json::{json, Value};
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
 fn tool(name: &str) -> ToolSpec {
     ToolSpec {

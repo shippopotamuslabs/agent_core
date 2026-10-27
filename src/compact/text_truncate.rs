@@ -124,7 +124,10 @@ impl CompactionTier for TextTruncateCompactionTier {
                 message.metadata = json!({});
             }
             if let Some(obj) = message.metadata.as_object_mut() {
-                obj.insert("compaction_tier".into(), json!(TierEnum::TextTruncate.to_string()));
+                obj.insert(
+                    "compaction_tier".into(),
+                    json!(TierEnum::TextTruncate.to_string()),
+                );
             }
             let pressure_after = estimate_session_pressure(&session, config, ctx).total_tokens;
             if pressure_after >= pressure_before {
@@ -212,11 +215,10 @@ mod tests {
             CompactionOutcome::Applied(s, ev) => {
                 assert_eq!(ev.tier, TierEnum::TextTruncate);
                 assert!(ev.tokens_after < ev.tokens_before);
-                assert!(
-                    s.messages.iter().any(|m| {
-                        m.content.contains(crate::truncate::MESSAGE_TRUNCATION_NOTE)
-                    })
-                );
+                assert!(s
+                    .messages
+                    .iter()
+                    .any(|m| { m.content.contains(crate::truncate::MESSAGE_TRUNCATION_NOTE) }));
                 assert_eq!(s.messages[3].content, "latest question");
             }
             o => panic!("expected Applied, got {o:?}"),
@@ -225,10 +227,7 @@ mod tests {
 
     #[test]
     fn not_applicable_when_already_under_budget() {
-        let session = AgentSession::new(
-            vec![msg("u1", AgentRole::User, "short")],
-            Null,
-        );
+        let session = AgentSession::new(vec![msg("u1", AgentRole::User, "short")], Null);
         let cfg = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
         let out = TextTruncateCompactionTier.apply(session, &cfg, &ctx(4096, "tiny"));
         assert!(matches!(out, CompactionOutcome::NotApplicable));

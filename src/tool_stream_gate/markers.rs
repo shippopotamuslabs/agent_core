@@ -20,26 +20,14 @@ static STRONG_TOOL_MARKER_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
 
 static PARTIAL_TOOL_MARKER_REGEXES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
     vec![
-        (
-            "dsml_pipe",
-            Regex::new(r"(?is)<\s*[|｜]+").unwrap(),
-        ),
+        ("dsml_pipe", Regex::new(r"(?is)<\s*[|｜]+").unwrap()),
         (
             "dsml_partial",
             Regex::new(r"(?is)<\s*(?:[|｜]+\s*)?DSM").unwrap(),
         ),
-        (
-            "tool_partial",
-            Regex::new(r"(?is)<\s*tool").unwrap(),
-        ),
-        (
-            "tool_underscore",
-            Regex::new(r"(?is)<\s*tool_").unwrap(),
-        ),
-        (
-            "call_colon",
-            Regex::new(r"(?is)\bcall\s*:").unwrap(),
-        ),
+        ("tool_partial", Regex::new(r"(?is)<\s*tool").unwrap()),
+        ("tool_underscore", Regex::new(r"(?is)<\s*tool_").unwrap()),
+        ("call_colon", Regex::new(r"(?is)\bcall\s*:").unwrap()),
         (
             "tool_calls_bracket",
             Regex::new(r"(?is)\[TOOL_CALLS\]").unwrap(),
@@ -133,9 +121,9 @@ pub(crate) fn original_offset_for_normalized_offset(
 
 /// Strong + partial sentinels — legacy helper for tests and external callers.
 pub fn first_stream_holdback_marker_start(text: &str) -> Option<usize> {
-    earliest_tentative_trigger(text, 0).map(|(start, _)| start).or_else(|| {
-        earliest_confirmed_marker_start(text, 0)
-    })
+    earliest_tentative_trigger(text, 0)
+        .map(|(start, _)| start)
+        .or_else(|| earliest_confirmed_marker_start(text, 0))
 }
 
 /// All stream-gate markers (strong + partial).
@@ -144,7 +132,10 @@ pub fn first_tool_marker_start(text: &str) -> Option<usize> {
 }
 
 /// Earliest tentative trigger at or after `search_from`.
-pub fn earliest_tentative_trigger(text: &str, search_from: usize) -> Option<(usize, TentativeKind)> {
+pub fn earliest_tentative_trigger(
+    text: &str,
+    search_from: usize,
+) -> Option<(usize, TentativeKind)> {
     if search_from >= text.len() {
         return None;
     }

@@ -4,10 +4,9 @@ use agent_core::tool_semantics::{ToolCatalogConfig, ToolSemanticsConfig};
 
 /// Enclave-like semantics for integration tests only (not part of the SDK runtime).
 pub fn enclave_test_semantics() -> ToolSemanticsConfig {
-    let mut semantics: ToolSemanticsConfig = serde_json::from_str(include_str!(
-        "enclave_tool_semantics.json"
-    ))
-    .expect("enclave_tool_semantics.json");
+    let mut semantics: ToolSemanticsConfig =
+        serde_json::from_str(include_str!("enclave_tool_semantics.json"))
+            .expect("enclave_tool_semantics.json");
     let raw = include_str!("../../resources/tool_catalog.json");
     #[derive(serde::Deserialize)]
     struct CatalogFile {

@@ -8,11 +8,11 @@ mod support;
 
 use agent_core::catalog::{FieldHint, ToolSchemaHint};
 use agent_core::tool_parse::json_repair::repair_json;
-use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_calls;
 use agent_core::tool_parse::result::ToolParseFailureReason;
 use agent_core::tool_parse::schema_coerce::coerce_to_schema;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_calls;
 
 #[test]
 fn faal_cp_05_parse_tool_calls_coerces_stringified_blocks() {

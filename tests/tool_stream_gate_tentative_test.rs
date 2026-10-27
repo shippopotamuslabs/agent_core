@@ -27,7 +27,10 @@ fn th_sg_01_call_colon_prose_flushes_on_disambiguation() {
     assert_eq!(visible, "Here is the answer. To ", "TH-SG-01a preamble");
 
     visible.push_str(&visible_after_push(&mut gate, "call: "));
-    assert_eq!(visible, "Here is the answer. To ", "TH-SG-01b holds at call:");
+    assert_eq!(
+        visible, "Here is the answer. To ",
+        "TH-SG-01b holds at call:"
+    );
 
     visible.push_str(&visible_after_push(&mut gate, "the API, do this next."));
     assert_eq!(
@@ -97,7 +100,11 @@ fn th_sg_05_broken_tool_call_hidden_at_eof() {
     let finish = gate.finish(false);
     assert_eq!(finish.trailing_flush, "", "TH-SG-05 trailing_flush");
     assert!(finish.has_tool_marker, "TH-SG-05 has_tool_marker");
-    assert_eq!(gate.buffered_text(), broken, "TH-SG-05 raw buffer preserved");
+    assert_eq!(
+        gate.buffered_text(),
+        broken,
+        "TH-SG-05 raw buffer preserved"
+    );
 }
 
 #[test]

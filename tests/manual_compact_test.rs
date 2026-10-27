@@ -269,7 +269,10 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
     );
 
     // Engine is now AwaitingModel.
-    assert!(matches!(eng.next_action(&handle), AgentAction::CallModel(_)));
+    assert!(matches!(
+        eng.next_action(&handle),
+        AgentAction::CallModel(_)
+    ));
 
     let action = eng.request_manual_compact(
         &handle,

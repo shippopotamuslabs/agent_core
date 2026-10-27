@@ -4,11 +4,11 @@
 mod support;
 
 use agent_core::engine::resolve_model_turn_text;
-use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
-use support::enclave_test_semantics::parse_enclave_tool_calls;
 use agent_core::tool_stream_gate::{
     first_strong_tool_marker_start, normalize_spaced_dsml, ToolStreamGate,
 };
+use support::enclave_test_semantics::parse_enclave_tool_calls;
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
 const LEAKED_DOUBLE_PIPE: &str = r#"< | DSML | | tool_calls>< | DSML | | invoke name="web_search">< | DSML | | parameter name="query" string="true">tom's guide qwen 3.7 max preview review what gets right wrong 2026</ | DSML | | parameter></ | DSML | | invoke>< | DSML | | invoke name="web_search">< | DSML | | parameter name="query" string="true">qwen3.7 max vs claude opus verbosity coding assistant token output comparison analysis</ | DSML | | parameter></ | DSML | | invoke></ | DSML | | tool_calls>"#;
 

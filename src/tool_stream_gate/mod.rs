@@ -5,13 +5,13 @@ mod markers;
 mod result;
 
 pub use gate_state::{has_tool_marker_at_finish, native_tool_flush_end, ActiveHold, HoldKind};
-pub use markers::{
-    earliest_confirmed_marker_start, earliest_tentative_trigger, first_strong_tool_marker_start,
-    first_stream_holdback_marker_start, first_tool_marker_start, might_be_tool_marker_prefix,
-    normalize_spaced_dsml, resolve_tentative_hold, safe_emit_end, HoldResolution, TentativeKind,
-    TOOL_MARKER_HOLDBACK_CHARS,
-};
 pub(crate) use markers::original_offset_for_normalized_offset;
+pub use markers::{
+    earliest_confirmed_marker_start, earliest_tentative_trigger,
+    first_stream_holdback_marker_start, first_strong_tool_marker_start, first_tool_marker_start,
+    might_be_tool_marker_prefix, normalize_spaced_dsml, resolve_tentative_hold, safe_emit_end,
+    HoldResolution, TentativeKind, TOOL_MARKER_HOLDBACK_CHARS,
+};
 pub use result::{PushResult, StreamGateFinish};
 
 #[derive(Debug, Default)]
@@ -41,11 +41,8 @@ impl ToolStreamGate {
 
     pub fn push(&mut self, chunk: &str) -> PushResult {
         self.buffer.push_str(chunk);
-        let reconciled = gate_state::reconcile_after_push(
-            &self.buffer,
-            self.emitted_length,
-            self.hold,
-        );
+        let reconciled =
+            gate_state::reconcile_after_push(&self.buffer, self.emitted_length, self.hold);
         self.hold = reconciled.hold;
 
         let mut emitted_prefix = String::new();

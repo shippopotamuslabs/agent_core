@@ -90,12 +90,9 @@ impl<'a> PromptBudgetParts<'a> {
 ///
 /// Uses the per-call sidecar byte budget (not multiplied) so short sessions are not
 /// penalized with a triple sidecar reserve before any long-loop state exists.
-pub fn estimate_context_sidecar_tokens(
-    config: &AgentConfig,
-    context_window_tokens: u32,
-) -> u32 {
-    let payload_tokens = (config.long_loop.sidecar_byte_budget_per_call / AVG_BYTES_PER_TOKEN)
-        .max(1) as u32;
+pub fn estimate_context_sidecar_tokens(config: &AgentConfig, context_window_tokens: u32) -> u32 {
+    let payload_tokens =
+        (config.long_loop.sidecar_byte_budget_per_call / AVG_BYTES_PER_TOKEN).max(1) as u32;
     let raw = CONTEXT_SIDECAR_WRAPPER_TOKENS.saturating_add(payload_tokens);
     if context_window_tokens == 0 {
         return raw;
@@ -502,16 +499,9 @@ mod tests {
     fn estimate_llama_provider_adds_chatml_overhead() {
         let session = make_session(&["hello"]);
         let config = AgentConfig::default();
-        let hosted = TokenLedger::estimate(
-            &session,
-            &config,
-            &parts("anthropic", 4096, "[]", "", ""),
-        );
-        let llama = TokenLedger::estimate(
-            &session,
-            &config,
-            &parts("LLAMA", 4096, "[]", "", ""),
-        );
+        let hosted =
+            TokenLedger::estimate(&session, &config, &parts("anthropic", 4096, "[]", "", ""));
+        let llama = TokenLedger::estimate(&session, &config, &parts("LLAMA", 4096, "[]", "", ""));
         assert!(llama.total_tokens > hosted.total_tokens);
     }
 
@@ -531,11 +521,7 @@ mod tests {
     fn estimate_usable_prompt_matches_hard_ceiling_without_double_subtracting_tools() {
         let session = make_session(&[]);
         let config = AgentConfig::default();
-        let p = TokenLedger::estimate(
-            &session,
-            &config,
-            &parts("anthropic", 10_000, "[]", "", ""),
-        );
+        let p = TokenLedger::estimate(&session, &config, &parts("anthropic", 10_000, "[]", "", ""));
         let expected = effective_hard_prompt_ceiling_tokens(&config, 10_000);
         assert_eq!(p.usable_prompt_tokens, expected);
     }
@@ -576,11 +562,7 @@ mod tests {
     fn estimate_zero_context_window_ratio_is_zero() {
         let session = make_session(&[]);
         let config = AgentConfig::default();
-        let p = TokenLedger::estimate(
-            &session,
-            &config,
-            &parts("anthropic", 0, "[]", "", ""),
-        );
+        let p = TokenLedger::estimate(&session, &config, &parts("anthropic", 0, "[]", "", ""));
         assert_eq!(p.ratio, 0.0);
     }
 
@@ -589,11 +571,8 @@ mod tests {
         let config = AgentConfig::for_policy_tier(ContextPolicyTier::FixedKv);
         let system = "word ".repeat(2_500);
         let session = make_session(&["short user question"]);
-        let pressure = TokenLedger::estimate(
-            &session,
-            &config,
-            &parts("LLAMA", 4096, "[]", &system, ""),
-        );
+        let pressure =
+            TokenLedger::estimate(&session, &config, &parts("LLAMA", 4096, "[]", &system, ""));
         assert!(exceeds_hard_prompt_ceiling(&pressure));
     }
 

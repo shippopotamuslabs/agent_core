@@ -2,15 +2,13 @@
 
 use std::sync::Arc;
 
+use agent_core::action::AgentAction;
 use agent_core::compact::fifo::FifoCompactionTier;
 use agent_core::compact::history_snapshot::snapshot_history_range;
-use agent_core::compact::tool_spill::{
-    spill_tool_result_if_needed, DEFAULT_TOOL_OUTPUT_TTL_TURNS,
-};
+use agent_core::compact::tool_spill::{spill_tool_result_if_needed, DEFAULT_TOOL_OUTPUT_TTL_TURNS};
 use agent_core::compact::{
     CompactionContext, CompactionOutcome, CompactionTier as CompactionTierTrait,
 };
-use agent_core::action::AgentAction;
 use agent_core::context_store::{is_browsable_context_kind, ContextReferenceKind, ContextStore};
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, CompactionTrigger};

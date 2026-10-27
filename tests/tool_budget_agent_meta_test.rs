@@ -3,12 +3,12 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
-use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use support::enclave_test_agent_config::enclave_test_agent_config;
+use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
@@ -134,15 +134,11 @@ fn parse_budget_prose(content: &str) -> ParsedBudgetProse {
         .strip_prefix("<system_context>\n")
         .and_then(|s| s.strip_suffix("\n</system_context>"))
         .unwrap_or_else(|| panic!("expected budget prose XML, got {content}"));
-    let rest = inner
-        .strip_prefix("Tool budget: ")
-        .expect("budget prefix");
+    let rest = inner.strip_prefix("Tool budget: ").expect("budget prefix");
     let (used_limit, rest) = rest.split_once(" used ").expect("used clause");
     let (used_str, limit_str) = used_limit.split_once('/').expect("used/limit");
     let open = rest.strip_prefix('(').expect("remaining open paren");
-    let (remaining_str, status) = open
-        .split_once(" remaining). ")
-        .expect("remaining clause");
+    let (remaining_str, status) = open.split_once(" remaining). ").expect("remaining clause");
     let (allow_tool_call, reason) = if status == "Tools enabled." {
         (true, None)
     } else if let Some(reason) = status
@@ -892,10 +888,7 @@ fn count_agent_literal_matches(paths: &[PathBuf]) -> usize {
             } else if path.extension().is_some_and(|ext| ext == "kt") {
                 let content = fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("MD-02 read file {}: {e}", path.display()));
-                if content
-                    .lines()
-                    .any(kotlin_line_references_agent_json_key)
-                {
+                if content.lines().any(kotlin_line_references_agent_json_key) {
                     *matches += 1;
                 }
             }

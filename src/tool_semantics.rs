@@ -68,7 +68,10 @@ impl ToolSemanticsConfig {
         let mut names: HashMap<String, String> = HashMap::new();
         for tool in &self.catalog.tools {
             let normalized = normalize_tool_name(&tool.name);
-            if names.insert(normalized.clone(), tool.name.clone()).is_some() {
+            if names
+                .insert(normalized.clone(), tool.name.clone())
+                .is_some()
+            {
                 return Err(ToolSemanticsError::DuplicateToolName {
                     normalized_name: normalized,
                 });
@@ -259,8 +262,7 @@ mod merge_catalog_tests {
     #[test]
     fn legacy_kotlin_catalog_shape_fails_merge() {
         let mut semantics = ToolSemanticsConfig::agnostic();
-        let legacy =
-            r#"[{"name":"web_search","description":"x","disclosureMode":"PRELOADED"}]"#;
+        let legacy = r#"[{"name":"web_search","description":"x","disclosureMode":"PRELOADED"}]"#;
         assert!(semantics.merge_catalog_json(legacy).is_err());
     }
 
@@ -276,10 +278,9 @@ mod merge_catalog_tests {
 
 #[cfg(test)]
 pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
-    let mut semantics: ToolSemanticsConfig = serde_json::from_str(include_str!(
-        "../tests/support/enclave_tool_semantics.json"
-    ))
-    .expect("enclave_tool_semantics.json");
+    let mut semantics: ToolSemanticsConfig =
+        serde_json::from_str(include_str!("../tests/support/enclave_tool_semantics.json"))
+            .expect("enclave_tool_semantics.json");
     let raw = include_str!("../resources/tool_catalog.json");
     #[derive(Deserialize)]
     struct CatalogFile {

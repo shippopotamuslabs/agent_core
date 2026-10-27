@@ -78,9 +78,14 @@ impl CompactionTier for MicroCompactionTier {
             {
                 continue;
             }
-            if config.tool_semantics.artifact.as_ref().is_some_and(|artifact| {
-                spec.name == artifact.start_tool_name || spec.name == artifact.append_tool_name
-            }) {
+            if config
+                .tool_semantics
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| {
+                    spec.name == artifact.start_tool_name || spec.name == artifact.append_tool_name
+                })
+            {
                 continue;
             }
             per_tool.entry(spec.name.clone()).or_default().push(idx);

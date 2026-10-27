@@ -84,8 +84,7 @@ pub fn build_compaction_plan(
             if fifo_allowed {
                 ordered.push(CompactionTier::Fifo);
             }
-            if history_rewrite_allowed
-                && text_truncate_allowed(policy.tier, context_window_tokens)
+            if history_rewrite_allowed && text_truncate_allowed(policy.tier, context_window_tokens)
             {
                 ordered.push(CompactionTier::TextTruncate);
             }
@@ -97,8 +96,7 @@ pub fn build_compaction_plan(
             } else if history_rewrite_allowed {
                 ordered.push(CompactionTier::Fifo);
             }
-            if history_rewrite_allowed
-                && text_truncate_allowed(policy.tier, context_window_tokens)
+            if history_rewrite_allowed && text_truncate_allowed(policy.tier, context_window_tokens)
             {
                 ordered.push(CompactionTier::TextTruncate);
             }
@@ -122,6 +120,8 @@ pub fn build_compaction_plan(
 fn text_truncate_allowed(tier: ContextPolicyTier, context_window_tokens: u32) -> bool {
     matches!(
         tier,
-        ContextPolicyTier::FixedKv | ContextPolicyTier::SmallContext | ContextPolicyTier::LocalMutable
+        ContextPolicyTier::FixedKv
+            | ContextPolicyTier::SmallContext
+            | ContextPolicyTier::LocalMutable
     ) || context_window_tokens < 8_000
 }

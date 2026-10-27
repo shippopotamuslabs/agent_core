@@ -74,7 +74,10 @@ fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
-fn merge_active_tool_names(active_tool_names: &mut Vec<String>, names: impl IntoIterator<Item = String>) {
+fn merge_active_tool_names(
+    active_tool_names: &mut Vec<String>,
+    names: impl IntoIterator<Item = String>,
+) {
     for name in names {
         if !active_tool_names.iter().any(|existing| existing == &name) {
             active_tool_names.push(name);
@@ -591,9 +594,7 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             }
             let semantics = g.config.tool_semantics.clone();
             let (outcome, evs) = match ToolCatalog::from_semantics(&semantics) {
-                Ok(catalog) => {
-                    ToolRepairPipeline::repair_with_semantics(raw, &catalog, &semantics)
-                }
+                Ok(catalog) => ToolRepairPipeline::repair_with_semantics(raw, &catalog, &semantics),
                 Err(_) => (
                     RepairOutcome::Reject {
                         error_json_for_model: serde_json::json!({
@@ -778,7 +779,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         }
 
         if report.error_class == crate::model_api_retry::ModelApiErrorClass::Permanent {
-            let attempts = g.guardrails.consecutive_model_api_failures.saturating_add(1);
+            let attempts = g
+                .guardrails
+                .consecutive_model_api_failures
+                .saturating_add(1);
             g.set_terminal(AgentAction::Failed(AgentError::ModelApiUnavailable {
                 message: report.message.clone(),
                 attempts,
@@ -850,7 +854,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
         for res in &results {
-            merge_active_tool_names(&mut g.active_tool_names, res.activated_tool_names.iter().cloned());
+            merge_active_tool_names(
+                &mut g.active_tool_names,
+                res.activated_tool_names.iter().cloned(),
+            );
         }
 
         // Pair results to calls by call_id; fall back to submission order for
@@ -861,10 +868,10 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
         let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> =
             HashMap::with_capacity(calls.len());
         for call in &calls {
-            if let Some(slot) = remaining.iter_mut().find(|slot| {
-                slot.as_ref()
-                    .is_some_and(|res| res.call_id == call.call_id)
-            }) {
+            if let Some(slot) = remaining
+                .iter_mut()
+                .find(|slot| slot.as_ref().is_some_and(|res| res.call_id == call.call_id))
+            {
                 let res = slot.take().expect("matched result");
                 executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
             }
@@ -923,8 +930,9 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             let Some((call, mut res)) = executed_by_call_id.remove(&call_id) else {
                 continue;
             };
-            let spill_tokens_before =
-                g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
+            let spill_tokens_before = g
+                .estimate_pressure(CompactionTrigger::PostToolResult)
+                .total_tokens;
             let policy = result_policy_for(&g.config.tool_semantics, &call.name);
             let spill_stored_copy_only = policy
                 .map(|policy| policy.spill_stored_copy_only)
@@ -992,15 +1000,12 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 g.state_ledger.observe_tool_result(&res);
             }
             if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(
-                    &mut g.active_tool_names,
-                    &mut res,
-                    reference,
-                );
+                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
             }
             if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after =
-                    g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
+                let spill_tokens_after = g
+                    .estimate_pressure(CompactionTrigger::PostToolResult)
+                    .total_tokens;
                 g.emit(AgentEvent::CompactionApplied(CompactionEvent {
                     tier: CompactionTier::ToolSpill,
                     tokens_before: spill_tokens_before,
@@ -1016,8 +1021,9 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
         }
         for (_, (call, mut res)) in executed_by_call_id {
-            let spill_tokens_before =
-                g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
+            let spill_tokens_before = g
+                .estimate_pressure(CompactionTrigger::PostToolResult)
+                .total_tokens;
             let threshold =
                 effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
             let turn_index = g.turn_index;
@@ -1079,15 +1085,12 @@ impl<T: AgentTransport, E: AgentToolExecutor, S: AgentSummarizer> AgentEngine<T,
                 g.state_ledger.observe_tool_result(&res);
             }
             if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(
-                    &mut g.active_tool_names,
-                    &mut res,
-                    reference,
-                );
+                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
             }
             if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after =
-                    g.estimate_pressure(CompactionTrigger::PostToolResult).total_tokens;
+                let spill_tokens_after = g
+                    .estimate_pressure(CompactionTrigger::PostToolResult)
+                    .total_tokens;
                 g.emit(AgentEvent::CompactionApplied(CompactionEvent {
                     tier: CompactionTier::ToolSpill,
                     tokens_before: spill_tokens_before,
@@ -1491,7 +1494,13 @@ impl InnerSession {
     }
 
     fn persist_artifact_state_if_present(&mut self) {
-        let Some(squash) = self.config.tool_semantics.compaction.artifact_squash.as_ref() else {
+        let Some(squash) = self
+            .config
+            .tool_semantics
+            .compaction
+            .artifact_squash
+            .as_ref()
+        else {
             return;
         };
         let Some(anchor) = extract_artifact_anchor(&self.session.messages, squash) else {
