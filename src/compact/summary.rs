@@ -91,20 +91,17 @@ fn messages_to_summarize(
     let mut retention_start = retention_start_index(messages, retention_window_tokens);
     let (mut picked, picked_indices) = collect_candidates(messages, 0..last_u, retention_start);
     if retention_window_tokens > 0
-        && picked_indices
-            .last()
-            .is_some_and(|last_picked| *last_picked + 1 < last_u)
+        && (picked.is_empty()
+            || picked_indices
+                .last()
+                .is_some_and(|last_picked| *last_picked + 1 < last_u))
     {
-        // Gap case: the window carved a gap before the last user turn.
-        // Retry window-disabled (was: recursive call with window 0). The
-        // retry's indices are unread: the gap check runs once, up front.
-        retention_start = retention_start_index(messages, 0);
-        (picked, _) = collect_candidates(messages, 0..last_u, retention_start);
-    } else if picked.is_empty() && retention_window_tokens > 0 {
-        // Empty-pick case: nothing survived the window. Retry
-        // window-disabled (was: recursive call with window 0). The triggers
-        // are mutually exclusive (a gap needs a pick), so at most one retry
-        // fires: configured window -> window 0.
+        // Window-0 retry (was: recursive call with window 0). Two triggers,
+        // one retry path: the window carved a gap before the last user turn,
+        // or nothing survived the window at all. They are mutually exclusive
+        // (a gap needs a pick), so at most one retry fires: configured
+        // window -> window 0. The retry's indices are unread: the gap check
+        // runs once, up front.
         retention_start = retention_start_index(messages, 0);
         (picked, _) = collect_candidates(messages, 0..last_u, retention_start);
     }
