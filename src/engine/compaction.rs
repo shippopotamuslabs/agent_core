@@ -7,24 +7,22 @@
 //! — no `&mut InnerSession`, no Mutex locking, no phase writes (phase effects
 //! are returned, never applied).
 
-use crate::compact::history_snapshot::snapshot_history_range;
-use crate::compact::tool_spill::spill_tool_messages_in_session;
 use super::is_destructive_compaction_tier;
 use super::state::EnginePhase;
 use crate::action::AgentAction;
 use crate::budget::exceeds_hard_prompt_ceiling;
+use crate::compact::history_snapshot::snapshot_history_range;
+use crate::compact::tool_spill::spill_tool_messages_in_session;
 use crate::compact::{CompactionContext, CompactionOutcome};
 use crate::context_store::ContextStore;
-use crate::events::{
-    AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger,
-};
-use crate::session::{AgentConfig, Pressure, SessionCapabilities};
-use crate::transcript_revision::record_destructive_compaction_boundary;
+use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 use crate::manual_compact::ManualCompactRequest;
 use crate::message::AgentMessage;
 use crate::session::AgentSession;
+use crate::session::{AgentConfig, Pressure, SessionCapabilities};
 use crate::state_ledger::StateLedger;
 use crate::tool_semantics::ArtifactSquashSemantics;
+use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::SummaryRequest;
 
 /// Inputs for the sync spill/snapshot block.
@@ -301,4 +299,3 @@ pub(super) fn decide_pipeline_outcome(
         CompactionOutcome::Failed(err) => PipelineDecision::ReturnErr(err),
     }
 }
-
