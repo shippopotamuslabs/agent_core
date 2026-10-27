@@ -91,6 +91,15 @@ pub fn spill_tool_result_if_needed(
     Some(inserted)
 }
 
+/// Replace a message's content with the spill envelope for `reference`
+/// and set its `spilled` flag as one operation, so an envelope can never
+/// exist in a session without the flag the exemption checks (ENC-293:
+/// the flag is authoritative, content is never re-sniffed).
+fn apply_spill_to_message(message: &mut AgentMessage, reference: &ContextReference) {
+    message.content = spill_envelope(reference);
+    message.metadata.mark_spilled();
+}
+
 fn tool_message_reference_id(message: &AgentMessage) -> String {
     let call_id = message.metadata.call_id().unwrap_or(message.id.as_str());
     tool_output_reference_id(call_id)
@@ -152,8 +161,7 @@ pub fn spill_tool_messages_in_session(
             expires_after_turn: Some(turn_index + DEFAULT_TOOL_OUTPUT_TTL_TURNS),
         };
         let inserted = store.insert_entry(entry);
-        message.content = spill_envelope(&inserted);
-        message.metadata.mark_spilled();
+        apply_spill_to_message(message, &inserted);
         changed = true;
     }
 

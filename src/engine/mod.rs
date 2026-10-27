@@ -963,11 +963,7 @@ pub(super) fn session_has_append_context(
         return false;
     }
     messages.iter().any(|message| {
-        message
-            .metadata
-            .raw_tool_calls()
-            .iter()
-            .any(|call| call.name == squash.append_tool_name)
+        crate::compact::artifact_squash::metadata_has_tool(message, &squash.append_tool_name)
     })
 }
 
