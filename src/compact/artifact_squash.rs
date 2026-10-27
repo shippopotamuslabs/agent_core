@@ -50,10 +50,6 @@ fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
         .any(|call| call.name == tool_name)
 }
 
-fn is_semantic_success_payload(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
-    semantic_success_total_blocks(content, semantics).is_some()
-}
-
 /// ENC-288: single ingress parse of a result payload; typed accessors only.
 /// Returns the total-blocks value (`0` when the field is present but not an
 /// integer, matching the previous `unwrap_or(0)` behavior).
@@ -106,7 +102,7 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
             || metadata_has_tool(msg, &semantics.append_tool_name);
     }
     if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
-        return is_semantic_success_payload(&msg.content, semantics);
+        return semantic_success_total_blocks(&msg.content, semantics).is_some();
     }
     false
 }
