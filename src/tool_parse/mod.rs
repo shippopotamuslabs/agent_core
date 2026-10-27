@@ -18,7 +18,7 @@ use crate::tool_stream_gate::normalize_spaced_dsml;
 use crate::turn_io::RawToolCall;
 pub use envelope::{EnvelopeError, EnvelopeFormat, ExtractedEnvelope};
 pub use json_repair::{repair_json, JsonRepairError};
-use regex::Regex;
+use regex::{Captures, Match, Regex};
 pub use result::{ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField};
 pub use schema_coerce::coerce_to_schema;
 use serde_json::Value;
@@ -442,96 +442,193 @@ fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     )
 }
 
-fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-    let block_open = Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
-    let block_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap();
-    let invoke_open =
-        Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*invoke\s+name\s*=\s*"([^"]+)"\s*>"#).unwrap();
-    let invoke_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*invoke\s*>"#).unwrap();
-    let parameter_open =
-        Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*parameter\s+name\s*=\s*"([^"]+)"(?:\s+string\s*=\s*"([^"]*)")?\s*>"#)
-            .unwrap();
-    let parameter_close = Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*parameter\s*>"#).unwrap();
+/// Compiled matchers for the DSML envelope shape, built once per
+/// [`extract_dsml`] call and shared by the block/invoke parsers below.
+struct DsmlPatterns {
+    block_open: Regex,
+    block_close: Regex,
+    invoke_open: Regex,
+    invoke_close: Regex,
+    parameter_open: Regex,
+    parameter_close: Regex,
+}
 
-    let starts: Vec<_> = block_open.find_iter(raw).collect();
+impl DsmlPatterns {
+    fn compile() -> DsmlPatterns {
+        DsmlPatterns {
+            block_open: Regex::new(r#"(?is)<\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap(),
+            block_close: Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*tool_calls\s*>"#).unwrap(),
+            invoke_open: Regex::new(
+                r#"(?is)<\s*\|*\s*DSML\s*\|*\s*invoke\s+name\s*=\s*"([^"]+)"\s*>"#,
+            )
+            .unwrap(),
+            invoke_close: Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*invoke\s*>"#).unwrap(),
+            parameter_open: Regex::new(
+                r#"(?is)<\s*\|*\s*DSML\s*\|*\s*parameter\s+name\s*=\s*"([^"]+)"(?:\s+string\s*=\s*"([^"]*)")?\s*>"#,
+            )
+            .unwrap(),
+            parameter_close: Regex::new(r#"(?is)</\s*\|*\s*DSML\s*\|*\s*parameter\s*>"#).unwrap(),
+        }
+    }
+}
+
+fn extract_dsml(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let patterns = DsmlPatterns::compile();
+    let starts: Vec<_> = patterns.block_open.find_iter(raw).collect();
     if starts.is_empty() {
         return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML block"));
     }
-
     let mut envelopes = Vec::new();
-    for block_start in starts {
-        let block_end = block_close
-            .find_at(raw, block_start.end())
-            .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML block"))?;
-        let block = &raw[block_start.end()..block_end.start()];
-        let mut search_at = 0usize;
-        let mut found_invoke = false;
-        while let Some(invoke) = invoke_open.captures(&block[search_at..]) {
-            found_invoke = true;
-            let full = invoke.get(0).unwrap();
-            let invoke_start = search_at + full.start();
-            let invoke_content_start = search_at + full.end();
-            let close = invoke_close
-                .find_at(block, invoke_content_start)
-                .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML invoke"))?;
-            let body = &block[invoke_content_start..close.start()];
-            let tool_name = invoke.get(1).unwrap().as_str().trim().to_string();
-            let mut args = serde_json::Map::new();
-            let mut seen = HashSet::new();
-            let mut parameter_search_at = 0usize;
-            let mut found_parameter = false;
-            while let Some(parameter) = parameter_open.captures(&body[parameter_search_at..]) {
-                found_parameter = true;
-                let p_full = parameter.get(0).unwrap();
-                let p_start = parameter_search_at + p_full.start();
-                let p_body_start = parameter_search_at + p_full.end();
-                let p_close = parameter_close.find_at(body, p_body_start).ok_or_else(|| {
-                    malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter")
-                })?;
-                if invoke_close.is_match(&body[p_body_start..p_close.start()]) {
-                    return Err(malformed(
-                        Some(EnvelopeFormat::Dsml),
-                        "unclosed DSML parameter",
-                    ));
-                }
-                let param_name = parameter.get(1).unwrap().as_str().trim().to_string();
-                if !seen.insert(param_name.clone()) {
-                    envelopes.push(failure_envelope(
-                        tool_name.clone(),
-                        format!("__duplicate__:{param_name}"),
-                        block_start.start(),
-                        block_end.end(),
-                        raw,
-                    ));
-                    parameter_search_at = p_close.end();
-                    continue;
-                }
-                let body_raw = body[p_body_start..p_close.start()].trim();
-                let is_json = parameter.get(2).is_some_and(|m| m.as_str() == "false");
-                args.insert(param_name, dsml_parameter_value(body_raw, is_json));
-                parameter_search_at = p_close.end().max(p_start + 1);
-            }
-            if !found_parameter {
-                return Err(malformed(
-                    Some(EnvelopeFormat::Dsml),
-                    "missing DSML parameter",
-                ));
-            }
-            envelopes.push(ExtractedEnvelope {
-                tool_name,
-                arguments_raw: Value::Object(args).to_string(),
-                visible_prefix: raw[..block_start.start()].to_string(),
-                visible_suffix: raw[block_end.end()..].to_string(),
-                format: EnvelopeFormat::Dsml,
-                repair_hints: Vec::new(),
-            });
-            search_at = close.end().max(invoke_start + 1);
-        }
-        if !found_invoke {
-            return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML invoke"));
-        }
+    for block_start in &starts {
+        envelopes.extend(parse_dsml_block(raw, &patterns, block_start)?);
     }
     Ok(envelopes)
+}
+
+/// Scan one `<tool_calls>` block: per-invoke parse, then collect.
+fn parse_dsml_block(
+    raw: &str,
+    patterns: &DsmlPatterns,
+    block_start: &Match,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let block_end = patterns
+        .block_close
+        .find_at(raw, block_start.end())
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML block"))?;
+    let block = &raw[block_start.end()..block_end.start()];
+    let mut envelopes = Vec::new();
+    let mut search_at = 0usize;
+    let mut found_invoke = false;
+    while let Some(invoke) = patterns.invoke_open.captures(&block[search_at..]) {
+        found_invoke = true;
+        let (parsed, resume_at) = parse_dsml_invoke(
+            raw,
+            block,
+            patterns,
+            &invoke,
+            search_at,
+            block_start.start(),
+            block_end.end(),
+        )?;
+        envelopes.extend(parsed);
+        search_at = resume_at;
+    }
+    if !found_invoke {
+        return Err(malformed(Some(EnvelopeFormat::Dsml), "missing DSML invoke"));
+    }
+    Ok(envelopes)
+}
+
+/// Parse one `<invoke>` element into its envelopes: each duplicate parameter
+/// yields a soft-failure envelope (parsing continues, first value wins),
+/// followed by the invoke's success envelope. Returns the invoke's envelopes
+/// plus the block offset where scanning for the next invoke resumes.
+fn parse_dsml_invoke(
+    raw: &str,
+    block: &str,
+    patterns: &DsmlPatterns,
+    invoke: &Captures<'_>,
+    search_at: usize,
+    block_start: usize,
+    block_end: usize,
+) -> Result<(Vec<ExtractedEnvelope>, usize), EnvelopeError> {
+    let full = invoke.get(0).unwrap();
+    let invoke_start = search_at + full.start();
+    let invoke_content_start = search_at + full.end();
+    let close = patterns
+        .invoke_close
+        .find_at(block, invoke_content_start)
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML invoke"))?;
+    let body = &block[invoke_content_start..close.start()];
+    let tool_name = invoke.get(1).unwrap().as_str().trim().to_string();
+    let (args, mut envelopes) =
+        collect_dsml_parameters(body, patterns, &tool_name, raw, block_start, block_end)?;
+    envelopes.push(ExtractedEnvelope {
+        tool_name,
+        arguments_raw: Value::Object(args).to_string(),
+        visible_prefix: raw[..block_start].to_string(),
+        visible_suffix: raw[block_end..].to_string(),
+        format: EnvelopeFormat::Dsml,
+        repair_hints: Vec::new(),
+    });
+    Ok((envelopes, close.end().max(invoke_start + 1)))
+}
+
+/// Collect one invoke body's `<parameter>` elements into an arguments map.
+/// Each duplicate parameter yields a soft-failure envelope in the returned
+/// vec (parsing continues, first value wins); structural problems are `Err`.
+fn collect_dsml_parameters(
+    body: &str,
+    patterns: &DsmlPatterns,
+    tool_name: &str,
+    raw: &str,
+    block_start: usize,
+    block_end: usize,
+) -> Result<(serde_json::Map<String, Value>, Vec<ExtractedEnvelope>), EnvelopeError> {
+    let mut args = serde_json::Map::new();
+    let mut envelopes = Vec::new();
+    let mut seen = HashSet::new();
+    let mut parameter_search_at = 0usize;
+    let mut found_parameter = false;
+    while let Some(parameter) = patterns
+        .parameter_open
+        .captures(&body[parameter_search_at..])
+    {
+        found_parameter = true;
+        let p_full = parameter.get(0).unwrap();
+        let p_start = parameter_search_at + p_full.start();
+        let p_body_start = parameter_search_at + p_full.end();
+        let p_close = patterns
+            .parameter_close
+            .find_at(body, p_body_start)
+            .ok_or_else(|| malformed(Some(EnvelopeFormat::Dsml), "unclosed DSML parameter"))?;
+        if patterns
+            .invoke_close
+            .is_match(&body[p_body_start..p_close.start()])
+        {
+            return Err(malformed(
+                Some(EnvelopeFormat::Dsml),
+                "unclosed DSML parameter",
+            ));
+        }
+        let param_name = parameter.get(1).unwrap().as_str().trim().to_string();
+        if !seen.insert(param_name.clone()) {
+            envelopes.push(failure_envelope(
+                tool_name.to_string(),
+                format!("__duplicate__:{param_name}"),
+                block_start,
+                block_end,
+                raw,
+            ));
+            parameter_search_at = p_close.end();
+            continue;
+        }
+        let body_raw = body[p_body_start..p_close.start()].trim();
+        let is_json = parameter.get(2).is_some_and(|m| m.as_str() == "false");
+        args.insert(param_name, dsml_parameter_value(body_raw, is_json));
+        parameter_search_at = p_close.end().max(p_start + 1);
+    }
+    if !found_parameter {
+        return Err(malformed(
+            Some(EnvelopeFormat::Dsml),
+            "missing DSML parameter",
+        ));
+    }
+    Ok((args, envelopes))
+}
+
+/// Explicit close decision for a `<tool_call>` open tag.
+enum ToolCallClose {
+    /// A closing tag was found; payload spans `open_end..close_start`.
+    Closed {
+        close_start: usize,
+        close_end: usize,
+    },
+    /// No closing tag, but the envelope runs to end of output with
+    /// recoverable content.
+    Truncated,
+    /// No recovery allowed; `detail` is the failure reason.
+    Unrecoverable { detail: &'static str },
 }
 
 fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
@@ -539,45 +636,61 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
     let Some(start) = open.find(raw) else {
         return Ok(Vec::new());
     };
-    let close_start_rel = raw[start.end()..].to_ascii_lowercase().find("</tool_call>");
-    if close_start_rel.is_none() {
-        // No closing tag. Recover only when this is EOS truncation: the open
-        // tag must be the last one in the text (no second <tool_call later).
-        let has_later_open = open.find_at(raw, start.end()).is_some();
-        if has_later_open {
-            return Err(malformed(
-                Some(EnvelopeFormat::ToolCall),
-                "unclosed tool_call",
-            ));
+    match decide_tool_call_close(raw, &open, &start) {
+        ToolCallClose::Closed {
+            close_start,
+            close_end,
+        } => parse_closed_tool_call(raw, start.start(), start.end(), close_start, close_end),
+        ToolCallClose::Truncated => recover_truncated_tool_call(raw, &start),
+        ToolCallClose::Unrecoverable { detail } => {
+            Err(malformed(Some(EnvelopeFormat::ToolCall), detail))
+        }
+    }
+}
+
+/// Decide the fate of a `<tool_call>` open tag, answering in order:
+/// close found? later open? has content? GLM?
+fn decide_tool_call_close(raw: &str, open: &Regex, start: &Match) -> ToolCallClose {
+    let Some(close_start_rel) = raw[start.end()..].to_ascii_lowercase().find("</tool_call>") else {
+        // No closing tag. Recovery is allowed only for EOS truncation: the
+        // open tag must be the last one in the text and the payload must be
+        // non-empty. GLM form requires an explicit close and never recovers.
+        if open.find_at(raw, start.end()).is_some() {
+            return ToolCallClose::Unrecoverable {
+                detail: "unclosed tool_call",
+            };
         }
         let payload = raw[start.end()..].trim();
+        if payload.is_empty() {
+            return ToolCallClose::Unrecoverable {
+                detail: "invalid tool_call payload",
+            };
+        }
         if payload.contains("<arg_key>") {
-            // GLM format requires explicit close; cannot recover truncated GLM.
-            return Err(malformed(
-                Some(EnvelopeFormat::ToolCall),
-                "unclosed tool_call",
-            ));
+            return ToolCallClose::Unrecoverable {
+                detail: "unclosed tool_call",
+            };
         }
-        let value = repair_json(payload)
-            .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
-        let mut repair_hints =
-            vec!["recovered unclosed tool_call envelope truncated at end of output".to_string()];
-        if payload.contains('\'') {
-            repair_hints.push("converted single quotes to double quotes".to_string());
-        }
-        return values_from_payload(
-            value,
-            EnvelopeFormat::ToolCall,
-            raw[..start.start()].to_string(),
-            String::new(),
-            repair_hints,
-        );
+        return ToolCallClose::Truncated;
+    };
+    let close_start = start.end() + close_start_rel;
+    ToolCallClose::Closed {
+        close_start,
+        close_end: close_start + "</tool_call>".len(),
     }
-    let close_start = start.end() + close_start_rel.unwrap();
-    let close_end = close_start + "</tool_call>".len();
-    let payload = raw[start.end()..close_start].trim();
+}
+
+/// Parse a `<tool_call>` envelope with both tags present.
+fn parse_closed_tool_call(
+    raw: &str,
+    open_start: usize,
+    open_end: usize,
+    close_start: usize,
+    close_end: usize,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let payload = raw[open_end..close_start].trim();
     if payload.contains("<arg_key>") {
-        return extract_glm_tool_call(raw, start.start(), close_end, payload);
+        return extract_glm_tool_call(raw, open_start, close_end, payload);
     }
     let value = repair_json(payload)
         .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
@@ -589,8 +702,31 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
     values_from_payload(
         value,
         EnvelopeFormat::ToolCall,
-        raw[..start.start()].to_string(),
+        raw[..open_start].to_string(),
         raw[close_end..].to_string(),
+        repair_hints,
+    )
+}
+
+/// Recover an EOS-truncated `<tool_call>` envelope: the open tag is the last
+/// one in the text and the payload holds non-GLM content.
+fn recover_truncated_tool_call(
+    raw: &str,
+    start: &Match,
+) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+    let payload = raw[start.end()..].trim();
+    let value = repair_json(payload)
+        .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
+    let mut repair_hints =
+        vec!["recovered unclosed tool_call envelope truncated at end of output".to_string()];
+    if payload.contains('\'') {
+        repair_hints.push("converted single quotes to double quotes".to_string());
+    }
+    values_from_payload(
+        value,
+        EnvelopeFormat::ToolCall,
+        raw[..start.start()].to_string(),
+        String::new(),
         repair_hints,
     )
 }
