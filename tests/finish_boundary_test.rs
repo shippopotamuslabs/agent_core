@@ -31,6 +31,7 @@ fn io() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn submit_no_tool_response(
@@ -371,7 +372,8 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             tools_schema_json: "[]".into(),
             system_prompt: "sys".into(),
         },
-    );
+    )
+    .expect("valid ffi io params");
 
     assert!(matches!(
         eng.next_action(&handle),

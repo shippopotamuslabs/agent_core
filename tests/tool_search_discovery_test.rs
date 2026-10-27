@@ -90,7 +90,8 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
             SEARCH_REGISTRY_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     )
 }
 
@@ -192,7 +193,8 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
             SEARCH_REGISTRY_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     )
 }
 

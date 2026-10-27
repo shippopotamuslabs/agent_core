@@ -97,6 +97,7 @@ fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoP
         tools_schema_json.into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn response_with_tool(call_id: &str, name: &str) -> ModelResponse {
@@ -449,7 +450,7 @@ fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
         require_read_before_edit: true,
         ..AgentConfig::default()
     };
-    let catalog_json = r#"["web_search","patch_file","write_file"]"#;
+    let catalog_json = r#"[{"name":"web_search","parameters":{"type":"object"}},{"name":"patch_file","parameters":{"type":"object"}},{"name":"write_file","parameters":{"type":"object"}}]"#;
 
     let request = next_model_request(config, SessionCapabilities::default(), catalog_json);
     let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
@@ -459,17 +460,17 @@ fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool == "web_search"));
+        .any(|tool| tool.get("name").and_then(|n| n.as_str()) == Some("web_search")));
     assert!(!rendered
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool == "patch_file"));
+        .any(|tool| tool.get("name").and_then(|n| n.as_str()) == Some("patch_file")));
     assert!(!rendered
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool == "write_file"));
+        .any(|tool| tool.get("name").and_then(|n| n.as_str()) == Some("write_file")));
 }
 
 #[test]
@@ -559,7 +560,11 @@ fn fcg_016_delegation_tools_are_removed_when_unsupported() {
         ..SessionCapabilities::default()
     };
 
-    let request = next_model_request(AgentConfig::default(), capabilities, r#"["task_delegate"]"#);
+    let request = next_model_request(
+        AgentConfig::default(),
+        capabilities,
+        r#"[{"name":"task_delegate","parameters":{"type":"object"}}]"#,
+    );
     let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
         .expect("rendered_tool_catalog_json must be valid JSON");
 
@@ -567,7 +572,7 @@ fn fcg_016_delegation_tools_are_removed_when_unsupported() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool == "task_delegate"));
+        .any(|tool| tool.get("name").and_then(|n| n.as_str()) == Some("task_delegate")));
 }
 
 #[test]

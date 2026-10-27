@@ -220,13 +220,18 @@ impl From<FfiModelRequest> for ModelRequest {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
             system_prompt: m.system_prompt,
             // FFI inbound edge (a justified remaining parse): the host-side
-            // request string is parsed once here, at the boundary.
+            // request string is parsed once here, at the boundary. Unlike
+            // session construction, this conversion is infallible (`From`):
+            // the string echoes a request the engine itself rendered, so a
+            // contract violation here falls back to an empty active set
+            // rather than failing a conversion that cannot return an error.
             tool_schemas: crate::tool_schema::ToolSchemaSet::parse(
                 &m.tools_schema_json,
                 "[]",
                 "[]",
             )
-            .active,
+            .map(|schemas| schemas.active)
+            .unwrap_or_default(),
             rendered_tool_catalog: Vec::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
@@ -764,9 +769,13 @@ pub struct FfiSessionIoParams {
     pub system_prompt: String,
 }
 
-impl From<FfiSessionIoParams> for crate::engine::SessionIoParams {
-    fn from(p: FfiSessionIoParams) -> Self {
-        // FFI session edge: the single construction-time parse lives in `new`.
+impl TryFrom<FfiSessionIoParams> for crate::engine::SessionIoParams {
+    type Error = AgentError;
+
+    fn try_from(p: FfiSessionIoParams) -> Result<Self, Self::Error> {
+        // FFI session edge: the single construction-time parse lives in
+        // `new`, and its contract errors surface as `AgentError` here so
+        // `create_session` can return them through `AgentException`. The
         // FFI DTO strings themselves are unchanged (ENC-289).
         Self::new(
             p.provider,
@@ -776,6 +785,7 @@ impl From<FfiSessionIoParams> for crate::engine::SessionIoParams {
             p.tools_schema_json,
             p.system_prompt,
         )
+        .map_err(|error| AgentError::Internal(error.to_string()))
     }
 }
 

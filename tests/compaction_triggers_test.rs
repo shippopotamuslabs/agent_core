@@ -30,6 +30,7 @@ fn io_large() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 fn io_small() -> SessionIoParams {
     SessionIoParams::new(
@@ -40,6 +41,7 @@ fn io_small() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 fn user(id: &str, content: &str) -> AgentMessage {
     AgentMessage {

@@ -489,6 +489,7 @@ pub fn default_long_loop_io() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid long-loop io params")
 }
 
 pub fn config_with_long_loop(long_loop: LongLoopPolicy) -> AgentConfig {
