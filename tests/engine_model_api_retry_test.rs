@@ -8,7 +8,7 @@ use support::enclave_test_agent_config::enclave_test_agent_config;
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::model_api_retry::{ModelApiErrorClass, ModelTurnFailureReport};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelRequest, ModelResponse};
@@ -29,7 +29,7 @@ fn user_msg() -> AgentMessage {
         id: "u1".into(),
         role: AgentRole::User,
         content: "write a long doc".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 

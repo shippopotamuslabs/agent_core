@@ -8,7 +8,7 @@ use regex::Regex;
 
 use super::estimate_session_pressure;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
-use crate::message::{AgentMessage, AgentRole};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::ArtifactStateAnchor;
 use crate::tool_semantics::ArtifactSquashSemantics;
@@ -44,17 +44,9 @@ fn build_semantic_summary_line(
 
 fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
     msg.metadata
-        .get("raw_tool_calls")
-        .and_then(|v| v.as_array())
-        .map(|calls| {
-            calls.iter().any(|call| {
-                call.get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|name| name == tool_name)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+        .raw_tool_calls()
+        .iter()
+        .any(|call| call.name == tool_name)
 }
 
 fn is_semantic_success_payload(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
@@ -109,24 +101,17 @@ fn artifact_id_from_assistant_metadata(
     msg: &AgentMessage,
     semantics: &ArtifactSquashSemantics,
 ) -> Option<String> {
-    msg.metadata
-        .get("raw_tool_calls")
-        .and_then(|v| v.as_array())
-        .and_then(|calls| {
-            calls.iter().find_map(|call| {
-                let name = call.get("name").and_then(|v| v.as_str())?;
-                if name != semantics.append_tool_name {
-                    return None;
-                }
-                let args = call.get("arguments_json").and_then(|v| v.as_str())?;
-                let parsed: Value = serde_json::from_str(args).ok()?;
-                parsed
-                    .get(&semantics.id_field)
-                    .and_then(|v| v.as_str())
-                    .filter(|id| !id.is_empty())
-                    .map(ToString::to_string)
-            })
-        })
+    msg.metadata.raw_tool_calls().iter().find_map(|call| {
+        if call.name != semantics.append_tool_name {
+            return None;
+        }
+        let parsed: Value = serde_json::from_str(&call.arguments_json).ok()?;
+        parsed
+            .get(&semantics.id_field)
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string)
+    })
 }
 
 pub fn extract_artifact_anchor(
@@ -261,7 +246,7 @@ fn apply_semantic_artifact_squash(
                 id: format!("artifact-squash-{}", out.len()),
                 role: AgentRole::System,
                 content: summary_text.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             });
             in_append_loop = false;
         }
@@ -272,7 +257,7 @@ fn apply_semantic_artifact_squash(
             id: format!("artifact-squash-tail-{}", out.len()),
             role: AgentRole::System,
             content: summary_text.clone(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         });
     }
 
@@ -294,7 +279,6 @@ fn apply_semantic_artifact_squash(
 mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
-    use serde_json::json;
 
     fn ctx() -> CompactionContext {
         CompactionContext {
@@ -323,51 +307,51 @@ mod tests {
                     id: "m0".into(),
                     role: AgentRole::User,
                     content: "Start a report".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "m1".into(),
                     role: AgentRole::Assistant,
                     content: r#"call:start_artifact{"title":"Report"}"#.into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "m2".into(),
                     role: AgentRole::Tool,
                     content: r#"{"status":"success","artifactId":"123"}"#.into(),
-                    metadata: json!({ "tool_name": "start_artifact" }),
+                    metadata: MessageMeta::new().with_tool_name("start_artifact"),
                 },
                 AgentMessage {
                     id: "m3".into(),
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
                         .into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "m4".into(),
                     role: AgentRole::Tool,
                     content: r#"{"status":"success","totalBlocks":1}"#.into(),
-                    metadata: json!({ "tool_name": "append_blocks" }),
+                    metadata: MessageMeta::new().with_tool_name("append_blocks"),
                 },
                 AgentMessage {
                     id: "m5".into(),
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 2"}]}"#
                         .into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "m6".into(),
                     role: AgentRole::Tool,
                     content: r#"{"status":"success","totalBlocks":2}"#.into(),
-                    metadata: json!({ "tool_name": "append_blocks" }),
+                    metadata: MessageMeta::new().with_tool_name("append_blocks"),
                 },
                 AgentMessage {
                     id: "m7".into(),
                     role: AgentRole::Assistant,
                     content: "Now I will continue...".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
             ],
             serde_json::Value::Null,
@@ -402,13 +386,13 @@ mod tests {
                     id: "a".into(),
                     role: AgentRole::User,
                     content: "Hello".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "b".into(),
                     role: AgentRole::Assistant,
                     content: "Hi".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
             ],
             serde_json::Value::Null,

@@ -11,7 +11,7 @@ use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, Com
 use crate::budget::effective_micro_keep_recent;
 use crate::catalog::ToolCatalog;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
-use crate::message::AgentRole;
+use crate::message::{AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 use crate::tool_semantics::result_policy_for;
 use crate::transcript_revision::replace_message_content;
@@ -26,11 +26,8 @@ impl Default for MicroCompactionTier {
     }
 }
 
-fn tool_name_from_message(meta: &serde_json::Value) -> Option<String> {
-    meta.get("tool_name")
-        .or_else(|| meta.get("name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+fn tool_name_from_message(meta: &MessageMeta) -> Option<String> {
+    meta.tool_name().map(|s| s.to_string())
 }
 
 impl CompactionTier for MicroCompactionTier {
@@ -56,12 +53,7 @@ impl CompactionTier for MicroCompactionTier {
             if msg.role != AgentRole::Tool {
                 continue;
             }
-            if msg
-                .metadata
-                .get("superseded")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+            if msg.metadata.is_superseded() {
                 continue;
             }
             let Some(raw_name) = tool_name_from_message(&msg.metadata) else {
@@ -145,7 +137,6 @@ mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
     use crate::message::AgentMessage;
-    use serde_json::json;
 
     fn ctx(trigger: CompactionTrigger) -> CompactionContext {
         CompactionContext {
@@ -170,7 +161,7 @@ mod tests {
             id: id.into(),
             role: AgentRole::Tool,
             content: content.into(),
-            metadata: json!({ "tool_name": name }),
+            metadata: MessageMeta::new().with_tool_name(name),
         }
     }
 
@@ -208,17 +199,12 @@ mod tests {
                 assert!(s
                     .messages
                     .iter()
-                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
-                assert_eq!(s.messages[0].metadata["superseded"], json!(true));
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.rewrite_of().is_some()));
+                assert!(s.messages[0].metadata.is_superseded());
                 assert!(
                     s.messages
                         .iter()
-                        .filter(|m| {
-                            !m.metadata
-                                .get("superseded")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                        })
+                        .filter(|m| { !m.metadata.is_superseded() })
                         .filter(|m| m.content.contains(PLACEHOLDER))
                         .count()
                         == 1
@@ -308,7 +294,7 @@ mod tests {
                 assert!(s
                     .messages
                     .iter()
-                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.rewrite_of().is_some()));
                 assert!(s.messages.iter().any(|m| m.content == "new"));
             }
             o => panic!("expected Applied, got {o:?}"),

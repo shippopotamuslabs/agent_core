@@ -2,7 +2,7 @@
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::state_ledger::{ArtifactStateAnchor, StateLedger};
 use agent_core::turn_io::SummaryResult;
@@ -12,7 +12,7 @@ fn user_msg(content: &str) -> AgentMessage {
         id: "u-test".into(),
         role: AgentRole::User,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -21,7 +21,7 @@ fn assistant_msg(content: &str) -> AgentMessage {
         id: "a-test".into(),
         role: AgentRole::Assistant,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -59,19 +59,19 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: format!("Objective: preserve semantic continuity. {big}"),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: big,
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "tail".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
         ],
         cfg,
@@ -169,7 +169,7 @@ fn m5_artifact_continuation_cannot_rely_only_on_synthetic_system_text() {
             id: "u0".into(),
             role: AgentRole::User,
             content: "Start artifact art-2".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
         AgentMessage {
             id: "sys-squash".into(),
@@ -177,7 +177,7 @@ fn m5_artifact_continuation_cannot_rely_only_on_synthetic_system_text() {
             content:
                 "Artifact generation in progress. 1 blocks written so far. Last block: `omega`. Continue appending."
                     .into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
     ];
 

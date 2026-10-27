@@ -4,7 +4,7 @@ use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentEvent, CompactionTrigger};
 use agent_core::manual_compact::ManualCompactRequest;
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelResponse, SummaryResult};
 
@@ -13,7 +13,7 @@ fn user_msg(id: &str, body: &str) -> AgentMessage {
         id: id.into(),
         role: AgentRole::User,
         content: body.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -36,7 +36,7 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: "ack".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             user_msg("u1", "tail"),
         ],
@@ -91,19 +91,19 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: big.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: big.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "tail".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
         ],
         cfg,
@@ -227,7 +227,7 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: "ack".repeat(64),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             user_msg("u1", "tail"),
         ],

@@ -137,13 +137,14 @@ pub struct SummaryResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageMeta;
 
     fn make_message(id: &str) -> AgentMessage {
         AgentMessage {
             id: id.into(),
             role: crate::message::AgentRole::User,
             content: "test".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }
     }
 

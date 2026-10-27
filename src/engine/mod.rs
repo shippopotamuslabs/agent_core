@@ -46,7 +46,7 @@ use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
 use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
-use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::request_pipeline::render_runtime_tool_view;
@@ -372,7 +372,7 @@ impl AgentEngine {
                     id: assistant_id,
                     role: AgentRole::Assistant,
                     content: visible_assistant_text.clone(),
-                    metadata: json!({ "envelope_ingest": "failed" }),
+                    metadata: MessageMeta::new().with_extra("envelope_ingest", json!("failed")),
                 });
                 if g.config.enable_state_ledger {
                     if let Some(message) = g.session.messages.last().cloned() {
@@ -383,7 +383,7 @@ impl AgentEngine {
                     id: format!("tool-err-envelope-{assistant_id_clone}"),
                     role: AgentRole::Tool,
                     content: error_json_for_model.clone(),
-                    metadata: json!({ "envelope_parse_failure": true }),
+                    metadata: MessageMeta::new().with_extra("envelope_parse_failure", json!(true)),
                 });
                 let cfg = g.config.clone();
                 g.guardrails.count_tool_executed(1);
@@ -414,7 +414,8 @@ impl AgentEngine {
                         id: assistant_id,
                         role: AgentRole::Assistant,
                         content: user_fallback_text.clone(),
-                        metadata: json!({ "tools_blocked_fallback": true }),
+                        metadata: MessageMeta::new()
+                            .with_extra("tools_blocked_fallback", json!(true)),
                     });
                     if g.config.enable_state_ledger {
                         if let Some(message) = g.session.messages.last().cloned() {
@@ -437,7 +438,8 @@ impl AgentEngine {
                     id: assistant_id,
                     role: AgentRole::Assistant,
                     content: visible_assistant_text.clone(),
-                    metadata: json!({ "envelope_ingest": "tools_blocked" }),
+                    metadata: MessageMeta::new()
+                        .with_extra("envelope_ingest", json!("tools_blocked")),
                 });
                 if g.config.enable_state_ledger {
                     if let Some(message) = g.session.messages.last().cloned() {
@@ -448,7 +450,7 @@ impl AgentEngine {
                     id: format!("tool-nudge-tools-blocked-{assistant_id_clone}"),
                     role: AgentRole::Tool,
                     content: nudge_json_for_model.clone(),
-                    metadata: json!({ "tools_blocked_nudge": true }),
+                    metadata: MessageMeta::new().with_extra("tools_blocked_nudge", json!(true)),
                 });
                 let last_tool_idx = g.session.messages.len().checked_sub(1);
                 inject_tool_budget_after_batch(&mut g, last_tool_idx);
@@ -466,14 +468,10 @@ impl AgentEngine {
                 .filter(|message| message.role == AgentRole::Assistant)
                 .count()
         );
-        let mut metadata = json!({ "raw_tool_calls": [] });
-        if !ingest_metadata.is_null() {
-            if let Some(obj) = metadata.as_object_mut() {
-                if let Some(ingest_obj) = ingest_metadata.as_object() {
-                    for (k, v) in ingest_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
+        let mut metadata = MessageMeta::new();
+        if let Some(ingest_obj) = ingest_metadata.as_object() {
+            for (k, v) in ingest_obj {
+                metadata.set_extra(k.clone(), v.clone());
             }
         }
         if let Some(reasoning_content) = response
@@ -481,12 +479,10 @@ impl AgentEngine {
             .as_deref()
             .filter(|content| !content.is_empty())
         {
-            if let Some(obj) = metadata.as_object_mut() {
-                obj.insert(
-                    "provider_reasoning".to_string(),
-                    json!({ "reasoning_content": reasoning_content }),
-                );
-            }
+            metadata.set_extra(
+                "provider_reasoning",
+                json!({ "reasoning_content": reasoning_content }),
+            );
         }
         g.session.messages.push(AgentMessage {
             id: assistant_id,
@@ -574,7 +570,7 @@ impl AgentEngine {
                         id: format!("tool-err-{call_id}"),
                         role: AgentRole::Tool,
                         content: err,
-                        metadata: json!({"call_id": call_id}),
+                        metadata: MessageMeta::new().with_call_id(call_id),
                     },
                 );
                 rejects += 1;
@@ -629,7 +625,7 @@ impl AgentEngine {
                             id: format!("tool-err-{call_id}"),
                             role: AgentRole::Tool,
                             content: error_json_for_model,
-                            metadata: json!({"call_id": call_id}),
+                            metadata: MessageMeta::new().with_call_id(call_id),
                         },
                     );
                     rejects += 1;
@@ -663,7 +659,7 @@ impl AgentEngine {
                             id: format!("tool-err-{call_id}"),
                             role: AgentRole::Tool,
                             content: err,
-                            metadata: json!({"call_id": call_id}),
+                            metadata: MessageMeta::new().with_call_id(call_id),
                         },
                     );
                     rejects += 1;
@@ -981,7 +977,10 @@ impl AgentEngine {
                 id: format!("tool-{}", res.call_id),
                 role: AgentRole::Tool,
                 content: res.result_json.clone(),
-                metadata: json!({"call_id": res.call_id, "tool_name": call.name, "truncated": res.truncated}),
+                metadata: MessageMeta::new()
+                    .with_call_id(res.call_id.clone())
+                    .with_tool_name(call.name)
+                    .with_extra("truncated", json!(res.truncated)),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
@@ -1066,7 +1065,10 @@ impl AgentEngine {
                 id: format!("tool-{}", res.call_id),
                 role: AgentRole::Tool,
                 content: res.result_json.clone(),
-                metadata: json!({"call_id": res.call_id, "tool_name": call.name, "truncated": res.truncated}),
+                metadata: MessageMeta::new()
+                    .with_call_id(res.call_id.clone())
+                    .with_tool_name(call.name)
+                    .with_extra("truncated", json!(res.truncated)),
             });
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
             if g.config.enable_state_ledger {
@@ -1411,17 +1413,9 @@ fn session_has_append_context(
             || (!squash.append_tool_name.is_empty()
                 && message
                     .metadata
-                    .get("raw_tool_calls")
-                    .and_then(|v| v.as_array())
-                    .map(|calls| {
-                        calls.iter().any(|call| {
-                            call.get("name")
-                                .and_then(|v| v.as_str())
-                                .map(|name| name == squash.append_tool_name)
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false))
+                    .raw_tool_calls()
+                    .iter()
+                    .any(|call| call.name == squash.append_tool_name))
     })
 }
 
@@ -1981,7 +1975,7 @@ impl InnerSession {
             id: format!("pending-work-reminder-{}", self.turn_index),
             role: AgentRole::User,
             content: format!("Pending work remains: {}", pending_items.join(", ")),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         };
         self.session.messages.push(injected_message.clone());
         if self.config.enable_state_ledger {
@@ -2006,12 +2000,7 @@ impl InnerSession {
             .session
             .messages
             .iter()
-            .filter(|m| {
-                !m.metadata
-                    .get("superseded")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
+            .filter(|m| !m.metadata.is_superseded())
             .cloned()
             .collect();
         // State-ledger anchor intentionally NOT injected at position 0 of session_messages.
@@ -2251,7 +2240,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig::default(),
             SessionCapabilities {
@@ -2289,7 +2278,7 @@ mod tests {
         assert_eq!(
             assistant
                 .metadata
-                .get("provider_reasoning")
+                .extra("provider_reasoning")
                 .and_then(|value| value.get("reasoning_content"))
                 .and_then(|value| value.as_str()),
             Some("need tool output first"),
@@ -2304,7 +2293,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig::default(),
             SessionCapabilities {
@@ -2371,7 +2360,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig {
                 tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
@@ -2443,7 +2432,7 @@ mod tests {
             c1_msg.content
         );
         assert_eq!(
-            c1_msg.metadata.get("tool_name").and_then(|v| v.as_str()),
+            c1_msg.metadata.tool_name(),
             Some("web_search"),
             "c1 tool_name metadata paired with wrong call"
         );
@@ -2459,7 +2448,7 @@ mod tests {
             c2_msg.content
         );
         assert_eq!(
-            c2_msg.metadata.get("tool_name").and_then(|v| v.as_str()),
+            c2_msg.metadata.tool_name(),
             Some("web_extract"),
             "c2 tool_name metadata paired with wrong call"
         );
@@ -2473,7 +2462,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig::default(),
             SessionCapabilities {
@@ -2542,7 +2531,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig {
                 tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
@@ -2592,7 +2581,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             cfg,
             SessionCapabilities {
@@ -2671,19 +2660,19 @@ mod tests {
                     id: "u0".into(),
                     role: AgentRole::User,
                     content: big_pair.clone(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "a0".into(),
                     role: AgentRole::Assistant,
                     content: big_pair,
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "u1".into(),
                     role: AgentRole::User,
                     content: "tail".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
             ],
             AgentConfig::default(),
@@ -2710,19 +2699,19 @@ mod tests {
                     id: "u0".into(),
                     role: AgentRole::User,
                     content: big_pair.clone(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "a0".into(),
                     role: AgentRole::Assistant,
                     content: big_pair,
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
                 AgentMessage {
                     id: "u1".into(),
                     role: AgentRole::User,
                     content: "tail".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 },
             ],
             AgentConfig::default(),
@@ -2750,7 +2739,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig {
                 tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
@@ -2839,7 +2828,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig {
                 tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
@@ -2941,7 +2930,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig {
                 tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
@@ -3066,7 +3055,7 @@ mod tests {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "hi".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             AgentConfig::default(),
             SessionCapabilities {
@@ -3100,7 +3089,7 @@ mod tests {
         }
     }
 
-    fn frg14_msg(content: &str, metadata: serde_json::Value) -> AgentMessage {
+    fn frg14_msg(content: &str, metadata: MessageMeta) -> AgentMessage {
         AgentMessage {
             id: "m".into(),
             role: AgentRole::Assistant,
@@ -3114,7 +3103,7 @@ mod tests {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![frg14_msg(
             r#"call:write_doc{"docId":"1","chunks":[]}"#,
-            serde_json::Value::Null,
+            MessageMeta::new(),
         )];
         assert!(session_has_append_context(&messages, Some(&squash)));
     }
@@ -3124,7 +3113,11 @@ mod tests {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![frg14_msg(
             "plain assistant text",
-            serde_json::json!({ "raw_tool_calls": [{ "name": "write_doc" }] }),
+            MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                id: None,
+                name: "write_doc".into(),
+                arguments_json: "{}".into(),
+            }]),
         )];
         assert!(session_has_append_context(&messages, Some(&squash)));
     }
@@ -3134,7 +3127,7 @@ mod tests {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![frg14_msg(
             r#"{"status":"success","chunkCount":2}"#,
-            serde_json::Value::Null,
+            MessageMeta::new(),
         )];
         assert!(session_has_append_context(&messages, Some(&squash)));
     }
@@ -3143,8 +3136,8 @@ mod tests {
     fn frg14_append_context_custom_ignores_legacy_literals() {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![
-            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
-            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+            frg14_msg("call:append_blocks{}", MessageMeta::new()),
+            frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new()),
         ];
         assert!(!session_has_append_context(&messages, Some(&squash)));
     }
@@ -3152,11 +3145,15 @@ mod tests {
     #[test]
     fn frg14_append_context_none_never_engages() {
         let messages = vec![
-            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
-            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+            frg14_msg("call:append_blocks{}", MessageMeta::new()),
+            frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new()),
             frg14_msg(
                 "plain text",
-                serde_json::json!({ "raw_tool_calls": [{ "name": "append_blocks" }] }),
+                MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                    id: None,
+                    name: "append_blocks".into(),
+                    arguments_json: "{}".into(),
+                }]),
             ),
         ];
         assert!(!session_has_append_context(&messages, None));
@@ -3166,11 +3163,15 @@ mod tests {
     fn frg14_append_context_empty_fields_never_engage() {
         let squash = frg14_squash("", "");
         let messages = vec![
-            frg14_msg("call:append_blocks{}", serde_json::Value::Null),
-            frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null),
+            frg14_msg("call:append_blocks{}", MessageMeta::new()),
+            frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new()),
             frg14_msg(
                 "plain text",
-                serde_json::json!({ "raw_tool_calls": [{ "name": "append_blocks" }] }),
+                MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                    id: None,
+                    name: "append_blocks".into(),
+                    arguments_json: "{}".into(),
+                }]),
             ),
         ];
         assert!(!session_has_append_context(&messages, Some(&squash)));
@@ -3179,9 +3180,9 @@ mod tests {
     #[test]
     fn frg14_append_context_enclave_matches_legacy_literals() {
         let squash = frg14_squash("append_blocks", "totalBlocks");
-        let via_tool = vec![frg14_msg("call:append_blocks{}", serde_json::Value::Null)];
+        let via_tool = vec![frg14_msg("call:append_blocks{}", MessageMeta::new())];
         assert!(session_has_append_context(&via_tool, Some(&squash)));
-        let via_total = vec![frg14_msg(r#"{"totalBlocks":1}"#, serde_json::Value::Null)];
+        let via_total = vec![frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new())];
         assert!(session_has_append_context(&via_total, Some(&squash)));
     }
 }

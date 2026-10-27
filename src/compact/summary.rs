@@ -8,7 +8,7 @@
 use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::effective_retention_window_tokens;
 use crate::events::{CompactionEvent, CompactionTier as CompactionTierKind, CompactionTrigger};
-use crate::message::{AgentMessage, AgentRole};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 use crate::turn_io::{SummaryRequest, SummaryResult};
 
@@ -221,7 +221,7 @@ pub fn apply_summary_result(
         id: format!("compact-summary-{}", result.last_message_id),
         role: AgentRole::CompactSummary,
         content: merged_content,
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     };
     session.messages.insert(start, summary_msg);
 
@@ -270,7 +270,7 @@ mod tests {
             id: id.into(),
             role: AgentRole::User,
             content: content.into(),
-            metadata: Null,
+            metadata: MessageMeta::new(),
         }
     }
 
@@ -279,7 +279,7 @@ mod tests {
             id: id.into(),
             role: AgentRole::Assistant,
             content: content.into(),
-            metadata: Null,
+            metadata: MessageMeta::new(),
         }
     }
 
@@ -383,7 +383,7 @@ mod tests {
                 id: "t1".into(),
                 role: AgentRole::Tool,
                 content: "result".into(),
-                metadata: Null,
+                metadata: MessageMeta::new(),
             },
         ];
         let (picked, last_id) =
@@ -408,7 +408,7 @@ mod tests {
                     id: "cs0".into(),
                     role: AgentRole::CompactSummary,
                     content: "Earlier summary.".into(),
-                    metadata: Null,
+                    metadata: MessageMeta::new(),
                 },
                 um("u1", "old user"),
                 am("a1", "old assistant"),

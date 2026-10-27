@@ -8,7 +8,6 @@ use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::AgentRole;
 use crate::session::{AgentConfig, AgentSession};
 use crate::truncate::truncate_message_content_to_tokens;
-use serde_json::json;
 
 pub struct TextTruncateCompactionTier;
 
@@ -120,15 +119,9 @@ impl CompactionTier for TextTruncateCompactionTier {
             }
             let message = &mut session.messages[idx];
             message.content = new_content;
-            if !message.metadata.is_object() {
-                message.metadata = json!({});
-            }
-            if let Some(obj) = message.metadata.as_object_mut() {
-                obj.insert(
-                    "compaction_tier".into(),
-                    json!(TierEnum::TextTruncate.to_string()),
-                );
-            }
+            message
+                .metadata
+                .set_compaction_tier(TierEnum::TextTruncate.to_string());
             let pressure_after = estimate_session_pressure(&session, config, ctx).total_tokens;
             if pressure_after >= pressure_before {
                 break;
@@ -160,7 +153,7 @@ impl CompactionTier for TextTruncateCompactionTier {
 mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
-    use crate::message::AgentMessage;
+    use crate::message::{AgentMessage, MessageMeta};
     use crate::policy::ContextPolicyTier;
     use serde_json::Value::Null;
 
@@ -187,7 +180,7 @@ mod tests {
             id: id.into(),
             role,
             content: content.into(),
-            metadata: Null,
+            metadata: MessageMeta::new(),
         }
     }
 

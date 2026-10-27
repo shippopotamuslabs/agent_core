@@ -3,7 +3,7 @@ mod support;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
@@ -62,7 +62,7 @@ fn create_session(
             id: "u1".into(),
             role: AgentRole::User,
             content: "write".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         capabilities(),
@@ -234,7 +234,7 @@ fn ltd_10_direct_call_to_deferred_tool_fails_closed_before_disclosure() {
             message.role == AgentRole::Tool
                 && !message
                     .metadata
-                    .get("agent_tool_budget")
+                    .extra("agent_tool_budget")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         })

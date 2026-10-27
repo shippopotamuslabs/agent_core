@@ -38,12 +38,7 @@ fn count_session_tokens(session: &AgentSession) -> u32 {
     session
         .messages
         .iter()
-        .filter(|m| {
-            !m.metadata
-                .get("superseded")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|m| !m.metadata.is_superseded())
         .map(|m| count_tokens(&m.content))
         .sum()
 }
@@ -52,12 +47,7 @@ fn active_message_count(session: &AgentSession) -> usize {
     session
         .messages
         .iter()
-        .filter(|m| {
-            !m.metadata
-                .get("superseded")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|m| !m.metadata.is_superseded())
         .count()
 }
 
@@ -348,7 +338,7 @@ pub fn effective_tool_result_budget_for_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{AgentMessage, AgentRole};
+    use crate::message::{AgentMessage, AgentRole, MessageMeta};
     use crate::policy::ContextPolicyTier;
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 
@@ -360,7 +350,7 @@ mod tests {
                 id: format!("m{i}"),
                 role: AgentRole::User,
                 content: t.to_string(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             })
             .collect();
         AgentSession::new(messages, serde_json::Value::Null)

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactStateAnchor {
@@ -216,7 +216,7 @@ impl StateLedger {
             id: "state-ledger-anchor".into(),
             role: AgentRole::CompactSummary,
             content: body.trim_end().to_string(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         })
     }
 }
@@ -230,7 +230,7 @@ mod tests {
             id: "u".into(),
             role: AgentRole::User,
             content: content.into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }
     }
 

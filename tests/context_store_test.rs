@@ -10,7 +10,7 @@ use agent_core::compact::{
 use agent_core::context_store::{is_browsable_context_kind, ContextReferenceKind, ContextStore};
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, CompactionTrigger};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 
 #[test]
@@ -133,7 +133,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             id: "u0".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         SessionCapabilities::default(),
@@ -201,19 +201,19 @@ fn s10_summarized_history_range_remains_searchable() {
             id: "u0".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
         AgentMessage {
             id: "a0".into(),
             role: AgentRole::Assistant,
             content: "decision: use ToolSpill before Micro".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
         AgentMessage {
             id: "u1".into(),
             role: AgentRole::User,
             content: "tail".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
     ];
     let mut store = ContextStore::default();
@@ -240,7 +240,7 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,
@@ -358,19 +358,19 @@ fn e5_fifo_fails_when_required_snapshot_cannot_be_created() {
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: "hello world ".repeat(200),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: "ack ".repeat(200),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "tail".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
         ],
         serde_json::Value::Null,
@@ -423,20 +423,20 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
             id: format!("u{i}"),
             role: AgentRole::User,
             content: filler.clone(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         });
         initial.push(AgentMessage {
             id: format!("a{i}"),
             role: AgentRole::Assistant,
             content: filler.clone(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         });
     }
     initial.push(AgentMessage {
         id: "u-tail".into(),
         role: AgentRole::User,
         content: "tail".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     });
 
     let eng = AgentEngine::new();

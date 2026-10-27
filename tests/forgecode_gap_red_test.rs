@@ -8,7 +8,7 @@ use agent_core::loop_hooks::{
     AgentLoopHook, DoomLoopReminderHook, HookCheckpoint, HookContext, PendingWorkReminderHook,
 };
 use agent_core::loop_metrics::{LoopMetrics, PendingWorkItem, ToolSignatureWindow};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use agent_core::request_pipeline::{RequestPipeline, RequestTransformer};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::state_ledger::StateLedger;
@@ -33,7 +33,7 @@ fn message(id: &str, role: AgentRole, content: &str) -> AgentMessage {
         id: id.into(),
         role,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 

@@ -12,7 +12,7 @@ use agent_core::compact::{
 };
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{CompactionTier, CompactionTrigger};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::{resolve_context_policy, ContextPolicyTier};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 
@@ -21,7 +21,7 @@ fn msg(id: &str, role: AgentRole, content: &str) -> AgentMessage {
         id: id.into(),
         role,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 

@@ -11,6 +11,8 @@ use crate::guardrails::GuardrailState;
 use crate::loop_metrics::LoopMetrics;
 #[cfg(feature = "lalr-harness")]
 use crate::message::AgentRole;
+#[cfg(feature = "lalr-harness")]
+use crate::message::MessageMeta;
 use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
@@ -121,7 +123,7 @@ impl SessionHandle {
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: content.into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             });
         }
     }

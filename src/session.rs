@@ -535,7 +535,7 @@ impl AgentSession {
 mod tests {
     use super::*;
     use crate::events::{CompactionTier, CompactionTrigger};
-    use crate::message::AgentRole;
+    use crate::message::{AgentRole, MessageMeta};
     use serde_json::json;
 
     fn make_event(tier: CompactionTier) -> CompactionEvent {
@@ -552,7 +552,7 @@ mod tests {
             id: id.into(),
             role: AgentRole::User,
             content: "test".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }
     }
 

@@ -6,7 +6,7 @@ use agent_core::budget::{
 };
 use agent_core::compact::{CompactionContext, CompactionOutcome, CompactionTier};
 use agent_core::events::CompactionTrigger;
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 
@@ -76,6 +76,6 @@ fn message(id: &str, role: AgentRole, content: &str) -> AgentMessage {
         id: id.into(),
         role,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }

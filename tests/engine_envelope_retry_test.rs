@@ -8,7 +8,7 @@ use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse};
 
@@ -36,7 +36,7 @@ fn user_msg() -> AgentMessage {
         id: "u1".into(),
         role: AgentRole::User,
         content: "hi".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -79,7 +79,7 @@ fn non_budget_tool_role_messages(
         .into_iter()
         .filter(|m| {
             !m.metadata
-                .get("agent_tool_budget")
+                .extra("agent_tool_budget")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         })
@@ -120,7 +120,7 @@ fn e_01_malformed_dsml_retries_model() {
     assert!(
         tool_role_messages(&snapshot)
             .iter()
-            .all(|m| m.metadata.get("agent_tool_budget").is_none()),
+            .all(|m| m.metadata.extra("agent_tool_budget").is_none()),
         "E-01 skips budget injection until remaining <= 5 or tools disabled"
     );
 }
@@ -347,7 +347,7 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
         snapshot.messages.iter().any(|m| {
             m.role == AgentRole::Tool
                 && m.metadata
-                    .get("tools_blocked_nudge")
+                    .extra("tools_blocked_nudge")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         }),

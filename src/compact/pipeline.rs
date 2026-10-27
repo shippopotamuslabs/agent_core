@@ -116,7 +116,7 @@ mod tests {
     use super::*;
     use crate::compact::CompactionContext;
     use crate::events::{CompactionEvent, CompactionTier as CTier, CompactionTrigger};
-    use crate::message::{AgentMessage, AgentRole};
+    use crate::message::{AgentMessage, AgentRole, MessageMeta};
     use crate::session::AgentSession;
     use crate::turn_io::SummaryRequest;
 
@@ -151,7 +151,7 @@ mod tests {
                 id: "m0".into(),
                 role: AgentRole::User,
                 content,
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             serde_json::Value::Null,
         )

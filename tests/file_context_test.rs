@@ -4,7 +4,7 @@ use agent_core::action::AgentAction;
 use agent_core::context_store::ContextStore;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::file_context::{condense_file_context, FileCondensationLevel};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 
 #[test]
@@ -104,7 +104,7 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "Use attached source context".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,

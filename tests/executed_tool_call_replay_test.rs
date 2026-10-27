@@ -8,7 +8,7 @@ use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams, SessionTestSnapshot};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::SessionCapabilities;
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
@@ -34,7 +34,7 @@ fn user_msg() -> AgentMessage {
         id: "u1".into(),
         role: AgentRole::User,
         content: "hi".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -62,19 +62,20 @@ fn last_assistant_message(snapshot: &SessionTestSnapshot) -> &AgentMessage {
         .expect("last assistant message")
 }
 
-fn raw_tool_calls_array(snapshot: &SessionTestSnapshot) -> &[serde_json::Value] {
-    let meta = &last_assistant_message(snapshot).metadata;
-    meta.get("raw_tool_calls")
-        .and_then(|v| v.as_array())
-        .map(|a| a.as_slice())
-        .unwrap_or(&[])
+fn raw_tool_calls_array(snapshot: &SessionTestSnapshot) -> &[RawToolCall] {
+    last_assistant_message(snapshot).metadata.raw_tool_calls()
 }
 
-fn raw_tool_call_field<'a>(entry: &'a serde_json::Value, field: &str) -> &'a str {
-    entry
-        .get(field)
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("raw_tool_calls entry missing {field}: {entry}"))
+fn raw_tool_call_field<'a>(entry: &'a RawToolCall, field: &str) -> &'a str {
+    match field {
+        "name" => entry.name.as_str(),
+        "id" => entry
+            .id
+            .as_deref()
+            .unwrap_or_else(|| panic!("raw_tool_calls entry missing id: {entry:?}")),
+        "arguments_json" => entry.arguments_json.as_str(),
+        _ => panic!("raw_tool_calls unknown field {field}"),
+    }
 }
 
 fn non_budget_tool_messages(snapshot: &SessionTestSnapshot) -> Vec<&AgentMessage> {
@@ -85,7 +86,7 @@ fn non_budget_tool_messages(snapshot: &SessionTestSnapshot) -> Vec<&AgentMessage
             m.role == AgentRole::Tool
                 && !m
                     .metadata
-                    .get("agent_tool_budget")
+                    .extra("agent_tool_budget")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         })
@@ -319,16 +320,11 @@ fn etr_r_06_partial_parallel_one_reject_one_repair_metadata_lists_all_call_ids()
     let tool_msgs = non_budget_tool_messages(&snapshot);
     assert_eq!(tool_msgs.len(), 2, "ETR-R-06 two tool messages");
     assert!(
-        tool_msgs[0]
-            .metadata
-            .get("call_id")
-            .and_then(|v| v.as_str())
-            == Some("c-ok"),
+        tool_msgs[0].metadata.call_id() == Some("c-ok"),
         "ETR-R-06 success tool first"
     );
     assert!(
-        tool_msgs[1].id.contains("tool-err-c-bad")
-            || tool_msgs[1].metadata.get("call_id").is_some(),
+        tool_msgs[1].id.contains("tool-err-c-bad") || tool_msgs[1].metadata.call_id().is_some(),
         "ETR-R-06 reject tool second"
     );
 }
@@ -421,7 +417,7 @@ fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
     assert_eq!(
         assistant
             .metadata
-            .get("envelope_ingest")
+            .extra("envelope_ingest")
             .and_then(|v| v.as_str()),
         Some("reified"),
         "ETR-R-09 envelope_ingest"

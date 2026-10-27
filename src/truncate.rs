@@ -56,7 +56,7 @@ pub fn truncate_message_content_to_tokens(text: &str, max_tokens: u32) -> (Strin
 mod tests {
     use super::*;
     use crate::budget::{truncate_budget_per_result, PromptBudgetParts, TokenLedger};
-    use crate::message::{AgentMessage, AgentRole};
+    use crate::message::{AgentMessage, AgentRole, MessageMeta};
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
             id: "t1".into(),
             role: AgentRole::Tool,
             content: truncated.clone(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         };
         let session_trunc = AgentSession::new(vec![tool_msg], serde_json::Value::Null);
         let session_full = AgentSession::new(
@@ -112,7 +112,7 @@ mod tests {
                 id: "t1".into(),
                 role: AgentRole::Tool,
                 content: json.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             serde_json::Value::Null,
         );
