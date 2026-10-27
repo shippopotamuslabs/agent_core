@@ -367,11 +367,12 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
+            tool_schema_registry: vec![],
+            tool_schemas: vec![],
             system_prompt: "sys".into(),
         },
-    );
+    )
+    .expect("ffi create_session should accept empty schema entries");
 
     assert!(matches!(
         eng.next_action(&handle),

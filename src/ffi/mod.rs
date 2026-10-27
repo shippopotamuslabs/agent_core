@@ -21,7 +21,7 @@ pub use types::{
     FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
     FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams,
     FfiSummaryRequest, FfiSummaryResult, FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure,
-    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
+    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord, FfiToolSchemaEntry,
 };
 
 use std::sync::Arc;
@@ -63,15 +63,16 @@ impl FfiAgentEngine {
         capabilities: FfiSessionCapabilities,
         session_context_json: String,
         io: FfiSessionIoParams,
-    ) -> Arc<FfiSession> {
+    ) -> Result<Arc<FfiSession>, AgentException> {
         let ctx: serde_json::Value =
             serde_json::from_str(&session_context_json).unwrap_or(serde_json::Value::Null);
         let msgs: Vec<crate::message::AgentMessage> =
             initial_messages.into_iter().map(Into::into).collect();
+        let io = types::session_io_params(io)?;
         let handle =
             self.inner
-                .create_session(msgs, config.into(), capabilities.into(), ctx, io.into());
-        Arc::new(FfiSession { handle })
+                .create_session(msgs, config.into(), capabilities.into(), ctx, io);
+        Ok(Arc::new(FfiSession { handle }))
     }
 
     pub fn next_action(&self, session: &FfiSession) -> FfiAgentAction {

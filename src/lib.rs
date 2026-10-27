@@ -16,7 +16,7 @@ pub use ffi::{
     FfiRawToolCall, FfiSession, FfiSessionCapabilities, FfiSessionIoParams, FfiStreamGateFinish,
     FfiStreamGatePushResult, FfiSummaryRequest, FfiSummaryResult, FfiToolCallRecord,
     FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField,
-    FfiToolResultRecord, FfiToolStreamGate, RepairResult,
+    FfiToolResultRecord, FfiToolSchemaEntry, FfiToolStreamGate, RepairResult,
 };
 
 pub mod action;
