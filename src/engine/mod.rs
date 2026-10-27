@@ -3,6 +3,7 @@
 pub mod envelope_ingest;
 pub mod leaked_tool_recovery;
 mod context_refs;
+pub(super) mod model_request;
 mod provider_tool_calls;
 mod state;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
@@ -39,10 +40,9 @@ use crate::compact::{
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
 use crate::context_store::{
-    is_browsable_context_kind, ContextReference, ContextStore,
+    ContextReference, ContextStore,
 };
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
-use crate::file_context::condense_file_context;
 use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
 use crate::long_loop_policy::should_compact_for_long_loop;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
@@ -50,17 +50,15 @@ use crate::manual_compact::ManualCompactResult;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
-use crate::request_pipeline::render_runtime_tool_view;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
-use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
+use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 #[allow(unused_imports)]
 use crate::tool_context::build_tool_context_index;
-use crate::tool_context::build_tool_context_index_with_registry;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::truncate::truncate_tool_result_json;
-use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
+use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession};
 
@@ -1841,7 +1839,25 @@ impl InnerSession {
             });
         }
 
-        let req = self.build_model_request(allow, cache_hints);
+        // ENC-286 slice 2: disjoint-field borrow split — each field is passed
+        // explicitly; this never hands the whole guard to the callee.
+        let req = model_request::build_model_request(model_request::ModelRequestInputs {
+            session: &self.session,
+            config: &self.config,
+            capabilities: &self.capabilities,
+            io: &self.io,
+            active_tool_names: &self.active_tool_names,
+            context_store: &mut self.context_store,
+            state_ledger: &self.state_ledger,
+            sidecar_builder: &mut self.sidecar_builder,
+            turn_index: self.turn_index,
+            compaction_passes_this_turn: self.compaction_passes_this_turn,
+            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+            suppress_summary_tier: self.suppress_summary_tier,
+            allow_tool_call: allow,
+            cache_hints,
+            loop_metrics: &self.loop_metrics,
+        });
 
         self.pending_call_model = Some(req.clone());
         self.model_requests_this_turn += 1;
@@ -1949,164 +1965,28 @@ impl InnerSession {
         let allow = self
             .guardrails
             .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
-        let request = self.build_model_request(allow, vec![]);
+        let request =
+            model_request::build_model_request(model_request::ModelRequestInputs {
+                session: &self.session,
+                config: &self.config,
+                capabilities: &self.capabilities,
+                io: &self.io,
+                active_tool_names: &self.active_tool_names,
+                context_store: &mut self.context_store,
+                state_ledger: &self.state_ledger,
+                sidecar_builder: &mut self.sidecar_builder,
+                turn_index: self.turn_index,
+                compaction_passes_this_turn: self.compaction_passes_this_turn,
+                destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+                suppress_summary_tier: self.suppress_summary_tier,
+                allow_tool_call: allow,
+                cache_hints: vec![],
+                loop_metrics: &self.loop_metrics,
+            });
         self.pending_call_model = Some(request.clone());
         self.model_requests_this_turn += 1;
         self.phase = EnginePhase::AwaitingModel;
         Some(AgentAction::CallModel(request))
-    }
-
-    fn build_model_request(
-        &mut self,
-        allow_tool_call: bool,
-        cache_hints: Vec<String>,
-    ) -> ModelRequest {
-        let session_messages: Vec<AgentMessage> = self
-            .session
-            .messages
-            .iter()
-            .filter(|m| !m.metadata.is_superseded())
-            .cloned()
-            .collect();
-        // State-ledger anchor intentionally NOT injected at position 0 of session_messages.
-        // It would mutate byte 0 of the prefix on every turn (objective/decisions grow),
-        // breaking xAI/OpenAI prompt-cache prefix stability. Ledger content is already
-        // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
-
-        let rendered_tool_catalog_json = render_runtime_tool_view(
-            &self.io.tools_schema_json,
-            &self.config,
-            &self.capabilities,
-            &self.loop_metrics,
-        )
-        .unwrap_or_else(|_| self.io.tools_schema_json.clone());
-
-        let has_catalog = !self.io.tool_catalog_json.trim().is_empty()
-            && self.io.tool_catalog_json.trim() != "[]";
-        let has_registry = !self.io.tool_schema_registry_json.trim().is_empty()
-            && self.io.tool_schema_registry_json.trim() != "[]";
-
-        let active_schema_json: String = if has_registry && !self.active_tool_names.is_empty() {
-            render_active_schema_json(&self.io.tool_schema_registry_json, &self.active_tool_names)
-        } else {
-            self.io.tools_schema_json.clone()
-        };
-
-        let tool_context_index = build_tool_context_index_with_registry(
-            &active_schema_json,
-            &self.io.tool_catalog_json,
-            &self.io.tool_schema_registry_json,
-            &mut self.context_store,
-            &self.config,
-            &self.capabilities,
-        );
-        let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
-            "[]".to_string()
-        } else {
-            active_schema_json
-        };
-
-        let file_context_index = self
-            .session
-            .session_context
-            .get("included_files")
-            .and_then(|value| serde_json::to_string(value).ok())
-            .and_then(|included_files_json| {
-                condense_file_context(
-                    &included_files_json,
-                    &mut self.context_store,
-                    &self.config,
-                    &self.capabilities,
-                    self.turn_index,
-                )
-            });
-
-        let generation = self.sidecar_builder.next_generation();
-        let sidecar_budget = self.config.long_loop.sidecar_byte_budget_per_call;
-        let ledger_delta = self
-            .config
-            .enable_state_ledger
-            .then(|| {
-                self.sidecar_builder.build_ledger_delta(
-                    &mut self.context_store,
-                    &self.state_ledger,
-                    sidecar_budget,
-                )
-            })
-            .flatten();
-        let tool_index_delta = tool_context_index.as_ref().and_then(|index| {
-            self.sidecar_builder.build_tool_index_payload(
-                &mut self.context_store,
-                index,
-                sidecar_budget,
-            )
-        });
-        let file_index_delta = file_context_index.as_ref().and_then(|index| {
-            self.sidecar_builder.build_file_index_payload(
-                &mut self.context_store,
-                index,
-                sidecar_budget,
-            )
-        });
-        let sidecar_byte_len = ledger_delta.as_ref().map(|s| s.len()).unwrap_or(0)
-            + tool_index_delta.as_ref().map(|s| s.len()).unwrap_or(0)
-            + file_index_delta.as_ref().map(|s| s.len()).unwrap_or(0);
-        self.sidecar_builder
-            .record_rolling_cache_entry(generation, sidecar_byte_len);
-        self.sidecar_builder
-            .enforce_total_budget(&self.config.long_loop);
-
-        ModelRequest {
-            session_messages,
-            system_prompt: self.io.system_prompt.clone(),
-            rendered_tool_catalog_json,
-            tools_schema_json,
-            allow_tool_call,
-            context_references: self
-                .context_store
-                .entries()
-                .filter(|entry| is_browsable_context_kind(&entry.reference.kind))
-                .map(|entry| entry.reference.clone())
-                .collect(),
-            state_ledger: self
-                .config
-                .enable_state_ledger
-                .then(|| self.state_ledger.clone()),
-            tool_context_index,
-            file_context_index,
-            cache_hints,
-            provider_context: ProviderContextSnapshot {
-                transcript_revision: self.session.transcript_revision,
-                sidecar_generation: generation,
-                sidecar_byte_len: sidecar_byte_len.min(u32::MAX as usize) as u32,
-                compaction_passes_this_turn: self.compaction_passes_this_turn,
-                destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-                pressure_ratio_at_call_model_millis: {
-                    let ratio = self
-                        .session
-                        .ledger_snapshot
-                        .as_ref()
-                        .map(|p| p.ratio)
-                        .unwrap_or_else(|| {
-                            self.estimate_pressure(CompactionTrigger::Preflight).ratio
-                        });
-                    (ratio * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32
-                },
-            },
-            state_ledger_delta_json: if generation == 0 { None } else { ledger_delta },
-            tool_context_index_delta_json: if generation == 0 {
-                None
-            } else {
-                tool_index_delta
-            },
-            file_context_index_delta_json: if generation == 0 {
-                None
-            } else {
-                file_index_delta
-            },
-            retry_after_ms: None,
-            model_retry_attempt: None,
-        }
     }
 
     fn set_terminal_or_pending(&mut self, action: AgentAction) {
