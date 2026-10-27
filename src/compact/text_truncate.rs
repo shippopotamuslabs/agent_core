@@ -77,39 +77,33 @@ fn target_token_budget(config: &AgentConfig, ctx: &CompactionContext) -> u32 {
 }
 
 /// Next single truncation step for the [`TextTruncateCompactionTier::apply`]
-/// driver loop.
-enum TruncateAction {
-    /// No truncatable message content remains.
-    Done,
-    /// Truncate `session.messages[idx].content` down to `new_content`.
-    Truncate { idx: usize, new_content: String },
-    /// A candidate exists but shrinking it further is a no-op.
-    Stalled,
-}
-
-/// Decide what the driver loop should do next. This helper only answers the
-/// candidate question; the pressure re-check stays visibly in the driver.
-fn next_truncation(session: &AgentSession) -> TruncateAction {
+/// driver loop: `Some((idx, new_content))` when truncating
+/// `session.messages[idx].content` to `new_content` makes progress, `None`
+/// when the loop should stop — either no truncatable message remains, or
+/// the best candidate cannot shrink further. The two stop cases share one
+/// driver behavior (break), so they share one representation.
+///
+/// This helper only answers the candidate question; the pressure re-check
+/// stays visibly in the driver.
+fn next_truncation(session: &AgentSession) -> Option<(usize, String)> {
     let last_user = last_user_index(&session.messages);
-    let Some(idx) = first_truncatable_index(&session.messages, last_user) else {
-        return TruncateAction::Done;
-    };
+    let idx = first_truncatable_index(&session.messages, last_user)?;
 
     let current_content = session.messages[idx].content.clone();
     let current_tokens = crate::budget::count_tokens(&current_content);
     if current_tokens <= 32 {
-        return TruncateAction::Stalled;
+        return None;
     }
     let next_tokens = (current_tokens / 2).max(32);
     let (new_content, _) = truncate_message_content_to_tokens(&current_content, next_tokens);
     if new_content == current_content {
-        return TruncateAction::Stalled;
+        return None;
     }
     let new_message_tokens = crate::budget::count_tokens(&new_content);
     if new_message_tokens >= current_tokens {
-        return TruncateAction::Stalled;
+        return None;
     }
-    TruncateAction::Truncate { idx, new_content }
+    Some((idx, new_content))
 }
 
 impl CompactionTier for TextTruncateCompactionTier {
@@ -130,40 +124,36 @@ impl CompactionTier for TextTruncateCompactionTier {
 
         let mut changed = false;
         // Pressure re-check, visibly in the driver: the loop only runs while
-        // the session is over budget, and each iteration match-dispatches one
-        // `TruncateAction` from `next_truncation`.
+        // the session is over budget, and each iteration applies one
+        // truncation step from `next_truncation`.
         while should_compact_at_token_threshold(
             &estimate_session_pressure(&session, config, ctx),
             target_tokens,
         ) {
             let pressure_before = estimate_session_pressure(&session, config, ctx).total_tokens;
-            match next_truncation(&session) {
-                TruncateAction::Done => break,
-                TruncateAction::Stalled => break,
-                TruncateAction::Truncate { idx, new_content } => {
-                    let message = &mut session.messages[idx];
-                    message.content = new_content;
-                    if !message.metadata.is_object() {
-                        message.metadata = json!({});
-                    }
-                    if let Some(obj) = message.metadata.as_object_mut() {
-                        obj.insert(
-                            "compaction_tier".into(),
-                            json!(TierEnum::TextTruncate.to_string()),
-                        );
-                    }
-                    let pressure_after =
-                        estimate_session_pressure(&session, config, ctx).total_tokens;
-                    // A truncation that fails to relieve pressure stalls the
-                    // tier without counting as progress (`changed` untouched),
-                    // preserving the exact NotApplicable-vs-partial-progress
-                    // distinction.
-                    if pressure_after >= pressure_before {
-                        break;
-                    }
-                    changed = true;
-                }
+            let Some((idx, new_content)) = next_truncation(&session) else {
+                break;
+            };
+            let message = &mut session.messages[idx];
+            message.content = new_content;
+            if !message.metadata.is_object() {
+                message.metadata = json!({});
             }
+            if let Some(obj) = message.metadata.as_object_mut() {
+                obj.insert(
+                    "compaction_tier".into(),
+                    json!(TierEnum::TextTruncate.to_string()),
+                );
+            }
+            let pressure_after = estimate_session_pressure(&session, config, ctx).total_tokens;
+            // A truncation that fails to relieve pressure stalls the
+            // tier without counting as progress (`changed` untouched),
+            // preserving the exact NotApplicable-vs-partial-progress
+            // distinction.
+            if pressure_after >= pressure_before {
+                break;
+            }
+            changed = true;
         }
 
         if !changed {
