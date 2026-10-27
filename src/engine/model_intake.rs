@@ -69,8 +69,8 @@ pub(super) fn append_assistant_message(
             metadata.set_extra(k.clone(), v.clone());
         }
     }
-    if let Some(reasoning_content) = provider_reasoning_content
-        .filter(|content| !content.is_empty())
+    if let Some(reasoning_content) =
+        provider_reasoning_content.filter(|content| !content.is_empty())
     {
         metadata.set_extra(
             "provider_reasoning",
