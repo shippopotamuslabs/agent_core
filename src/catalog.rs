@@ -34,9 +34,10 @@ struct CatalogFile {
 /// Policy catalog: the validated executable tool set for a session (ENC-297).
 ///
 /// Built once at config construction by [`AgentConfig::with_tool_semantics`](crate::session::AgentConfig::with_tool_semantics)
-/// (via [`ToolCatalog::from_semantics`]) and re-synced at session creation by
-/// [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics);
-/// per-turn engine code borrows it and never rebuilds it.
+/// (via [`ToolCatalog::from_semantics`]) and rebuilt at session creation inside
+/// [`ToolUniverse::build`](crate::tool_universe::ToolUniverse::build) — the
+/// construction-time validation point; per-turn engine code borrows the
+/// universe's catalog and never rebuilds it.
 ///
 /// Identity is [`ToolName`] equality: specs and aliases are already canonical
 /// at construction, so lookup performs no folding of its own (ENC-299: the

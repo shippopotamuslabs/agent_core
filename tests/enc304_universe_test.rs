@@ -17,7 +17,7 @@ use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::tool_name::ToolName;
-use agent_core::tool_schema::{SchemaEntry, ToolSchemaSet};
+use agent_core::tool_schema::{entries_json, SchemaEntry, ToolSchemaSet};
 use agent_core::tool_semantics::{ToolSemanticsConfig, ToolSemanticsError};
 use agent_core::tool_universe::ToolUniverse;
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
@@ -384,6 +384,8 @@ fn enc304_admit_spec_naming_a_different_tool_rejected() {
     let mut universe = fixture_universe();
     let active_json_before = universe.active_json().to_string();
 
+    // ENC-304 fix pass (m2): the mismatch is the dedicated variant
+    // carrying both names, not UnknownToolReference.
     assert_eq!(
         universe
             .admit(
@@ -391,9 +393,9 @@ fn enc304_admit_spec_naming_a_different_tool_rejected() {
                 Some(spec("other_tool", &[])),
             )
             .expect_err("spec/entry name mismatch must fail"),
-        ToolSemanticsError::UnknownToolReference {
-            section: "admit".to_string(),
-            name: "other_tool".to_string(),
+        ToolSemanticsError::AdmissionNameMismatch {
+            entry: "fetch_page".to_string(),
+            spec: "other_tool".to_string(),
         }
     );
 
@@ -508,6 +510,81 @@ fn enc304_agnostic_session_constructs_and_merges_unknown_host_activation() {
     assert_eq!(entries[0]["parameters"], serde_json::json!({}));
     assert_eq!(entries[1], serde_json::json!({"name": "host_only_tool"}));
     assert_eq!(entries[2], serde_json::json!({"name": "another_host_tool"}));
+}
+
+#[test]
+fn enc304_build_rejects_canonical_duplicate_schema_entries_from_entries() {
+    // ENC-304 fix pass (M2): `ToolSchemaSet::from_entries` (the FFI typed
+    // path) performs no validation, so case variants that canonicalize
+    // identically both arrive; `ToolUniverse::build` must reject them
+    // instead of silently picking a first-wins entry.
+    let dupes = ToolSchemaSet::from_entries(vec![
+        entry("Web-Search", "Search, capitalized"),
+        entry("web_search", "Search, canonical"),
+    ]);
+    assert_eq!(
+        ToolUniverse::build(dupes, ToolSemanticsConfig::agnostic())
+            .expect_err("canonical-duplicate entries must fail build"),
+        ToolSemanticsError::DuplicateToolName {
+            normalized_name: "web_search".to_string(),
+        }
+    );
+}
+
+#[test]
+fn enc304_admit_alias_claiming_active_entry_less_name_rejected() {
+    // ENC-304 fix pass (m3): the host activated a name the world carries
+    // no entry for; a candidate spec's alias may not claim that active
+    // name. (Admitting an ENTRY for it would stay legal.)
+    let mut universe = fixture_universe();
+    universe.activate([tn("host_only_tool")]);
+    let active_json_before = universe.active_json().to_string();
+
+    assert_eq!(
+        universe
+            .admit(
+                entry("summarize_page", "Summarize a page"),
+                Some(spec("summarize_page", &["host_only_tool"])),
+            )
+            .expect_err("alias claiming an active entry-less name must fail"),
+        ToolSemanticsError::AliasCollision {
+            alias: "host_only_tool".to_string(),
+            first_tool: "host_only_tool".to_string(),
+            second_tool: "summarize_page".to_string(),
+        }
+    );
+
+    // World unchanged, including the raw active channel.
+    assert!(universe.entry(&tn("summarize_page")).is_none());
+    assert!(universe.spec(&tn("summarize_page")).is_none());
+    assert_eq!(universe.schemas().active.len(), 2);
+    assert_eq!(universe.catalog().len(), 20);
+    assert_eq!(universe.active_json(), active_json_before);
+}
+
+#[test]
+fn enc304_render_byte_identity_with_schema_set_render() {
+    // ENC-304 fix pass (Disposition): the universe render is
+    // byte-identical to `ToolSchemaSet::render_active_schemas` over the
+    // same active names on identical input — including the stub shape
+    // for a host-activated name the channel does not carry.
+    let schemas = fixture_schemas();
+    let mut universe = ToolUniverse::build(schemas.clone(), enclave::enclave_test_semantics())
+        .expect("enclave fixture world must build");
+    assert_eq!(
+        entries_json(&universe.render_active_schemas()),
+        entries_json(&schemas.render_active_schemas(universe.active_names()))
+    );
+
+    universe.activate([tn("host_only_tool")]);
+    assert_eq!(
+        entries_json(&universe.render_active_schemas()),
+        entries_json(&schemas.render_active_schemas(universe.active_names()))
+    );
+    // Sanity: the host-only name really did render as a stub above.
+    assert!(
+        entries_json(&universe.render_active_schemas()).contains(r#"{"name":"host_only_tool"}"#)
+    );
 }
 
 #[test]

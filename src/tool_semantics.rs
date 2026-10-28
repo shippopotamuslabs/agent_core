@@ -161,8 +161,8 @@ impl ToolSemanticsConfig {
     /// (canonical name or declared alias) or to an active schema name.
     ///
     /// Only enforced when the containing section is present/non-empty, so the
-    /// agnostic config passes. The engine runs this in `create_session`
-    /// after [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics),
+    /// agnostic config passes. The engine runs this inside
+    /// [`ToolUniverse::build`](crate::tool_universe::ToolUniverse::build),
     /// where the catalog and the parsed schema set meet for the first time.
     pub fn validate_references(
         &self,
@@ -381,6 +381,21 @@ pub enum ToolSemanticsError {
         alias: String,
         first_tool: String,
         second_tool: String,
+    },
+    /// Admission candidate whose spec names a different tool than its
+    /// schema entry (ENC-304 fix pass, m2): a malformed candidate, not a
+    /// dangling reference, so it is NOT an `UnknownToolReference`.
+    AdmissionNameMismatch {
+        entry: String,
+        spec: String,
+    },
+    /// A schema entry offered at build/admission time is malformed: an
+    /// empty name, a non-object value, or a value whose `"name"` does not
+    /// canonicalize to the entry name (ENC-304 fix pass, M1/M2). Follows
+    /// the family's `Invalid* { message }` convention; no existing variant
+    /// describes a malformed schema entry without misclassifying it.
+    InvalidSchemaEntry {
+        message: String,
     },
     /// A semantics section references a tool that is neither a catalog tool
     /// (canonical name or alias) nor an active schema name (ENC-299 D4).
