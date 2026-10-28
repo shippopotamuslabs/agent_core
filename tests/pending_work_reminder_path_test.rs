@@ -10,25 +10,27 @@ use serde_json::json;
 #[test]
 fn pending_work_reminder_filters_superseded_from_wire() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![
-            message("u1", AgentRole::User, "ship"),
-            AgentMessage {
-                id: "old-tool".into(),
-                role: AgentRole::Tool,
-                content: "superseded payload".into(),
-                metadata: {
-                    let mut meta = MessageMeta::new();
-                    meta.mark_superseded();
-                    meta
+    let handle = eng
+        .create_session(
+            vec![
+                message("u1", AgentRole::User, "ship"),
+                AgentMessage {
+                    id: "old-tool".into(),
+                    role: AgentRole::Tool,
+                    content: "superseded payload".into(),
+                    metadata: {
+                        let mut meta = MessageMeta::new();
+                        meta.mark_superseded();
+                        meta
+                    },
                 },
-            },
-        ],
-        pending_config(),
-        pending_caps(),
-        json!({"pending_work": ["verify failing tests"]}),
-        io(),
-    );
+            ],
+            pending_config(),
+            pending_caps(),
+            json!({"pending_work": ["verify failing tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let request = pending_request(&eng, &handle);
 
@@ -48,13 +50,15 @@ fn pending_work_reminder_filters_superseded_from_wire() {
 #[test]
 fn pending_work_reminder_threads_provider_context_snapshot() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![message("u1", AgentRole::User, "ship")],
-        pending_config(),
-        pending_caps(),
-        json!({"pending_work": ["verify failing tests"]}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![message("u1", AgentRole::User, "ship")],
+            pending_config(),
+            pending_caps(),
+            json!({"pending_work": ["verify failing tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let request = pending_request(&eng, &handle);
 

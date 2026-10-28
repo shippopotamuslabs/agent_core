@@ -57,6 +57,7 @@ fn create_session(
         )
         .expect("valid test io params"),
     )
+    .expect("valid config creates session")
 }
 
 fn model_request(eng: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {

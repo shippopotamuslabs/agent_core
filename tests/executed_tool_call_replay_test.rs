@@ -45,6 +45,7 @@ fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
         serde_json::Value::Null,
         io_large(),
     )
+    .expect("valid config creates session")
 }
 
 fn last_assistant_message(snapshot: &SessionTestSnapshot) -> &AgentMessage {

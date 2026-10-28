@@ -49,6 +49,7 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
         )
         .expect("valid test io params"),
     )
+    .expect("valid config creates session")
 }
 
 fn compaction_ctx() -> CompactionContext {

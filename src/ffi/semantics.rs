@@ -19,6 +19,7 @@ use crate::tool_semantics::{
 };
 
 use super::types::AgentException;
+use crate::catalog::ToolCatalog;
 
 /// Parse one JSON payload at the conversion edge (ENC-297 D3). Malformed
 /// input is a typed error naming the field, never a silent default.
@@ -334,8 +335,10 @@ pub struct FfiArtifactToolSemantics {
     pub success_status_value: String,
     pub synthetic_call_id_prefix: String,
     /// JSON payload for `empty_append_payload_value` (ENC-297 D3): parsed
-    /// once at conversion; `None` maps to JSON null. Malformed input is an
-    /// `AgentException` naming this field.
+    /// once at conversion. `None` maps to JSON null, which is also the core
+    /// serde default for the field, so `None` round-trips symmetrically with
+    /// a JSON-null payload. Malformed input is an `AgentException` naming
+    /// this field.
     pub empty_append_payload_value_json: Option<String>,
 }
 
@@ -350,11 +353,17 @@ impl From<&ArtifactToolSemantics> for FfiArtifactToolSemantics {
             status_field: semantics.status_field.clone(),
             success_status_value: semantics.success_status_value.clone(),
             synthetic_call_id_prefix: semantics.synthetic_call_id_prefix.clone(),
-            // Value serializes infallibly (string-keyed map by construction).
-            empty_append_payload_value_json: Some(
-                serde_json::to_string(&semantics.empty_append_payload_value)
-                    .expect("json value serializes"),
-            ),
+            // ENC-297 M3: JSON null emits None so the FFI tree round-trips
+            // symmetrically (None converts back to Null). Non-null payloads
+            // serialize infallibly (string-keyed map by construction).
+            empty_append_payload_value_json: if semantics.empty_append_payload_value.is_null() {
+                None
+            } else {
+                Some(
+                    serde_json::to_string(&semantics.empty_append_payload_value)
+                        .expect("json value serializes"),
+                )
+            },
         }
     }
 }
@@ -403,7 +412,8 @@ impl From<ArtifactSquashSemantics> for FfiArtifactSquashSemantics {
             success_status_value: semantics.success_status_value,
             summary_template: semantics.summary_template,
             continuation_instruction: semantics.continuation_instruction,
-            snippet_max_chars: semantics.snippet_max_chars as u64,
+            // ENC-297 M4: saturating conversion, never a truncating `as`.
+            snippet_max_chars: u64::try_from(semantics.snippet_max_chars).unwrap_or(u64::MAX),
         }
     }
 }
@@ -419,7 +429,8 @@ impl From<FfiArtifactSquashSemantics> for ArtifactSquashSemantics {
             success_status_value: semantics.success_status_value,
             summary_template: semantics.summary_template,
             continuation_instruction: semantics.continuation_instruction,
-            snippet_max_chars: semantics.snippet_max_chars as usize,
+            // ENC-297 M4: saturating conversion, never a truncating `as`.
+            snippet_max_chars: usize::try_from(semantics.snippet_max_chars).unwrap_or(usize::MAX),
         }
     }
 }
@@ -484,8 +495,15 @@ pub struct FfiToolSemantics {
     pub greedy_extension_tools: Vec<FfiToolGreedyExtensionSemantics>,
 }
 
-impl From<&ToolSemanticsConfig> for FfiToolSemantics {
-    fn from(config: &ToolSemanticsConfig) -> Self {
+impl FfiToolSemantics {
+    /// Named core-to-FFI conversion (ENC-297 M2): mirrors every
+    /// [`ToolSemanticsConfig`] field EXCEPT the policy catalog, which
+    /// travels as sibling [`FfiToolSpec`]s, never inside this tree. A named
+    /// constructor (not `From`) so the lossy catalog drop is explicit at
+    /// every call site. Test-only: the live boundary converts host→core;
+    /// core→FFI exists to support round-trip fixture tests.
+    #[cfg(test)]
+    pub(crate) fn without_catalog(config: &ToolSemanticsConfig) -> Self {
         Self {
             discovery: config.discovery.clone().map(Into::into),
             artifact: config.artifact.as_ref().map(Into::into),
@@ -516,6 +534,32 @@ impl From<&ToolSemanticsConfig> for FfiToolSemantics {
                 .collect(),
         }
     }
+}
+
+/// Shared typed conversion (ENC-297 M1): the single place that assigns the
+/// sibling [`FfiToolSpec`]s into `semantics.catalog.tools` and runs the
+/// fallible core validation + policy-catalog build. Both the fallible
+/// [`AgentConfig`](crate::session::AgentConfig) edge and the infallible
+/// policy helpers convert here, so the error mapping lives in exactly one
+/// spot: invalid input is an [`AgentException`] naming the failure.
+/// `None` semantics is host-declared agnostic (not a parse fallback).
+pub(crate) fn typed_to_core(
+    semantics: Option<FfiToolSemantics>,
+    specs: Vec<FfiToolSpec>,
+) -> Result<(ToolSemanticsConfig, ToolCatalog), AgentException> {
+    let mut semantics = match semantics {
+        Some(tree) => tree.into_core()?,
+        None => ToolSemanticsConfig::agnostic(),
+    };
+    semantics.catalog.tools = specs
+        .into_iter()
+        .map(|spec| spec.into_core())
+        .collect::<Result<Vec<_>, _>>()?;
+    let catalog =
+        ToolCatalog::from_semantics(&semantics).map_err(|error| AgentException::Internal {
+            detail: format!("invalid tool semantics: {error:?}"),
+        })?;
+    Ok((semantics, catalog))
 }
 
 impl FfiToolSemantics {
@@ -576,7 +620,7 @@ mod tests {
         let specs = legacy_specs();
         assert!(!specs.is_empty());
 
-        let ffi_tree = FfiToolSemantics::from(&semantics);
+        let ffi_tree = FfiToolSemantics::without_catalog(&semantics);
         let ffi_specs: Vec<FfiToolSpec> = specs.iter().map(FfiToolSpec::from).collect();
 
         let mut round_tripped = ffi_tree.into_core().expect("typed tree converts");
@@ -590,7 +634,7 @@ mod tests {
         assert_eq!(core_json(&round_tripped), core_json(&expected));
 
         // Full config conversion: catalog builds from the sibling specs.
-        let ffi_tree = FfiToolSemantics::from(&semantics);
+        let ffi_tree = FfiToolSemantics::without_catalog(&semantics);
         let ffi_specs: Vec<FfiToolSpec> = specs.iter().map(FfiToolSpec::from).collect();
         let config = agent_config(FfiAgentConfig {
             tool_semantics: Some(ffi_tree),
@@ -612,7 +656,7 @@ mod tests {
     fn malformed_value_payload_is_agent_exception() {
         // D3: malformed empty_append_payload_value JSON is a typed error
         // naming the field.
-        let mut tree = FfiToolSemantics::from(&legacy_semantics());
+        let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
         let mut artifact = tree.artifact.clone().expect("fixture has artifact");
         artifact.empty_append_payload_value_json = Some("{not json".into());
         tree.artifact = Some(artifact);
@@ -630,7 +674,7 @@ mod tests {
         }
 
         // Malformed schema-hint default payload names its field too.
-        let tree = FfiToolSemantics::from(&legacy_semantics());
+        let tree = FfiToolSemantics::without_catalog(&legacy_semantics());
         let hinted = FfiToolSpec {
             name: "web_search".into(),
             aliases: Vec::new(),
@@ -699,29 +743,58 @@ mod tests {
         let semantics = legacy_semantics();
         let specs = legacy_specs();
         let config = agent_config(FfiAgentConfig {
-            tool_semantics: Some(FfiToolSemantics::from(&semantics)),
+            tool_semantics: Some(FfiToolSemantics::without_catalog(&semantics)),
             tool_specs: specs.iter().map(FfiToolSpec::from).collect(),
             ..Default::default()
         })
         .expect("valid typed config converts");
         let engine = AgentEngine::new();
-        let handle = engine.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            config,
-            Default::default(),
-            serde_json::Value::Null,
-            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
-                .expect("valid io params"),
-        );
+        let handle = engine
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                config,
+                Default::default(),
+                serde_json::Value::Null,
+                SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                    .expect("valid io params"),
+            )
+            .expect("valid config creates session");
         assert!(matches!(
             engine.next_action(&handle),
             AgentAction::CallModel(_)
         ));
+    }
+
+    #[test]
+    fn null_payload_emits_none_and_round_trips() {
+        // ENC-297 M3: a JSON-null payload emits None (not Some("null")),
+        // and None converts back to Null — symmetric with the serde default.
+        let mut semantics = legacy_semantics();
+        semantics
+            .artifact
+            .as_mut()
+            .expect("fixture has artifact")
+            .empty_append_payload_value = serde_json::Value::Null;
+        let tree = FfiToolSemantics::without_catalog(&semantics);
+        assert!(
+            tree.artifact
+                .as_ref()
+                .expect("artifact mirrors")
+                .empty_append_payload_value_json
+                .is_none(),
+            "null payload must emit None"
+        );
+        let round_tripped = tree.into_core().expect("typed tree converts");
+        assert!(round_tripped
+            .artifact
+            .expect("artifact converts")
+            .empty_append_payload_value
+            .is_null());
     }
 
     #[test]

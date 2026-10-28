@@ -217,13 +217,15 @@ pub fn run_destructive_micro_preflight_pass(
         session.messages.clone()
     };
 
-    let handle = engine.create_session(
-        initial,
-        test_config,
-        caps.clone(),
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            initial,
+            test_config,
+            caps.clone(),
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let _action = engine.next_action(&handle);
     let events = engine.drain_events(&handle);
@@ -245,13 +247,15 @@ pub fn run_two_destructive_compaction_passes(session: &mut AgentSession) -> (u64
 
     let messages = vec![tool_message("tool-pass-0", "web_search", &"x".repeat(500))];
 
-    let handle = engine.create_session(
-        messages,
-        config,
-        caps,
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            messages,
+            config,
+            caps,
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     // Turn 1 preflight compaction
     let _action1 = engine.next_action(&handle);

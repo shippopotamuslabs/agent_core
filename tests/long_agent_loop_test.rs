@@ -15,16 +15,18 @@ fn lalr_01_twenty_five_tool_turns_within_sidecar_budget() {
     long_loop.sidecar_byte_budget_per_call = 8192;
     let config = config_with_long_loop(long_loop);
     let engine = test_engine();
-    let handle = engine.create_session(
-        vec![],
-        config.clone(),
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![],
+            config.clone(),
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let outcome = run_twenty_five_tool_turn_loop(&engine, &handle, &config, "noop");
 
@@ -43,16 +45,18 @@ fn lalr_11_codename_survives_twenty_five_tool_turns() {
     let mut ledger = StateLedger::default();
     inject_semantic_fact_enclave(&mut ledger);
     let engine = test_engine();
-    let handle = engine.create_session(
-        vec![],
-        config.clone(),
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![],
+            config.clone(),
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let _ledger = ledger;
     let outcome = run_twenty_five_tool_turn_loop(&engine, &handle, &config, "noop");
@@ -67,16 +71,18 @@ fn lalr_11_codename_survives_twenty_five_tool_turns() {
 fn lalr_20_message_count_cap_after_twenty_five_turns() {
     let config = config_with_long_loop(LongLoopPolicy::hosted_mutable_defaults());
     let engine = test_engine();
-    let handle = engine.create_session(
-        vec![],
-        config.clone(),
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![],
+            config.clone(),
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let outcome = run_twenty_five_tool_turn_loop(&engine, &handle, &config, "noop");
     assert!(matches!(outcome.final_action, AgentAction::Finished));

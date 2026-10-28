@@ -79,9 +79,14 @@ impl FfiAgentEngine {
         // ENC-297 D2: fallible typed conversion — invalid semantics/catalog
         // is an AgentException, never an eprintln + agnostic fallback.
         let config = types::agent_config(config)?;
+        // ENC-297 J1: engine validation failure surfaces as a typed
+        // AgentException — never a live session with a stale catalog.
         let handle = self
             .inner
-            .create_session(msgs, config, capabilities.into(), ctx, io);
+            .create_session(msgs, config, capabilities.into(), ctx, io)
+            .map_err(|error| AgentException::Internal {
+                detail: format!("invalid tool semantics: {error:?}"),
+            })?;
         Ok(Arc::new(FfiSession { handle }))
     }
 

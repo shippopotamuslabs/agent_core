@@ -15,22 +15,24 @@ use agent_core::{AgentEngine, SessionHandle};
 /// Drive N tool rounds and capture the `ModelRequest` from each `CallModel`.
 fn capture_call_model_requests(rounds: u32) -> Vec<ModelRequest> {
     let engine = AgentEngine::new();
-    let handle = engine.create_session(
-        vec![AgentMessage {
-            id: "u0".into(),
-            role: agent_core::message::AgentRole::User,
-            content: "Objective: ship long-loop v1. Decision: keep transcript stable.".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cache_friendly_config(),
-        SessionCapabilities {
-            summarization_allowed: true,
-            prompt_cache_supported: true,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![AgentMessage {
+                id: "u0".into(),
+                role: agent_core::message::AgentRole::User,
+                content: "Objective: ship long-loop v1. Decision: keep transcript stable.".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cache_friendly_config(),
+            SessionCapabilities {
+                summarization_allowed: true,
+                prompt_cache_supported: true,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let mut requests = Vec::new();
     let tool_response = ModelResponse {

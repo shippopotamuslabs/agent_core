@@ -48,6 +48,7 @@ fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::Se
         serde_json::Value::Null,
         io_large(),
     )
+    .expect("valid config creates session")
 }
 
 fn parse_json(content: &str) -> Value {

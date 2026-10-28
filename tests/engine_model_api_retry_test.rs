@@ -40,6 +40,7 @@ fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::Se
         serde_json::Value::Null,
         io(),
     )
+    .expect("valid config creates session")
 }
 
 fn transient_failure(message: &str) -> ModelTurnFailureReport {

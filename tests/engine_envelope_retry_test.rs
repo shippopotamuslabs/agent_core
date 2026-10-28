@@ -47,6 +47,7 @@ fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
         serde_json::Value::Null,
         io_large(),
     )
+    .expect("valid config creates session")
 }
 
 fn malformed_response() -> ModelResponse {
@@ -289,21 +290,23 @@ const CL_TR_05_LEAKED_TOOL_CALL: &str = r#"<tool_call>{"name":"web_search"}</too
 #[test]
 fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
     let eng = AgentEngine::new();
-    let h = eng.create_session(
-        vec![user_msg()],
-        AgentConfig {
-            max_model_requests_per_turn: 10,
-            ..AgentConfig::default()
-        },
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: false,
-            tool_result_budget_tokens: None,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        io_large(),
-    );
+    let h = eng
+        .create_session(
+            vec![user_msg()],
+            AgentConfig {
+                max_model_requests_per_turn: 10,
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large(),
+        )
+        .expect("valid config creates session");
     for _ in 0..3 {
         let _ = eng.next_action(&h);
         eng.submit_model_response(&h, malformed_response());
@@ -380,21 +383,23 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
 #[test]
 fn cl_tr_06_native_tools_blocked_fallback_finishes_with_tool_use_finish_reason() {
     let eng = AgentEngine::new();
-    let h = eng.create_session(
-        vec![user_msg()],
-        AgentConfig {
-            max_model_requests_per_turn: 10,
-            ..AgentConfig::default()
-        },
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: false,
-            tool_result_budget_tokens: None,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        io_large(),
-    );
+    let h = eng
+        .create_session(
+            vec![user_msg()],
+            AgentConfig {
+                max_model_requests_per_turn: 10,
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large(),
+        )
+        .expect("valid config creates session");
     for _ in 0..3 {
         let _ = eng.next_action(&h);
         eng.submit_model_response(&h, malformed_response());

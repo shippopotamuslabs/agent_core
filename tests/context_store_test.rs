@@ -128,19 +128,21 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
     };
 
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u0".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u0".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
 
     // Advance to the awaiting-tools phase so we can submit a tool result.
     let _ = eng.next_action(&handle);
@@ -229,24 +231,26 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            r#"[{"name":"web_search"}]"#.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                r#"[{"name":"web_search"}]"#.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     let req = match eng.next_action(&handle) {
         AgentAction::CallModel(req) => req,
@@ -272,14 +276,16 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
 #[test]
 fn s23_terminal_output_references_share_retrieval_path() {
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            vec![],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
     let reference = eng.insert_terminal_output(
         &handle,
         "terminal-1".into(),
@@ -301,14 +307,16 @@ fn s23_terminal_output_references_share_retrieval_path() {
 #[test]
 fn e4_missing_context_reference_read_returns_not_found() {
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            vec![],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
     let err = eng
         .read_context_reference(&handle, "missing-ref".into())
         .expect_err("missing reference should error");
@@ -417,17 +425,19 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
     });
 
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        initial,
-        cfg,
-        SessionCapabilities {
-            summarization_allowed: false,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            initial,
+            cfg,
+            SessionCapabilities {
+                summarization_allowed: false,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
 
     // First turn: spill a tool result into the store.
     let _ = eng.next_action(&handle);

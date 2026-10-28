@@ -14,13 +14,15 @@ fn lalr_12_stops_at_five_tool_rounds() {
     long_loop.max_tool_turns = 5;
     let config = config_with_long_loop(long_loop);
     let engine = test_engine();
-    let handle = engine.create_session(
-        vec![],
-        config,
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![],
+            config,
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let action = next_action_at_max_tool_turns(&engine, &handle, 5);
     assert!(matches!(action, AgentAction::Failed(_)));

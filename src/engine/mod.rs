@@ -49,7 +49,7 @@ use crate::policy::resolve_context_policy;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
-use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
+use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
 
@@ -121,6 +121,11 @@ impl AgentEngine {
         Self::default()
     }
 
+    /// Fallible (ENC-297 J1): re-syncs the policy catalog from the
+    /// construction-time semantics and fails on invalid struct-literal /
+    /// serde configs (duplicate tool names, alias collisions) instead of
+    /// running the session with a stale or empty catalog. Returns
+    /// [`ToolSemanticsError`] so every caller decides how to surface it.
     pub fn create_session(
         &self,
         initial_messages: Vec<AgentMessage>,
@@ -128,14 +133,12 @@ impl AgentEngine {
         capabilities: SessionCapabilities,
         session_context: impl Into<crate::session::SessionContext>,
         io: SessionIoParams,
-    ) -> SessionHandle {
+    ) -> Result<SessionHandle, ToolSemanticsError> {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
-        // ENC-297: re-sync the policy catalog from the construction-time
-        // semantics (validate only; the fallible construction surfaces report
-        // errors, so an invalid literal config keeps its previous catalog
-        // here rather than failing session creation).
-        let _ = config.prepare_tool_semantics();
+        // ENC-297 J1: propagate — no `let _` discard. An invalid literal
+        // config fails session creation; no live session exists on error.
+        config.prepare_tool_semantics()?;
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -154,7 +157,7 @@ impl AgentEngine {
             .into_iter()
             .map(|text| PendingWorkItem { text })
             .collect();
-        SessionHandle {
+        Ok(SessionHandle {
             inner: Arc::new(Mutex::new(InnerSession {
                 session: AgentSession::new(initial_messages, session_context),
                 config,
@@ -192,7 +195,7 @@ impl AgentEngine {
                 destructive_tiers_this_turn: 0,
                 suppress_summary_tier: false,
             })),
-        }
+        })
     }
 
     pub fn next_action(&self, handle: &SessionHandle) -> AgentAction {
@@ -1429,38 +1432,42 @@ mod tests {
         use crate::policy::ContextPolicyTier;
 
         let eng = AgentEngine::new();
-        let hosted = eng.create_session(
-            vec![],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                context_policy_tier: ContextPolicyTier::HostedMutable,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let hosted = eng
+            .create_session(
+                vec![],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    context_policy_tier: ContextPolicyTier::HostedMutable,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         assert_eq!(
             hosted.lalr_config().long_loop,
             LongLoopPolicy::hosted_mutable_defaults()
         );
 
-        let fixed_kv = eng.create_session(
-            vec![],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                context_policy_tier: ContextPolicyTier::FixedKv,
-                kv_fixed: true,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let fixed_kv = eng
+            .create_session(
+                vec![],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    context_policy_tier: ContextPolicyTier::FixedKv,
+                    kv_fixed: true,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         assert_eq!(
             fixed_kv.lalr_config().long_loop,
             LongLoopPolicy::fixed_kv_defaults()
@@ -1470,23 +1477,25 @@ mod tests {
     #[test]
     fn submit_model_response_preserves_provider_reasoning_metadata() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
 
         assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
         eng.submit_model_response(
@@ -1519,23 +1528,25 @@ mod tests {
     #[test]
     fn three_tool_happy_path() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
 
         assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
         eng.submit_model_response(
@@ -1586,26 +1597,28 @@ mod tests {
     #[test]
     fn tool_results_matched_by_call_id_not_position() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         eng.submit_model_response(
             &h,
@@ -1688,23 +1701,25 @@ mod tests {
     #[test]
     fn missing_tool_result_synthesizes_error_for_provider_replay() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         eng.submit_model_response(
             &h,
@@ -1757,26 +1772,28 @@ mod tests {
     #[test]
     fn fuzzy_repair_web_seach() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         eng.submit_model_response(
             &h,
@@ -1807,23 +1824,25 @@ mod tests {
             ..Default::default()
         };
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            cfg,
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                cfg,
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         let AgentAction::CallModel(r1) = eng.next_action(&h) else {
             panic!("expected model");
         };
@@ -1862,18 +1881,20 @@ mod tests {
     #[test]
     fn cancel_returns_failed() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         eng.cancel(&h);
         assert!(matches!(
             eng.next_action(&h),
@@ -1885,37 +1906,39 @@ mod tests {
     fn preflight_compaction_on_oversized_history() {
         let big_pair = "hello ".repeat(400);
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![
-                AgentMessage {
-                    id: "u0".into(),
-                    role: AgentRole::User,
-                    content: big_pair.clone(),
-                    metadata: MessageMeta::new(),
+        let h = eng
+            .create_session(
+                vec![
+                    AgentMessage {
+                        id: "u0".into(),
+                        role: AgentRole::User,
+                        content: big_pair.clone(),
+                        metadata: MessageMeta::new(),
+                    },
+                    AgentMessage {
+                        id: "a0".into(),
+                        role: AgentRole::Assistant,
+                        content: big_pair,
+                        metadata: MessageMeta::new(),
+                    },
+                    AgentMessage {
+                        id: "u1".into(),
+                        role: AgentRole::User,
+                        content: "tail".into(),
+                        metadata: MessageMeta::new(),
+                    },
+                ],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
                 },
-                AgentMessage {
-                    id: "a0".into(),
-                    role: AgentRole::Assistant,
-                    content: big_pair,
-                    metadata: MessageMeta::new(),
-                },
-                AgentMessage {
-                    id: "u1".into(),
-                    role: AgentRole::User,
-                    content: "tail".into(),
-                    metadata: MessageMeta::new(),
-                },
-            ],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_small_window(),
-        );
+                serde_json::Value::Null,
+                io_small_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         assert!(!h.lock_inner().session.compaction_log.is_empty());
     }
@@ -1924,37 +1947,39 @@ mod tests {
     fn kv_fixed_emits_invalidated_on_compact() {
         let big_pair = "hello ".repeat(400);
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![
-                AgentMessage {
-                    id: "u0".into(),
-                    role: AgentRole::User,
-                    content: big_pair.clone(),
-                    metadata: MessageMeta::new(),
+        let h = eng
+            .create_session(
+                vec![
+                    AgentMessage {
+                        id: "u0".into(),
+                        role: AgentRole::User,
+                        content: big_pair.clone(),
+                        metadata: MessageMeta::new(),
+                    },
+                    AgentMessage {
+                        id: "a0".into(),
+                        role: AgentRole::Assistant,
+                        content: big_pair,
+                        metadata: MessageMeta::new(),
+                    },
+                    AgentMessage {
+                        id: "u1".into(),
+                        role: AgentRole::User,
+                        content: "tail".into(),
+                        metadata: MessageMeta::new(),
+                    },
+                ],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: true,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
                 },
-                AgentMessage {
-                    id: "a0".into(),
-                    role: AgentRole::Assistant,
-                    content: big_pair,
-                    metadata: MessageMeta::new(),
-                },
-                AgentMessage {
-                    id: "u1".into(),
-                    role: AgentRole::User,
-                    content: "tail".into(),
-                    metadata: MessageMeta::new(),
-                },
-            ],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: true,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_small_window(),
-        );
+                serde_json::Value::Null,
+                io_small_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         let evs = eng.drain_events(&h);
         assert!(evs
@@ -1965,26 +1990,28 @@ mod tests {
     #[test]
     fn artifact_auto_finalize_then_finished() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
 
         let turns_before = eng.next_action(&h);
         let AgentAction::CallModel(_) = turns_before else {
@@ -2054,26 +2081,28 @@ mod tests {
     #[test]
     fn artifact_stop_tool_response_auto_finalizes_after_tool_result() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
 
         assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
         eng.submit_model_response(
@@ -2156,26 +2185,28 @@ mod tests {
     #[test]
     fn tb_10_seed_guardrails_auto_finalize_repro() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig {
-                tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
-                ..AgentConfig::default()
-            },
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         h.integration_test_seed_guardrails(3, 0, 0, vec![]);
         let _ = eng.next_action(&h);
         eng.submit_model_response(
@@ -2281,26 +2312,79 @@ mod tests {
     #[test]
     fn drain_events_clears_buffer() {
         let eng = AgentEngine::new();
-        let h = eng.create_session(
-            vec![AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "hi".into(),
-                metadata: MessageMeta::new(),
-            }],
-            AgentConfig::default(),
-            SessionCapabilities {
-                summarization_allowed: false,
-                kv_fixed: false,
-                tool_result_budget_tokens: None,
-                ..Default::default()
-            },
-            serde_json::Value::Null,
-            io_large_window(),
-        );
+        let h = eng
+            .create_session(
+                vec![AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "hi".into(),
+                    metadata: MessageMeta::new(),
+                }],
+                AgentConfig::default(),
+                SessionCapabilities {
+                    summarization_allowed: false,
+                    kv_fixed: false,
+                    tool_result_budget_tokens: None,
+                    ..Default::default()
+                },
+                serde_json::Value::Null,
+                io_large_window(),
+            )
+            .expect("valid config creates session");
         let _ = eng.next_action(&h);
         assert!(!eng.drain_events(&h).is_empty());
         assert!(eng.drain_events(&h).is_empty());
+    }
+
+    #[test]
+    fn create_session_rejects_duplicate_name_struct_literal() {
+        // ENC-297 J1: an invalid struct-literal config (normalized-duplicate
+        // tool names) fails session creation — no live session runs with a
+        // stale or empty catalog.
+        use crate::catalog::ToolSpec;
+        use crate::tool_semantics::{ToolCatalogConfig, ToolSemanticsConfig};
+
+        let eng = AgentEngine::new();
+        let semantics = ToolSemanticsConfig {
+            catalog: ToolCatalogConfig {
+                tools: vec![
+                    ToolSpec {
+                        name: "web_search".into(),
+                        aliases: Vec::new(),
+                        reproducible: true,
+                        schema_hint: None,
+                    },
+                    ToolSpec {
+                        name: "web-search".into(),
+                        aliases: Vec::new(),
+                        reproducible: true,
+                        schema_hint: None,
+                    },
+                ],
+            },
+            ..ToolSemanticsConfig::agnostic()
+        };
+        let config = AgentConfig {
+            tool_semantics: semantics,
+            ..AgentConfig::default()
+        };
+        let error = match eng.create_session(
+            vec![],
+            config,
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            io_large_window(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate tool names must fail session creation"),
+        };
+        assert!(
+            matches!(
+                error,
+                crate::tool_semantics::ToolSemanticsError::DuplicateToolName { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     fn frg14_squash(

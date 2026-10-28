@@ -39,6 +39,7 @@ fn new_session(eng: &AgentEngine) -> SessionHandle {
         serde_json::Value::Null,
         io_large_window(),
     )
+    .expect("valid config creates session")
 }
 
 fn tool_call(id: &str) -> RawToolCall {
@@ -174,18 +175,20 @@ fn char_reject_only_turn_returns_to_model() {
         "sys".into(),
     )
     .expect("valid test io params");
-    let h = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        AgentConfig::default(),
-        caps_no_summary(),
-        serde_json::Value::Null,
-        io,
-    );
+    let h = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            AgentConfig::default(),
+            caps_no_summary(),
+            serde_json::Value::Null,
+            io,
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.drain_events(&h);

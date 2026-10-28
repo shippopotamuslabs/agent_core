@@ -1014,58 +1014,64 @@ impl Default for FfiAgentConfig {
 /// names, alias collisions, empty required fields) is an `AgentException`
 /// naming the failure — never an `eprintln` + agnostic fallback.
 pub(crate) fn agent_config(f: FfiAgentConfig) -> Result<AgentConfig, AgentException> {
-    let mut semantics = match f.tool_semantics {
-        Some(tree) => tree.into_core()?,
-        None => crate::tool_semantics::ToolSemanticsConfig::agnostic(),
-    };
-    semantics.catalog.tools = f
-        .tool_specs
-        .into_iter()
-        .map(|spec| spec.into_core())
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut config =
-        AgentConfig::with_tool_semantics(semantics).map_err(|error| AgentException::Internal {
-            detail: format!("invalid tool semantics: {error:?}"),
-        })?;
-    config.max_turns = f.max_turns;
-    config.threshold_ratio = f.threshold_ratio;
-    config.micro_keep_recent = f.micro_keep_recent;
-    config.tool_retry_limit = f.tool_retry_limit;
-    config.model_api_retry_limit = f.model_api_retry_limit;
-    config.model_api_retry_base_delay_ms = f.model_api_retry_base_delay_ms;
-    config.tool_result_budget_cloud_bytes = f.tool_result_budget_cloud_bytes as usize;
-    config.tool_result_budget_relaxed_bytes = f.tool_result_budget_relaxed_bytes as usize;
-    config.tool_result_truncation_pressure_ratio = f.tool_result_truncation_pressure_ratio;
-    config.mid_turn_threshold_ratio = f.mid_turn_threshold_ratio;
-    config.post_tool_result_threshold_ratio = f.post_tool_result_threshold_ratio;
-    config.manual_compact_threshold_ratio = f.manual_compact_threshold_ratio;
-    config.allow_fifo_on_preflight = f.allow_fifo_on_preflight;
-    config.allow_fifo_on_mid_turn = f.allow_fifo_on_mid_turn;
-    config.allow_fifo_on_post_tool_result = f.allow_fifo_on_post_tool_result;
-    config.require_snapshot_before_fifo = f.require_snapshot_before_fifo;
-    config.enable_context_store = f.enable_context_store;
-    config.enable_state_ledger = f.enable_state_ledger;
-    config.enable_tool_schema_deferral = f.enable_tool_schema_deferral;
-    config.enable_file_condensation = f.enable_file_condensation;
-    config.enable_manual_compact = f.enable_manual_compact;
-    config.tool_spill_threshold_bytes = f.tool_spill_threshold_bytes as usize;
-    config.terminal_spill_threshold_bytes = f.terminal_spill_threshold_bytes as usize;
-    config.history_snapshot_threshold_tokens = f.history_snapshot_threshold_tokens;
-    config.file_outline_threshold_tokens = f.file_outline_threshold_tokens;
-    config.prompt_cache_anchor_threshold_tokens = f.prompt_cache_anchor_threshold_tokens;
-    config.output_reserve_ratio = f.output_reserve_ratio;
-    config.output_reserve_floor_tokens = f.output_reserve_floor_tokens;
-    config.output_reserve_max_tokens = f.output_reserve_max_tokens;
-    config.max_model_requests_per_turn = f.max_model_requests_per_turn;
-    config.preflight_token_threshold = f.preflight_token_threshold;
-    config.mid_turn_token_threshold = f.mid_turn_token_threshold;
-    config.post_tool_result_token_threshold = f.post_tool_result_token_threshold;
-    config.message_threshold = f.message_threshold;
-    config.retention_window_tokens = f.retention_window_tokens;
-    config.enable_loop_hooks = f.enable_loop_hooks;
-    config.enable_pending_work_guard = f.enable_pending_work_guard;
-    config.long_loop = LongLoopPolicy::from(f.long_loop);
-    Ok(config)
+    // ENC-297 M1: the single shared conversion — sibling specs assigned,
+    // validated, catalog built — with the one error mapping.
+    let (semantics, catalog) = super::semantics::typed_to_core(f.tool_semantics, f.tool_specs)?;
+    // ENC-297 M5: every AgentConfig field listed explicitly. Fields the FFI
+    // record does not carry take their documented core defaults visibly
+    // here, so no `..Default::default()` tail can silently inherit (or
+    // later drop) a scalar.
+    let defaults = AgentConfig::default();
+    Ok(AgentConfig {
+        max_turns: f.max_turns,
+        threshold_ratio: f.threshold_ratio,
+        micro_keep_recent: f.micro_keep_recent,
+        tool_retry_limit: f.tool_retry_limit,
+        model_api_retry_limit: f.model_api_retry_limit,
+        model_api_retry_base_delay_ms: f.model_api_retry_base_delay_ms,
+        tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
+        tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
+        tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
+        token_correction: defaults.token_correction,
+        mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
+        post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
+        manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
+        allow_fifo_on_preflight: f.allow_fifo_on_preflight,
+        allow_fifo_on_mid_turn: f.allow_fifo_on_mid_turn,
+        allow_fifo_on_post_tool_result: f.allow_fifo_on_post_tool_result,
+        require_snapshot_before_fifo: f.require_snapshot_before_fifo,
+        enable_context_store: f.enable_context_store,
+        enable_state_ledger: f.enable_state_ledger,
+        enable_tool_schema_deferral: f.enable_tool_schema_deferral,
+        enable_file_condensation: f.enable_file_condensation,
+        enable_manual_compact: f.enable_manual_compact,
+        tool_spill_threshold_bytes: f.tool_spill_threshold_bytes as usize,
+        terminal_spill_threshold_bytes: f.terminal_spill_threshold_bytes as usize,
+        history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
+        file_outline_threshold_tokens: f.file_outline_threshold_tokens,
+        prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
+        output_reserve_ratio: f.output_reserve_ratio,
+        output_reserve_floor_tokens: f.output_reserve_floor_tokens,
+        output_reserve_max_tokens: f.output_reserve_max_tokens,
+        preflight_token_threshold: f.preflight_token_threshold,
+        mid_turn_token_threshold: f.mid_turn_token_threshold,
+        post_tool_result_token_threshold: f.post_tool_result_token_threshold,
+        turn_threshold: defaults.turn_threshold,
+        message_threshold: f.message_threshold,
+        compact_on_turn_end: defaults.compact_on_turn_end,
+        retention_window_messages: defaults.retention_window_messages,
+        retention_window_tokens: f.retention_window_tokens,
+        eviction_window_ratio: defaults.eviction_window_ratio,
+        enable_loop_hooks: f.enable_loop_hooks,
+        enable_doom_loop_guard: defaults.enable_doom_loop_guard,
+        enable_pending_work_guard: f.enable_pending_work_guard,
+        require_read_before_edit: defaults.require_read_before_edit,
+        default_tool_timeout_ms: defaults.default_tool_timeout_ms,
+        max_model_requests_per_turn: f.max_model_requests_per_turn,
+        long_loop: LongLoopPolicy::from(f.long_loop),
+        tool_semantics: semantics,
+        tool_catalog: catalog,
+    })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

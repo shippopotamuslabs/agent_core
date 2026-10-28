@@ -25,24 +25,26 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            SCHEMAS_JSON.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                SCHEMAS_JSON.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
@@ -93,24 +95,26 @@ fn s14_deferred_tool_schema_metadata_is_advertised_without_stash() {
     };
 
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            SCHEMAS_JSON.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                SCHEMAS_JSON.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     let summaries = match eng.next_action(&handle) {
         AgentAction::CallModel(req) => req
@@ -145,24 +149,26 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_active_schema_json() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            r#"[{"name":"web_search"}]"#.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                r#"[{"name":"web_search"}]"#.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
             assert!(req.tool_context_index.is_none());
@@ -190,19 +196,21 @@ fn m6_tool_deferral_advertises_active_tools_without_stashing_schemas() {
     let schemas = r#"[{"name":"rare_tool","description":"A rare tool"}]"#;
 
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new("anthropic".into(), 200_000, schemas.into(), "sys".into())
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, schemas.into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
 
     // Drive the index build through the engine.
     let req = match eng.next_action(&handle) {
@@ -251,24 +259,26 @@ fn enc_297_empty_typed_catalog_defers_active_schemas() {
         ..SessionCapabilities::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            SCHEMAS_JSON.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                SCHEMAS_JSON.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
             let names: Vec<&str> = req
@@ -319,24 +329,26 @@ fn enc_297_nonempty_typed_catalog_shows_active_schemas() {
         ..SessionCapabilities::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            SCHEMAS_JSON.into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                SCHEMAS_JSON.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
             assert!(

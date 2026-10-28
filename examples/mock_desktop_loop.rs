@@ -8,24 +8,26 @@ use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
 fn main() {
     let eng = AgentEngine::new();
-    let h = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        AgentConfig::default(),
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: false,
-            tool_result_budget_tokens: None,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        SessionIoParams::new("openai".into(), 128_000, "[]".into(), "sys".into())
-            .expect("valid example io params"),
-    );
+    let h = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            SessionIoParams::new("openai".into(), 128_000, "[]".into(), "sys".into())
+                .expect("valid example io params"),
+        )
+        .expect("valid config creates session");
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(
         &h,

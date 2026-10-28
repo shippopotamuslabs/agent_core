@@ -91,6 +91,7 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
         )
         .expect("valid test io params"),
     )
+    .expect("valid config creates session")
 }
 
 fn model_request(eng: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {
@@ -192,6 +193,7 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
         )
         .expect("valid test io params"),
     )
+    .expect("valid config creates session")
 }
 
 #[test]

@@ -65,18 +65,20 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
     let system = "# ABOUT\n".to_string() + &"detail ".repeat(1_500);
     let history = "history ".repeat(500);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            msg("u1", AgentRole::User, &history),
-            msg("a1", AgentRole::Assistant, &history),
-            msg("u2", AgentRole::User, "latest question"),
-        ],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new("LLAMA".into(), 4096, "[]".into(), system)
-            .expect("valid test io params"),
-    );
+    let handle = eng
+        .create_session(
+            vec![
+                msg("u1", AgentRole::User, &history),
+                msg("a1", AgentRole::Assistant, &history),
+                msg("u2", AgentRole::User, "latest question"),
+            ],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new("LLAMA".into(), 4096, "[]".into(), system)
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
 
     let before = eng.drain_events(&handle);
     let _ = before;

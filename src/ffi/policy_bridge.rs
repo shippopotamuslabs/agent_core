@@ -31,24 +31,13 @@ fn load_policy_semantics(
     tool_semantics: Option<FfiToolSemantics>,
     tool_specs: Vec<FfiToolSpec>,
 ) -> Result<(ToolSemanticsConfig, crate::catalog::ToolCatalog), String> {
-    fn detail(error: AgentException) -> String {
-        match error {
-            AgentException::Internal { detail } => detail,
-            other => format!("{other:?}"),
-        }
-    }
-    let mut semantics = match tool_semantics {
-        Some(tree) => tree.into_core().map_err(detail)?,
-        None => ToolSemanticsConfig::agnostic(),
-    };
-    semantics.catalog.tools = tool_specs
-        .into_iter()
-        .map(|spec| spec.into_core())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(detail)?;
-    let catalog = crate::catalog::ToolCatalog::from_semantics(&semantics)
-        .map_err(|error| format!("invalid tool semantics: {error:?}"))?;
-    Ok((semantics, catalog))
+    // ENC-297 M1: shared conversion — same validation, catalog build, and
+    // error mapping as the AgentConfig edge; only the error wrapper differs
+    // (String payload for the infallible helpers).
+    super::semantics::typed_to_core(tool_semantics, tool_specs).map_err(|error| match error {
+        AgentException::Internal { detail } => detail,
+        other => format!("{other:?}"),
+    })
 }
 
 #[uniffi::export]
