@@ -217,9 +217,7 @@ impl AgentEngine {
                 tools_blocked_nudges_this_turn: 0,
                 active_tool_names: initial_active_tool_names,
                 sidecar_builder: SidecarBuilder::new(),
-                compaction_passes_this_turn: 0,
-                destructive_tiers_this_turn: 0,
-                suppress_summary_tier: false,
+                compaction: compaction::CompactionState::new(),
             })),
         })
     }
@@ -1035,9 +1033,9 @@ impl InnerSession {
             active_tool_names: &self.active_tool_names,
             turn_index: self.turn_index,
             model_requests_this_turn: &mut self.model_requests_this_turn,
-            compaction_passes_this_turn: self.compaction_passes_this_turn,
-            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-            suppress_summary_tier: self.suppress_summary_tier,
+            compaction_passes_this_turn: self.compaction.passes_this_turn(),
+            destructive_tiers_this_turn: self.compaction.destructive_tiers_this_turn(),
+            suppress_summary_tier: self.compaction.suppress_summary_tier(),
             events: &mut self.events,
         }
     }
@@ -1069,7 +1067,7 @@ impl InnerSession {
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
     fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
-        self.suppress_summary_tier = true;
+        self.compaction.set_suppress_summary_tier(true);
         match self.run_compaction_pass(trigger) {
             Ok(Some(_)) => {}
             Ok(None) => {}
@@ -1077,7 +1075,7 @@ impl InnerSession {
                 self.set_terminal(AgentAction::Failed(e));
             }
         }
-        self.suppress_summary_tier = false;
+        self.compaction.set_suppress_summary_tier(false);
     }
 
     pub(super) fn set_terminal(&mut self, a: AgentAction) {
@@ -1123,7 +1121,7 @@ impl InnerSession {
             context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
             trigger,
-            suppress_summary_tier: self.suppress_summary_tier,
+            suppress_summary_tier: self.compaction.suppress_summary_tier(),
         }
     }
 
@@ -1161,10 +1159,12 @@ impl InnerSession {
         &mut self,
         trigger: CompactionTrigger,
     ) -> Result<Option<AgentAction>, AgentError> {
-        let mut sync_applied = false;
-        let mut last_history_ref: Option<String> = None;
-        let message_count_before = self.session.messages.len() as u32;
-        let mut destructive_tiers: Vec<CompactionTier> = Vec::new();
+        let mut pass = compaction::CompactionPassState {
+            sync_applied: false,
+            last_history_ref: None,
+            destructive_tiers: Vec::new(),
+            message_count_before: self.session.messages.len() as u32,
+        };
         loop {
             let ctx = self.make_ctx(trigger);
             let policy = resolve_context_policy(
@@ -1180,7 +1180,7 @@ impl InnerSession {
                 &policy,
                 trigger,
                 self.io.context_window_tokens,
-                self.suppress_summary_tier,
+                self.compaction.suppress_summary_tier(),
             );
             // ENC-303 Q2: ConfirmationGated tiers (Fifo, TextTruncate) stay
             // in a ratio-triggered plan only on hard-ceiling pressure, a
@@ -1242,13 +1242,13 @@ impl InnerSession {
             let forced_by_non_ratio = fire.forced_by_non_ratio;
 
             if !fire.should_enter {
-                if sync_applied {
+                if pass.sync_applied {
                     self.emit_post_compact(
                         trigger,
                         None,
-                        last_history_ref,
-                        &destructive_tiers,
-                        message_count_before,
+                        pass.last_history_ref.take(),
+                        &pass.destructive_tiers,
+                        pass.message_count_before,
                     );
                 }
                 return Ok(None);
@@ -1273,40 +1273,10 @@ impl InnerSession {
             }
 
             if self.config.enable_context_store {
-                // Slice 6: sync spill/snapshot runs in the helper; the
-                // dispatch applies flags, ledger refs, and emits in order.
-                let effect = compaction::collect_sync_spill_effect(compaction::SyncSpillInputs {
-                    session: &mut self.session,
-                    context_store: &mut self.context_store,
-                    artifact_squash: self
-                        .config
-                        .tool_semantics
-                        .compaction
-                        .artifact_squash
-                        .as_ref(),
-                    spill_threshold_bytes: effective_tool_spill_threshold_bytes(
-                        &self.config,
-                        self.io.context_window_tokens,
-                    ),
-                    turn_index: self.turn_index,
-                    pressure_total_tokens: pressure.total_tokens,
-                    trigger,
-                });
-                if let Some(event) = effect.spill_event {
-                    self.session.push_compaction_event(event.clone());
-                    self.emit(AgentEvent::CompactionApplied(event));
-                    sync_applied = true;
-                }
-                if let Some(history_ref) = effect.history_ref {
-                    last_history_ref = Some(history_ref.clone());
-                    self.remember_history_snapshot_ids(effect.snapshot_ids);
-                    if self.config.enable_state_ledger {
-                        self.state_ledger.add_history_ref(&history_ref);
-                    }
-                    let event = effect.snapshot_event.expect("history snapshot event");
-                    self.session.push_compaction_event(event.clone());
-                    self.emit(AgentEvent::CompactionApplied(event));
-                }
+                // ENC-306 D2: the sync spill/snapshot block is a fused
+                // InnerSession method in the compaction module; it runs
+                // against self and applies its effects in order.
+                self.sync_spill_pass(pressure.total_tokens, &mut pass, trigger);
             }
             if has_append_context {
                 self.persist_artifact_state_if_present();
@@ -1344,13 +1314,12 @@ impl InnerSession {
                     forced_by_non_ratio,
                     entered_for_long_loop_only,
                     post_pressure,
-                    sync_applied: &mut sync_applied,
-                    last_history_ref: &mut last_history_ref,
-                    destructive_tiers: &mut destructive_tiers,
-                    destructive_tiers_this_turn: &mut self.destructive_tiers_this_turn,
-                    compaction_passes_this_turn: &mut self.compaction_passes_this_turn,
+                    sync_applied: &mut pass.sync_applied,
+                    last_history_ref: &mut pass.last_history_ref,
+                    destructive_tiers: &mut pass.destructive_tiers,
+                    compaction: &mut self.compaction,
                     defer_compaction_failure,
-                    message_count_before,
+                    message_count_before: pass.message_count_before,
                 },
                 outcome,
             ) {
@@ -1371,8 +1340,7 @@ impl InnerSession {
         self.turn_index += 1;
         self.context_store.expire_after_turn(self.turn_index);
         // Reset per-turn telemetry counters for the new user turn.
-        self.compaction_passes_this_turn = 0;
-        self.destructive_tiers_this_turn = 0;
+        self.compaction.begin_turn();
         let allow = self
             .guardrails
             .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
@@ -1429,9 +1397,9 @@ impl InnerSession {
             state_ledger: &self.state_ledger,
             sidecar_builder: &mut self.sidecar_builder,
             turn_index: self.turn_index,
-            compaction_passes_this_turn: self.compaction_passes_this_turn,
-            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-            suppress_summary_tier: self.suppress_summary_tier,
+            compaction_passes_this_turn: self.compaction.passes_this_turn(),
+            destructive_tiers_this_turn: self.compaction.destructive_tiers_this_turn(),
+            suppress_summary_tier: self.compaction.suppress_summary_tier(),
             allow_tool_call: allow,
             cache_hints,
             loop_metrics: &self.loop_metrics,

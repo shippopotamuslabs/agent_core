@@ -1,16 +1,24 @@
-//! Compaction orchestration helpers (ENC-286 slice 6; FRG-47 staging).
+//! Compaction orchestration (ENC-286 slice 6; FRG-47 staging; ENC-306).
 //!
-//! `run_compaction_pass` keeps the loop, the outcome match, and every phase
-//! write. The pure entry gate lives in `compact::policy` (`should_enter_
-//! compaction`); the two helpers here own the sync spill/snapshot block and
-//! the shared `NeedsHostCall` staging. Everything takes disjoint field bundles
-//! — no `&mut InnerSession`, no Mutex locking, no phase writes (phase effects
-//! are returned, never applied).
+//! Compaction's persistent per-turn state lives in [`CompactionState`],
+//! owned by `InnerSession` as `self.compaction`; per-pass working state
+//! lives in [`CompactionPassState`], owned by `run_compaction_pass` and
+//! lent to the operations that need it. Operations are `InnerSession`
+//! methods defined in this module (the module that owns the state) and
+//! apply their effects directly: the sync spill/snapshot block is the
+//! fused [`InnerSession::sync_spill_pass`]. What remains on the older
+//! bundle idiom for now: the pipeline-outcome decision
+//! (`decide_pipeline_outcome`) and the shared `NeedsHostCall` staging
+//! (`attach_summary_staging`) still take field bundles and return their
+//! decision/effects for the dispatch in `mod.rs` to apply.
+//!
+//! `run_compaction_pass` keeps the loop and every phase write. The pure
+//! entry gate lives in `compact::policy` (`should_enter_compaction`).
 
 use super::is_destructive_compaction_tier;
-use super::state::EnginePhase;
+use super::state::{EnginePhase, InnerSession};
 use crate::action::AgentAction;
-use crate::budget::exceeds_hard_prompt_ceiling;
+use crate::budget::{effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ceiling};
 use crate::compact::history_snapshot::snapshot_history_range;
 use crate::compact::tool_spill::spill_tool_messages_in_session;
 use crate::compact::{CompactionContext, CompactionOutcome};
@@ -25,72 +33,132 @@ use crate::tool_semantics::ArtifactSquashSemantics;
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::SummaryRequest;
 
-/// Inputs for the sync spill/snapshot block.
-pub(super) struct SyncSpillInputs<'a> {
-    pub session: &'a mut AgentSession,
-    pub context_store: &'a mut ContextStore,
-    pub artifact_squash: Option<&'a ArtifactSquashSemantics>,
-    pub spill_threshold_bytes: usize,
-    pub turn_index: u32,
-    pub pressure_total_tokens: u32,
-    pub trigger: CompactionTrigger,
+/// Persistent compaction state for a session (ENC-306 D1): the per-turn
+/// pass / destructive-tier counters and the summary-tier suppression flag.
+/// Owned by `InnerSession` as a single field; the fields stay private and
+/// every reader/writer goes through these methods, so counter and flag
+/// timing lives in exactly one place.
+pub(super) struct CompactionState {
+    passes_this_turn: u32,
+    destructive_tiers_this_turn: u32,
+    suppress_summary_tier: bool,
 }
 
-/// Effect of the sync spill/snapshot block. The dispatch applies flags, ledger
-/// refs, session-log pushes, and emits in the original order.
-pub(super) struct SyncSpillEffect {
-    pub spill_applied: bool,
-    pub spill_event: Option<CompactionEvent>,
-    pub snapshot_ids: Vec<String>,
-    pub history_ref: Option<String>,
-    pub snapshot_event: Option<CompactionEvent>,
+impl CompactionState {
+    pub(super) fn new() -> Self {
+        Self {
+            passes_this_turn: 0,
+            destructive_tiers_this_turn: 0,
+            suppress_summary_tier: false,
+        }
+    }
+
+    /// Start a new user turn: zeroes both counters. The suppression flag
+    /// is NOT reset here — it is written only by `retry_without_summary`,
+    /// which sets it for the duration of one re-run.
+    pub(super) fn begin_turn(&mut self) {
+        self.passes_this_turn = 0;
+        self.destructive_tiers_this_turn = 0;
+    }
+
+    /// Record one applied compaction pass; `destructive` additionally
+    /// counts a destructive tier (Micro/Fifo/Summary/TextTruncate).
+    pub(super) fn record_applied(&mut self, destructive: bool) {
+        self.passes_this_turn += 1;
+        if destructive {
+            self.destructive_tiers_this_turn += 1;
+        }
+    }
+
+    pub(super) fn passes_this_turn(&self) -> u32 {
+        self.passes_this_turn
+    }
+
+    pub(super) fn destructive_tiers_this_turn(&self) -> u32 {
+        self.destructive_tiers_this_turn
+    }
+
+    pub(super) fn suppress_summary_tier(&self) -> bool {
+        self.suppress_summary_tier
+    }
+
+    pub(super) fn set_suppress_summary_tier(&mut self, suppress: bool) {
+        self.suppress_summary_tier = suppress;
+    }
 }
 
-pub(super) fn collect_sync_spill_effect(inputs: SyncSpillInputs<'_>) -> SyncSpillEffect {
-    let SyncSpillInputs {
-        session,
-        context_store,
-        artifact_squash,
-        spill_threshold_bytes,
-        turn_index,
-        pressure_total_tokens,
-        trigger,
-    } = inputs;
-    let mut effect = SyncSpillEffect {
-        spill_applied: false,
-        spill_event: None,
-        snapshot_ids: Vec::new(),
-        history_ref: None,
-        snapshot_event: None,
-    };
-    if let Some(event) = spill_tool_messages_in_session(
-        context_store,
-        session,
-        artifact_squash,
-        spill_threshold_bytes,
-        turn_index,
-        trigger,
+/// Per-pass working state for one `run_compaction_pass` invocation
+/// (ENC-306 D3). Owns its fields outright (no lifetimes, no mirrors of
+/// `InnerSession` fields); constructed by `run_compaction_pass` and lent
+/// `&mut` to the pass operations.
+pub(super) struct CompactionPassState {
+    pub sync_applied: bool,
+    pub last_history_ref: Option<String>,
+    pub destructive_tiers: Vec<CompactionTier>,
+    pub message_count_before: u32,
+}
+
+impl InnerSession {
+    /// Fused sync spill/snapshot pass (ENC-306 D2): runs the spill and the
+    /// history snapshot against `self` and applies the effects directly,
+    /// in the exact order the old collect/apply pair produced them — the
+    /// spill and snapshot first run (spill, snapshot ids, snapshot), then
+    /// the spill event is pushed/emitted and `pass.sync_applied` set, then,
+    /// under a history ref, the snapshot ids are remembered, the ref goes
+    /// to the state ledger, and the snapshot event is pushed/emitted. The
+    /// caller keeps the `enable_context_store` guard, as before.
+    pub(super) fn sync_spill_pass(
+        &mut self,
+        pressure_total_tokens: u32,
+        pass: &mut CompactionPassState,
+        trigger: CompactionTrigger,
     ) {
-        effect.spill_applied = true;
-        effect.spill_event = Some(event);
-    }
-    effect.snapshot_ids = session
-        .messages
-        .iter()
-        .map(|message| message.id.clone())
-        .collect();
-    if let Some(reference) =
-        snapshot_history_range(context_store, &session.messages, trigger, turn_index)
-    {
-        effect.history_ref = Some(reference.id.clone());
-        effect.snapshot_event = Some(CompactionEvent {
-            tier: CompactionTier::HistorySnapshot,
-            tokens_before: pressure_total_tokens,
-            tokens_after: pressure_total_tokens,
+        let spill_event = spill_tool_messages_in_session(
+            &mut self.context_store,
+            &mut self.session,
+            self.config
+                .tool_semantics
+                .compaction
+                .artifact_squash
+                .as_ref(),
+            effective_tool_spill_threshold_bytes(&self.config, self.io.context_window_tokens),
+            self.turn_index,
             trigger,
-        });
+        );
+        let snapshot_ids: Vec<String> = self
+            .session
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+        let snapshot_reference = snapshot_history_range(
+            &mut self.context_store,
+            &self.session.messages,
+            trigger,
+            self.turn_index,
+        );
+        if let Some(event) = spill_event {
+            self.session.push_compaction_event(event.clone());
+            self.emit(AgentEvent::CompactionApplied(event));
+            pass.sync_applied = true;
+        }
+        if let Some(reference) = snapshot_reference {
+            let history_ref = reference.id.clone();
+            pass.last_history_ref = Some(history_ref.clone());
+            self.remember_history_snapshot_ids(snapshot_ids);
+            if self.config.enable_state_ledger {
+                self.state_ledger.add_history_ref(&history_ref);
+            }
+            let event = CompactionEvent {
+                tier: CompactionTier::HistorySnapshot,
+                tokens_before: pressure_total_tokens,
+                tokens_after: pressure_total_tokens,
+                trigger,
+            };
+            self.session.push_compaction_event(event.clone());
+            self.emit(AgentEvent::CompactionApplied(event));
+        }
     }
-    effect
 }
 
 /// Shared `NeedsHostCall` staging for `run_compaction_pass` and
@@ -219,8 +287,7 @@ pub(super) struct PipelineOutcomeInputs<'a> {
     pub sync_applied: &'a mut bool,
     pub last_history_ref: &'a mut Option<String>,
     pub destructive_tiers: &'a mut Vec<CompactionTier>,
-    pub destructive_tiers_this_turn: &'a mut u32,
-    pub compaction_passes_this_turn: &'a mut u32,
+    pub compaction: &'a mut CompactionState,
     pub defer_compaction_failure: bool,
     pub message_count_before: u32,
 }
@@ -254,8 +321,7 @@ pub(super) fn decide_pipeline_outcome(
         sync_applied,
         last_history_ref,
         destructive_tiers,
-        destructive_tiers_this_turn,
-        compaction_passes_this_turn,
+        compaction,
         defer_compaction_failure,
         message_count_before,
     } = inputs;
@@ -286,11 +352,11 @@ pub(super) fn decide_pipeline_outcome(
             PipelineDecision::ReturnOk(Some(Box::new(AgentAction::RequestSummary(req))))
         }
         CompactionOutcome::Applied(sess, ev) => {
-            if is_destructive_compaction_tier(&ev.tier) {
+            let destructive = is_destructive_compaction_tier(&ev.tier);
+            if destructive {
                 destructive_tiers.push(ev.tier.clone());
-                *destructive_tiers_this_turn += 1;
             }
-            *compaction_passes_this_turn += 1;
+            compaction.record_applied(destructive);
             *session = sess;
             events.push(AgentEvent::CompactionApplied(ev.clone()));
             *sync_applied = true;

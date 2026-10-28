@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use super::compaction::CompactionState;
 use crate::action::AgentAction;
 use crate::compact::CompactionContext;
 use crate::context_store::ContextStore;
@@ -116,13 +117,11 @@ pub(crate) struct InnerSession {
     /// Initially populated from the session's parsed [`ToolSchemaSet`].
     pub(super) active_tool_names: Vec<ToolName>,
     pub(super) sidecar_builder: SidecarBuilder,
-    /// Telemetry: number of compaction passes run this user turn (reset on turn start).
-    pub(super) compaction_passes_this_turn: u32,
-    /// Telemetry: number of destructive compaction tiers (Micro/Fifo/Summary) applied
-    /// this user turn (reset on turn start).
-    pub(super) destructive_tiers_this_turn: u32,
-    /// Host declined summarization for the current compaction continuation (utility lane skip).
-    pub(super) suppress_summary_tier: bool,
+    /// Compaction-owned state (ENC-306 D1): per-turn pass/destructive-tier
+    /// telemetry counters (reset on turn start) and the summary-tier
+    /// suppression flag (host declined summarization for the current
+    /// compaction continuation, utility lane skip).
+    pub(super) compaction: CompactionState,
 }
 
 /// Integration-test snapshot (TOOL-PARSE-002).
