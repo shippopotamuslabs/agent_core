@@ -90,10 +90,14 @@ impl SchemaEntry {
     /// tool (ENC-296: the registry lookup is gone; the host wires the full
     /// schema provider-side), matching the legacy `render_active_schema_json`
     /// stub shape.
-    pub fn stub(name: &str) -> Self {
+    ///
+    /// m4: the stub value embeds the canonical name (callers pass the
+    /// [`ToolName` identity, never raw text), so renders keyed off the
+    /// value agree with renders keyed off the name.
+    pub fn stub(name: &ToolName) -> Self {
         Self {
-            name: ToolName::new(name).unwrap_or_else(|_| ToolName::from_raw_lenient(name)),
-            value: serde_json::json!({"name": name}),
+            name: name.clone(),
+            value: serde_json::json!({"name": name.as_str()}),
         }
     }
 
@@ -200,10 +204,13 @@ pub(crate) enum EntryNameError {
 }
 
 /// Stateful checker for one channel's entry sequence: feed each
-/// entry's name in order.
+/// entry's name in order. Validation and dedupe run on the canonical
+/// [`ToolName`] (ENC-299 m1): `Web-Search` + `web_search` in one channel
+/// is a DuplicateName (raw-string dedupe let both pass), and the
+/// reported duplicate name is canonical, hence order-independent.
 #[derive(Debug, Default)]
 pub(crate) struct EntryNameChecker {
-    seen: std::collections::HashSet<String>,
+    seen: std::collections::HashSet<ToolName>,
 }
 
 impl EntryNameChecker {
@@ -212,12 +219,10 @@ impl EntryNameChecker {
     }
 
     pub(crate) fn check(&mut self, index: usize, name: &str) -> Result<(), EntryNameError> {
-        if name.trim().is_empty() {
-            return Err(EntryNameError::InvalidName { index });
-        }
-        if !self.seen.insert(name.to_string()) {
+        let name = ToolName::new(name).map_err(|_| EntryNameError::InvalidName { index })?;
+        if !self.seen.insert(name.clone()) {
             return Err(EntryNameError::DuplicateName {
-                name: name.to_string(),
+                name: name.as_str().to_string(),
             });
         }
         Ok(())
@@ -228,17 +233,19 @@ fn validate_entries(
     channel: &'static str,
     items: Vec<serde_json::Value>,
 ) -> Result<Vec<SchemaEntry>, ToolSchemaError> {
+    // m1 semantics via the shared checker: canonical-ToolName
+    // validation + dedupe, identical to the typed FFI entries path.
     let mut names = EntryNameChecker::new();
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.into_iter().enumerate() {
         if !item.is_object() {
             return Err(ToolSchemaError::EntryNotObject { channel, index });
         }
-        let name = item
+        let raw = item
             .get("name")
             .and_then(|name| name.as_str())
             .ok_or(ToolSchemaError::InvalidName { channel, index })?;
-        names.check(index, name).map_err(|error| match error {
+        names.check(index, raw).map_err(|error| match error {
             EntryNameError::InvalidName { index } => {
                 ToolSchemaError::InvalidName { channel, index }
             }
@@ -344,7 +351,7 @@ impl ToolSchemaSet {
                 by_name
                     .get(name)
                     .map(|entry| (*entry).clone())
-                    .unwrap_or_else(|| SchemaEntry::stub(name.as_str()))
+                    .unwrap_or_else(|| SchemaEntry::stub(name))
             })
             .collect()
     }
@@ -546,5 +553,28 @@ mod tests {
             r#"{"description":"d","name":"web_search","parameters":{"type":"object"}}"#
         );
         assert!(raw.contains("\"name\":\"web_search\""));
+    }
+
+    #[test]
+    fn case_variant_duplicates_are_rejected() {
+        // m1: dedupe runs on the canonical ToolName — `Web-Search` and
+        // `web_search` collide (raw-string dedupe let both pass).
+        let channel = format!("[{},{}]", entry("Web-Search"), entry("web_search"));
+        assert!(
+            matches!(
+                ToolSchemaSet::parse(&channel),
+                Err(ToolSchemaError::DuplicateName { channel, name })
+                if channel == "tools_schema_json" && name == "web_search"
+            ),
+            "Web-Search + web_search must be a DuplicateName"
+        );
+    }
+
+    #[test]
+    fn stub_embeds_canonical_name_in_value() {
+        // m4: the stub value carries the canonical name, not raw text.
+        let stub = SchemaEntry::stub(&ToolName::new("Web-Search").expect("valid test name"));
+        assert_eq!(stub.name.as_str(), "web_search");
+        assert_eq!(stub.value, serde_json::json!({"name": "web_search"}));
     }
 }

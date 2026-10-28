@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::guardrails::GuardrailState;
 use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
+use crate::tool_name::ToolName;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolBudgetShutdownReason {
@@ -70,7 +71,7 @@ pub fn build_budget_prose_content(meta: &AgentToolBudgetMeta) -> String {
 pub fn resolve_shutdown_reason(
     guardrails: &GuardrailState,
     config: &AgentConfig,
-    last_model_response_tool_names: &[String],
+    last_model_response_tool_names: &[ToolName],
 ) -> ToolBudgetShutdownReason {
     let limit = guardrails.effective_max_tool_calls(config, last_model_response_tool_names);
     if guardrails.tool_calls_executed >= limit {

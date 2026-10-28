@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::catalog::{ToolSchemaHint, ToolSpec};
@@ -32,8 +32,14 @@ impl ToolSemanticsConfig {
         }
     }
 
+    /// Parse a semantics config, tracking the serde field path (m5): a
+    /// blank [`ToolName`] fails at this JSON boundary, and the error names
+    /// the offending field (e.g. `artifact.append_tool_name`) instead of a
+    /// bare line/column.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let deserializer = &mut serde_json::Deserializer::from_str(json);
+        serde_path_to_error::deserialize(deserializer)
+            .map_err(|error| serde_json::Error::custom(error.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), ToolSemanticsError> {

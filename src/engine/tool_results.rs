@@ -120,9 +120,10 @@ pub(super) fn process_one_result(
         context_store,
         pending_artifact_ids,
     } = inputs;
-    // Executed call names come from the repair pipeline (already canonical);
-    // a blank name simply matches no policy.
-    let spill_stored_copy_only = ToolName::new(&call.name)
+    // J1: policy lookup over the call-record name goes through the
+    // model-output constructor (punctuated input resolves instead of
+    // silently missing policy); a blank name simply matches no policy.
+    let spill_stored_copy_only = ToolName::from_model_output(&call.name)
         .ok()
         .and_then(|name| crate::tool_semantics::result_policy_for(semantics, &name))
         .map(|policy| policy.spill_stored_copy_only)
@@ -154,15 +155,19 @@ pub(super) fn process_one_result(
 
     if semantics.artifact.is_some() {
         // ENC-288: parse each payload once; typed accessors downstream.
+        // m2: the call-record name enters as a ToolName (model-output repair,
+        // like the policy lookup above); unparseable names record nothing.
         let args = ParsedToolArgs::parse(&call.arguments_json);
         let result = ParsedToolResult::parse(&res.result_json);
-        record_artifact_progress_with_parsed(
-            pending_artifact_ids,
-            semantics,
-            &call.name,
-            &args,
-            &result,
-        );
+        if let Ok(tool_name) = ToolName::from_model_output(&call.name) {
+            record_artifact_progress_with_parsed(
+                pending_artifact_ids,
+                semantics,
+                &tool_name,
+                &args,
+                &result,
+            );
+        }
     }
 
     let mut message = AgentMessage {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::CompactionTrigger;
 use crate::policy::ContextPolicyTier;
 use crate::session::{AgentConfig, SessionCapabilities};
+use crate::tool_name::ToolName;
 
 /// Per-session limits for long tool-heavy agent loops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +98,7 @@ pub fn effective_max_tool_turns(config: &AgentConfig) -> u32 {
 pub fn should_stop_tool_rounds(
     config: &AgentConfig,
     tool_round_index: u32,
-    last_model_response_greedy_tool_names: &[String],
+    last_model_response_greedy_tool_names: &[ToolName],
 ) -> bool {
     let long_loop_cap = effective_max_tool_turns(config);
     if long_loop_cap < config.max_turns {

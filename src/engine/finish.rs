@@ -35,7 +35,7 @@ pub(super) struct FinishState<'a> {
     pub phase: &'a mut EnginePhase,
     pub terminal_action: &'a mut Option<AgentAction>,
     pub pending: &'a mut PendingToolTurn,
-    pub last_model_response_greedy_tool_names: &'a [String],
+    pub last_model_response_greedy_tool_names: &'a [ToolName],
     pub state_ledger: &'a mut StateLedger,
     pub context_store: &'a mut ContextStore,
     pub sidecar_builder: &'a mut SidecarBuilder,

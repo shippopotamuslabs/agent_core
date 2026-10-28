@@ -66,9 +66,12 @@ pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
-pub(super) fn merge_active_tool_names<T: PartialEq>(
-    active_tool_names: &mut Vec<T>,
-    names: impl IntoIterator<Item = T>,
+/// Merge canonical tool identities into the active set in first-seen order,
+/// deduped (m3: the generic String/ToolName bridge is deleted now that every
+/// side is `ToolName`).
+pub(super) fn merge_active_tool_names(
+    active_tool_names: &mut Vec<ToolName>,
+    names: impl IntoIterator<Item = ToolName>,
 ) {
     for name in names {
         if !active_tool_names.iter().any(|existing| existing == &name) {
@@ -92,11 +95,13 @@ pub(super) fn activate_tools_for_spill_reference(
     result: &mut ToolResultRecord,
     reference: &ContextReference,
 ) {
-    let hinted = activation_tools_from_retrieval_hint(&reference.retrieval_hint);
-    merge_active_tool_names(
-        active_tool_names,
-        hinted.iter().filter_map(|name| ToolName::new(name).ok()),
-    );
+    // Host-declared boundary names (retrieval-hint text): ToolName::new,
+    // no snake-splitting. Both merges now take ToolName directly (m3).
+    let hinted: Vec<ToolName> = activation_tools_from_retrieval_hint(&reference.retrieval_hint)
+        .iter()
+        .filter_map(|name| ToolName::new(name).ok())
+        .collect();
+    merge_active_tool_names(active_tool_names, hinted.clone());
     merge_active_tool_names(&mut result.activated_tool_names, hinted);
 }
 
@@ -151,10 +156,13 @@ impl AgentEngine {
         // names are the catalog (canonical + aliases) union the active
         // schemas; sections that are absent/empty are skipped, so the
         // agnostic config passes.
-        let schema_names = io.schemas.initial_active_names();
+        // Single session-construction parse: names come from the parsed set
+        // (m4: one binding shared by referential validation and the active
+        // set below).
+        let initial_active_tool_names = io.schemas.initial_active_names();
         config
             .tool_semantics
-            .validate_references(&config.tool_catalog, &schema_names)?;
+            .validate_references(&config.tool_catalog, &initial_active_tool_names)?;
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -164,8 +172,6 @@ impl AgentEngine {
         }
 
         let initial_msg_count = initial_messages.len() as u32;
-        // Single session-construction parse: names come from the parsed set.
-        let initial_active_tool_names = io.schemas.initial_active_names();
         let session_context = session_context.into();
         let pending_work_items: Vec<PendingWorkItem> = session_context
             .pending_work
@@ -523,12 +529,11 @@ impl AgentEngine {
         let turn_order = std::mem::take(&mut g.pending.tool_turn_request_order);
         let mut reject_by_call_id = std::mem::take(&mut g.pending.reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
+        // Both sides are ToolName now: no re-folding (m3).
         for res in &results {
             merge_active_tool_names(
                 &mut g.active_tool_names,
-                res.activated_tool_names
-                    .iter()
-                    .filter_map(|name| ToolName::new(name).ok()),
+                res.activated_tool_names.iter().cloned(),
             );
         }
 
@@ -788,9 +793,10 @@ impl AgentEngine {
         let spill_tokens_before = g
             .estimate_pressure(CompactionTrigger::PostToolResult)
             .total_tokens;
-        // Executed call names come from the repair pipeline (already
-        // canonical); a blank name simply matches no policy.
-        let call_tool = ToolName::new(&call.name).ok();
+        // J1: policy lookup over the call-record name goes through the
+        // model-output constructor (punctuated input resolves instead of
+        // silently missing policy); a blank name matches no policy.
+        let call_tool = ToolName::from_model_output(&call.name).ok();
         let policy = call_tool
             .as_ref()
             .and_then(|name| result_policy_for(&g.config.tool_semantics, name));

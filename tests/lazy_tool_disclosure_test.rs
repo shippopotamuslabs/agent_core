@@ -6,6 +6,7 @@ use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::tool_name::ToolName;
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
@@ -91,7 +92,7 @@ fn tool_result(call_id: &str, activated_tool_names: Vec<&str>) -> ToolResultReco
         soft_failure: false,
         activated_tool_names: activated_tool_names
             .into_iter()
-            .map(str::to_string)
+            .map(|name| ToolName::new(name).expect("test tool name must be valid"))
             .collect(),
         result_metadata: None,
     }

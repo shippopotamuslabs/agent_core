@@ -14,7 +14,7 @@ use crate::events::AgentEvent;
 use crate::json_repair::repair_json;
 use crate::message::RepairRecord;
 use crate::schema_coerce::coerce_to_schema;
-use crate::tool_name::ToolName;
+use crate::tool_name::{normalize_to_snake_case, strip_tool_prefixes, ToolName};
 use crate::tool_name_match::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 use crate::tool_semantics::{schema_hint_for_semantics, SpecialValueRepair, ToolSemanticsConfig};
 use crate::turn_io::RawToolCall;
@@ -232,12 +232,13 @@ fn resolve_tool_name_with_semantics(
     semantics: &ToolSemanticsConfig,
     mode: ToolCallCanonicalizeMode,
 ) -> ToolNameResolution {
-    let stripped = strip_tool_prefixes(raw);
-    let normalized = normalize_to_snake_case(&stripped);
-    // The snake pipeline maps raw model output into the canonical identity
-    // space; ToolName::new applies the identity (b)-fold. A blank result
-    // (raw was punctuation/whitespace only) is not a name at all.
-    let name = ToolName::new(&normalized).ok();
+    // J1: raw model output enters through the single model-output
+    // constructor (prefix-strip + snake-split + identity fold). A blank
+    // result (raw was punctuation/whitespace only) is not a name at all.
+    // `normalized` stays the snake string for the fuzzy-match input and the
+    // reject message (it equals `name.as_str()` whenever `name` is `Some`).
+    let normalized = normalize_to_snake_case(&strip_tool_prefixes(raw));
+    let name = ToolName::from_model_output(raw).ok();
 
     if let Some(name) = name.as_ref() {
         if let Some(spec) = catalog.resolve(name) {
@@ -302,51 +303,6 @@ fn resolve_tool_name_with_semantics(
         })
         .to_string(),
     }
-}
-
-fn strip_tool_prefixes(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(rest) = s.strip_prefix("functions.") {
-            s = rest.to_string();
-        } else if let Some(rest) = s.strip_prefix("tools.") {
-            s = rest.to_string();
-        } else {
-            return s;
-        }
-    }
-}
-
-fn normalize_to_snake_case(input: &str) -> String {
-    let mut result = String::new();
-    let chars: Vec<char> = input.trim().chars().collect();
-    for (index, &ch) in chars.iter().enumerate() {
-        if ch == '-' || ch == ' ' {
-            if !result.ends_with('_') && !result.is_empty() {
-                result.push('_');
-            }
-            continue;
-        }
-        if ch.is_uppercase() {
-            let prev_lower = index > 0 && chars[index - 1].is_lowercase();
-            let next_lower = index + 1 < chars.len() && chars[index + 1].is_lowercase();
-            if (prev_lower || (index > 0 && chars[index - 1].is_ascii_uppercase() && next_lower))
-                && !result.ends_with('_')
-                && !result.is_empty()
-            {
-                result.push('_');
-            }
-            for lower in ch.to_lowercase() {
-                result.push(lower);
-            }
-        } else if ch.is_alphanumeric() || ch == '_' {
-            result.push(ch);
-        }
-    }
-    while result.contains("__") {
-        result = result.replace("__", "_");
-    }
-    result.trim_matches('_').to_string()
 }
 
 fn move_alias(

@@ -37,7 +37,7 @@ pub(super) struct AppendAssistantInputs<'a> {
     pub events: &'a mut Vec<AgentEvent>,
     pub enable_loop_hooks: bool,
     pub lifecycle_hooks_supported: bool,
-    pub greedy_tool_names: &'a mut Vec<String>,
+    pub greedy_tool_names: &'a mut Vec<ToolName>,
 }
 
 pub(super) fn append_assistant_message(
@@ -97,29 +97,19 @@ pub(super) fn append_assistant_message(
         });
     }
 
+    // J1: greedy capture keys off the same model-output constructor as
+    // gating, so `webSearch` records `web_search` (matching policy names).
     *greedy_tool_names = merged_tool_calls
         .iter()
-        .filter_map(|c| gate_tool_name(&c.name))
-        .map(|name| name.as_str().to_string())
+        .filter_map(|c| ToolName::from_model_output(&c.name).ok())
         .collect();
 }
 
-/// Gate identity for one raw model tool name: strip the provider/model
-/// namespace prefixes (raw-output repair, like the canonicalize pipeline),
-/// then enter the canonical identity space. The (b)-fold lives in
-/// [`ToolName::new`]; a blank result is not a name at all.
+/// Gate identity for one raw model tool name (J1): the single
+/// model-output constructor (prefix-strip + snake-split + identity fold).
+/// A blank result is not a name at all.
 fn gate_tool_name(raw: &str) -> Option<ToolName> {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(r) = s.strip_prefix("functions.") {
-            s = r.to_string();
-        } else if let Some(r) = s.strip_prefix("tools.") {
-            s = r.to_string();
-        } else {
-            break;
-        }
-    }
-    ToolName::new(&s).ok()
+    ToolName::from_model_output(raw).ok()
 }
 
 /// Inputs for the repair/discovery loop. The catalog is built once by the
@@ -329,7 +319,7 @@ pub(super) struct IngestArmInputs<'a> {
     pub state_ledger: &'a mut StateLedger,
     pub events: &'a mut Vec<AgentEvent>,
     pub turn_index: u32,
-    pub last_model_response_greedy_tool_names: &'a [String],
+    pub last_model_response_greedy_tool_names: &'a [ToolName],
 }
 
 /// FRG-47 stage: the `ParseFailed` ingest arm. Applies message/ledger/
@@ -478,7 +468,7 @@ pub(super) struct RejectFlushInputs<'a> {
     pub turn_index: u32,
     pub parallel: usize,
     pub rejects: usize,
-    pub last_model_response_greedy_tool_names: &'a [String],
+    pub last_model_response_greedy_tool_names: &'a [ToolName],
 }
 
 /// FRG-47 stage: the reject-only synthetic turn tail. Applies guardrail

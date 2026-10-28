@@ -264,9 +264,17 @@ fn ts_006_blank_artifact_tool_name_is_rejected_at_parse() {
     });
     let raw = serde_json::to_string(&json).expect("test JSON serializes");
     let result = ToolSemanticsConfig::from_json(&raw);
+    let error = result.expect_err("blank append_tool_name must fail at parse");
+    // m5 layer pin: the rejection surfaces at the serde boundary and names
+    // the offending field — not a bare line/column, not a validate() error.
+    let message = error.to_string();
     assert!(
-        result.is_err(),
-        "blank append_tool_name must fail at parse, got {result:?}"
+        message.contains("artifact.append_tool_name"),
+        "serde error must name the field, got {message:?}"
+    );
+    assert!(
+        message.contains("tool name must not be blank"),
+        "serde error must name the rejecting layer, got {message:?}"
     );
 }
 
@@ -537,7 +545,7 @@ fn ts_027_custom_greedy_tool_extends_guardrail_cap() {
         tool_semantics: custom_semantics(),
         ..AgentConfig::default()
     };
-    let last_tools = vec!["write_doc".to_string()];
+    let last_tools = vec![tn("write_doc")];
 
     assert_eq!(
         guardrails.effective_max_tool_calls(&config, &last_tools),
@@ -554,7 +562,7 @@ fn ts_028_no_greedy_config_keeps_base_guardrail_cap() {
         max_turns: 20,
         ..AgentConfig::default()
     };
-    let last_tools = vec!["write_doc".to_string()];
+    let last_tools = vec![tn("write_doc")];
 
     assert_eq!(
         guardrails.effective_max_tool_calls(&config, &last_tools),

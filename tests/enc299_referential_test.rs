@@ -117,6 +117,105 @@ fn enc299_rule_referencing_schema_only_tool_constructs() {
 }
 
 #[test]
+fn enc299_dangling_reference_rejected_in_every_section() {
+    // m5: parametrized pin across ALL validated sections — a ghost name in
+    // any one section (all others valid) fails construction naming that
+    // section. Sections: discovery, companions, artifact start/append,
+    // repairs, shapes, policies, squash, greedy.
+    type Mutator = Box<dyn Fn(&mut ToolSemanticsConfig)>;
+    let cases: Vec<(&str, Mutator)> = vec![
+        (
+            "discovery.tool_name",
+            Box::new(|config| {
+                config
+                    .discovery
+                    .as_mut()
+                    .expect("custom has discovery")
+                    .tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "discovery.companion_callable_tools",
+            Box::new(|config| {
+                config
+                    .discovery
+                    .as_mut()
+                    .expect("custom has discovery")
+                    .companion_callable_tools = vec![tn("ghost_tool")];
+            }),
+        ),
+        (
+            "artifact.start_tool_name",
+            Box::new(|config| {
+                config
+                    .artifact
+                    .as_mut()
+                    .expect("custom has artifact")
+                    .start_tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "artifact.append_tool_name",
+            Box::new(|config| {
+                config
+                    .artifact
+                    .as_mut()
+                    .expect("custom has artifact")
+                    .append_tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "argument_repairs.tool_name",
+            Box::new(|config| {
+                config.argument_repairs[0].tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "canonical_shapes.tool_name",
+            Box::new(|config| {
+                config.canonical_shapes[0].tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "result_policies.tool_name",
+            Box::new(|config| {
+                config.result_policies[0].tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "compaction.artifact_squash.append_tool_name",
+            Box::new(|config| {
+                config
+                    .compaction
+                    .artifact_squash
+                    .as_mut()
+                    .expect("custom has squash")
+                    .append_tool_name = tn("ghost_tool");
+            }),
+        ),
+        (
+            "greedy_extension_tools.tool_name",
+            Box::new(|config| {
+                config.greedy_extension_tools[0].tool_name = tn("ghost_tool");
+            }),
+        ),
+    ];
+    assert_eq!(cases.len(), 9, "one case per validated section");
+    for (section, mutate) in cases {
+        let mut config = semantics::custom_semantics();
+        mutate(&mut config);
+        assert_eq!(
+            try_session_err(config, "[]"),
+            ToolSemanticsError::UnknownToolReference {
+                section: section.to_string(),
+                name: "ghost_tool".to_string(),
+            },
+            "dangling name in {section} must name that section"
+        );
+    }
+}
+
+#[test]
 fn enc299_unknown_companion_callable_rejects_session() {
     let mut config = semantics::custom_semantics();
     config
