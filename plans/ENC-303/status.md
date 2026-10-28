@@ -30,3 +30,6 @@ Implementation
     -D warnings clean; cargo test --locked 629 passed / 0 failed (37
     suites); cargo test --locked --no-default-features 601 passed /
     0 failed (35 suites).
+- Dual review (Synthitect + Thermos x2) of f6d3ecb+8161d46: 0 Critical, 1 Major (J1 silent discovery self-lockout), minors m1-m4. See findings/ENC-303-findings.md.
+- Fix pass ff5fdb8 (Spark): J1 construction-time InvalidDiscoveryConfig in validate_references; m1 gate docs; m2 serde(default); m3 exemption vocabulary; m4 FFI round-trip test.
+- Orchestrator verification: cargo test --locked 636/0; --no-default-features 606/0.
