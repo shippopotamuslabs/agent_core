@@ -871,14 +871,18 @@ pub(crate) fn session_io_params(
 ) -> Result<crate::engine::SessionIoParams, AgentException> {
     let registry = tool_schema_entries(&p.tool_schema_registry)?;
     let active = tool_schema_entries(&p.tool_schemas)?;
+    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(
+        active,
+        registry,
+        &p.tool_catalog_json,
+    )
+    .map_err(|error| AgentException::Internal {
+        detail: error.to_string(),
+    })?;
     Ok(crate::engine::SessionIoParams {
         provider: p.provider,
         context_window_tokens: p.context_window_tokens,
-        schemas: crate::tool_schema::ToolSchemaSet::from_entries(
-            active,
-            registry,
-            &p.tool_catalog_json,
-        ),
+        schemas,
         system_prompt: p.system_prompt,
     })
 }
