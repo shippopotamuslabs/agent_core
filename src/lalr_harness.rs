@@ -481,13 +481,8 @@ pub fn next_action_at_max_tool_turns(
 }
 
 pub fn default_long_loop_io() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid long-loop io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid long-loop io params")
 }
 
 pub fn config_with_long_loop(long_loop: LongLoopPolicy) -> AgentConfig {

@@ -63,13 +63,8 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         cfg,
         caps,
         session_context,
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params"),
+        SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+            .expect("valid test io params"),
     );
     let _ = eng.next_action(&handle);
     eng.submit_model_response(

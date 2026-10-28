@@ -777,7 +777,6 @@ pub struct FfiToolSchemaEntry {
 pub struct FfiSessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
-    pub tool_catalog_json: String,
     pub tool_schemas: Vec<FfiToolSchemaEntry>,
     pub system_prompt: String,
 }
@@ -855,9 +854,8 @@ fn tool_schema_entries(
 
 /// FFI session edge: convert the typed params into `SessionIoParams`,
 /// constructing the parsed schema set directly from the typed entries.
-/// (ENC-297 Chunk 1 interim: the `tool_catalog_json` string channel is still
-/// carried on `FfiSessionIoParams` and ignored here — the catalog now lives
-/// on the typed `AgentConfig` construction path. Chunk 2 deletes the field.)
+/// (ENC-297: the catalog travels only on the typed `AgentConfig` path, so
+/// there is no catalog channel here at all.)
 /// Fallible (never panics): a malformed entry is an `AgentException` the
 /// caller must handle.
 pub(crate) fn session_io_params(
@@ -914,8 +912,14 @@ pub struct FfiAgentConfig {
     pub tool_retry_limit: u32,
     pub model_api_retry_limit: u32,
     pub model_api_retry_base_delay_ms: u64,
-    /// JSON-serialized [`crate::tool_semantics::ToolSemanticsConfig`]; catalog tools may be empty and merged from session IO.
-    pub tool_semantics_json: String,
+    /// Typed tool semantics (ENC-297 D1–D2): `None` is host-declared
+    /// agnostic — the default when the host supplies no semantics record,
+    /// not a parse fallback.
+    pub tool_semantics: Option<super::semantics::FfiToolSemantics>,
+    /// Policy catalog specs, sibling of the semantics tree (ENC-297 D1):
+    /// assigned into `semantics.catalog.tools` at conversion, then validated
+    /// by the single fallible core constructor.
+    pub tool_specs: Vec<super::semantics::FfiToolSpec>,
     pub tool_result_budget_cloud_bytes: u64,
     pub tool_result_budget_relaxed_bytes: u64,
     pub tool_result_truncation_pressure_ratio: f32,
@@ -960,8 +964,10 @@ impl Default for FfiAgentConfig {
             tool_retry_limit: c.tool_retry_limit,
             model_api_retry_limit: c.model_api_retry_limit,
             model_api_retry_base_delay_ms: c.model_api_retry_base_delay_ms,
-            tool_semantics_json: serde_json::to_string(&c.tool_semantics)
-                .unwrap_or_else(|_| "{}".into()),
+            // None is host-declared agnostic (D2): the default FFI config
+            // carries no semantics record and no specs.
+            tool_semantics: None,
+            tool_specs: Vec::new(),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
             tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,
@@ -998,67 +1004,68 @@ impl Default for FfiAgentConfig {
     }
 }
 
-impl From<FfiAgentConfig> for AgentConfig {
-    fn from(f: FfiAgentConfig) -> Self {
-        // ENC-297 Chunk 1 interim: derive the policy catalog from the
-        // (possibly fallback) semantics. Chunk 2 replaces this infallible
-        // conversion with a fallible typed one (no fallback).
-        let tool_semantics =
-            crate::tool_semantics::ToolSemanticsConfig::from_json(&f.tool_semantics_json)
-                .unwrap_or_else(|_| crate::tool_semantics::ToolSemanticsConfig::agnostic());
-        let tool_catalog = crate::catalog::ToolCatalog::from_semantics(&tool_semantics)
-            .unwrap_or_default();
-        Self {
-            max_turns: f.max_turns,
-            threshold_ratio: f.threshold_ratio,
-            micro_keep_recent: f.micro_keep_recent,
-            tool_retry_limit: f.tool_retry_limit,
-            model_api_retry_limit: f.model_api_retry_limit,
-            model_api_retry_base_delay_ms: f.model_api_retry_base_delay_ms,
-            tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
-            tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
-            tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
-            mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
-            post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
-            manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
-            allow_fifo_on_preflight: f.allow_fifo_on_preflight,
-            allow_fifo_on_mid_turn: f.allow_fifo_on_mid_turn,
-            allow_fifo_on_post_tool_result: f.allow_fifo_on_post_tool_result,
-            require_snapshot_before_fifo: f.require_snapshot_before_fifo,
-            enable_context_store: f.enable_context_store,
-            enable_state_ledger: f.enable_state_ledger,
-            enable_tool_schema_deferral: f.enable_tool_schema_deferral,
-            enable_file_condensation: f.enable_file_condensation,
-            enable_manual_compact: f.enable_manual_compact,
-            tool_spill_threshold_bytes: f.tool_spill_threshold_bytes as usize,
-            terminal_spill_threshold_bytes: f.terminal_spill_threshold_bytes as usize,
-            history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
-            file_outline_threshold_tokens: f.file_outline_threshold_tokens,
-            prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
-            output_reserve_ratio: f.output_reserve_ratio,
-            output_reserve_floor_tokens: f.output_reserve_floor_tokens,
-            output_reserve_max_tokens: f.output_reserve_max_tokens,
-            max_model_requests_per_turn: f.max_model_requests_per_turn,
-            token_correction: std::collections::HashMap::new(),
-            preflight_token_threshold: f.preflight_token_threshold,
-            mid_turn_token_threshold: f.mid_turn_token_threshold,
-            post_tool_result_token_threshold: f.post_tool_result_token_threshold,
-            turn_threshold: None,
-            message_threshold: f.message_threshold,
-            compact_on_turn_end: false,
-            retention_window_messages: 0,
-            retention_window_tokens: f.retention_window_tokens,
-            eviction_window_ratio: 0.0,
-            enable_loop_hooks: f.enable_loop_hooks,
-            enable_doom_loop_guard: false,
-            enable_pending_work_guard: f.enable_pending_work_guard,
-            require_read_before_edit: false,
-            default_tool_timeout_ms: None,
-            long_loop: LongLoopPolicy::from(f.long_loop),
-            tool_semantics,
-            tool_catalog,
-        }
-    }
+/// FFI config edge: convert the typed config into an [`AgentConfig`],
+/// following the `session_io_params` fallible pattern (ENC-297 D2).
+///
+/// The sibling [`FfiToolSpec`]s are assigned into `semantics.catalog.tools`
+/// before the single fallible core constructor validates + builds the
+/// policy catalog. `None` semantics is host-declared agnostic (not a parse
+/// fallback). Invalid semantics (malformed `Value` payloads, duplicate tool
+/// names, alias collisions, empty required fields) is an `AgentException`
+/// naming the failure — never an `eprintln` + agnostic fallback.
+pub(crate) fn agent_config(f: FfiAgentConfig) -> Result<AgentConfig, AgentException> {
+    let mut semantics = match f.tool_semantics {
+        Some(tree) => tree.into_core()?,
+        None => crate::tool_semantics::ToolSemanticsConfig::agnostic(),
+    };
+    semantics.catalog.tools = f
+        .tool_specs
+        .into_iter()
+        .map(|spec| spec.into_core())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut config =
+        AgentConfig::with_tool_semantics(semantics).map_err(|error| AgentException::Internal {
+            detail: format!("invalid tool semantics: {error:?}"),
+        })?;
+    config.max_turns = f.max_turns;
+    config.threshold_ratio = f.threshold_ratio;
+    config.micro_keep_recent = f.micro_keep_recent;
+    config.tool_retry_limit = f.tool_retry_limit;
+    config.model_api_retry_limit = f.model_api_retry_limit;
+    config.model_api_retry_base_delay_ms = f.model_api_retry_base_delay_ms;
+    config.tool_result_budget_cloud_bytes = f.tool_result_budget_cloud_bytes as usize;
+    config.tool_result_budget_relaxed_bytes = f.tool_result_budget_relaxed_bytes as usize;
+    config.tool_result_truncation_pressure_ratio = f.tool_result_truncation_pressure_ratio;
+    config.mid_turn_threshold_ratio = f.mid_turn_threshold_ratio;
+    config.post_tool_result_threshold_ratio = f.post_tool_result_threshold_ratio;
+    config.manual_compact_threshold_ratio = f.manual_compact_threshold_ratio;
+    config.allow_fifo_on_preflight = f.allow_fifo_on_preflight;
+    config.allow_fifo_on_mid_turn = f.allow_fifo_on_mid_turn;
+    config.allow_fifo_on_post_tool_result = f.allow_fifo_on_post_tool_result;
+    config.require_snapshot_before_fifo = f.require_snapshot_before_fifo;
+    config.enable_context_store = f.enable_context_store;
+    config.enable_state_ledger = f.enable_state_ledger;
+    config.enable_tool_schema_deferral = f.enable_tool_schema_deferral;
+    config.enable_file_condensation = f.enable_file_condensation;
+    config.enable_manual_compact = f.enable_manual_compact;
+    config.tool_spill_threshold_bytes = f.tool_spill_threshold_bytes as usize;
+    config.terminal_spill_threshold_bytes = f.terminal_spill_threshold_bytes as usize;
+    config.history_snapshot_threshold_tokens = f.history_snapshot_threshold_tokens;
+    config.file_outline_threshold_tokens = f.file_outline_threshold_tokens;
+    config.prompt_cache_anchor_threshold_tokens = f.prompt_cache_anchor_threshold_tokens;
+    config.output_reserve_ratio = f.output_reserve_ratio;
+    config.output_reserve_floor_tokens = f.output_reserve_floor_tokens;
+    config.output_reserve_max_tokens = f.output_reserve_max_tokens;
+    config.max_model_requests_per_turn = f.max_model_requests_per_turn;
+    config.preflight_token_threshold = f.preflight_token_threshold;
+    config.mid_turn_token_threshold = f.mid_turn_token_threshold;
+    config.post_tool_result_token_threshold = f.post_tool_result_token_threshold;
+    config.message_threshold = f.message_threshold;
+    config.retention_window_tokens = f.retention_window_tokens;
+    config.enable_loop_hooks = f.enable_loop_hooks;
+    config.enable_pending_work_guard = f.enable_pending_work_guard;
+    config.long_loop = LongLoopPolicy::from(f.long_loop);
+    Ok(config)
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1582,10 +1589,10 @@ mod tests {
 
     fn io_with_active(entries: Vec<FfiToolSchemaEntry>) -> FfiSessionIoParams {
         // ENC-296: no tool_schema_registry field; the host owns the registry.
+        // ENC-297: no tool_catalog_json field; the catalog travels typed on FfiAgentConfig.
         FfiSessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
             tool_schemas: entries,
             system_prompt: "sys".into(),
         }

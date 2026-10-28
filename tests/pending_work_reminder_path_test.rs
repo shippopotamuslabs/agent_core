@@ -85,13 +85,8 @@ fn pending_caps() -> SessionCapabilities {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn pending_request(engine: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {

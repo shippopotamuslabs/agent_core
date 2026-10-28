@@ -11,13 +11,8 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     let big = "hello ".repeat(400);
     let mk = || AgentEngine::new();
     let io = || {
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params")
+        SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+            .expect("valid test io params")
     };
     let msgs = vec![
         AgentMessage {

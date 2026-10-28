@@ -21,13 +21,8 @@ const VALID_DSML_WEB_SEARCH: &str = concat!(
 );
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams::new(
-        "openrouter".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("openrouter".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {

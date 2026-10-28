@@ -200,13 +200,8 @@ fn m6_tool_deferral_advertises_active_tools_without_stashing_schemas() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            schemas.into(),
-            "sys".into(),
-        )
-        .expect("valid test io params"),
+        SessionIoParams::new("anthropic".into(), 200_000, schemas.into(), "sys".into())
+            .expect("valid test io params"),
     );
 
     // Drive the index build through the engine.

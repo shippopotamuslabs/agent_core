@@ -410,8 +410,8 @@ mod tests {
         // ENC-296: the registry channel is deleted and the host owns the
         // registry; ENC-297: the render-catalog channel is deleted and
         // catalog presence comes from the typed ToolCatalog.
-        let set = ToolSchemaSet::parse(&format!("[{}]", entry("web_search")))
-            .expect("valid channel");
+        let set =
+            ToolSchemaSet::parse(&format!("[{}]", entry("web_search"))).expect("valid channel");
         assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
         assert_eq!(set.active_json(), &format!("[{}]", entry("web_search")));
     }
@@ -504,12 +504,9 @@ mod tests {
             require_read_before_edit: true,
             ..AgentConfig::default()
         };
-        let set = ToolSchemaSet::parse(&format!(
-            "[{},{}]",
-            entry("read_file"),
-            entry("patch_file")
-        ))
-        .expect("valid channel");
+        let set =
+            ToolSchemaSet::parse(&format!("[{},{}]", entry("read_file"), entry("patch_file")))
+                .expect("valid channel");
         let rendered = set.render_runtime_view(
             &config,
             &SessionCapabilities::default(),

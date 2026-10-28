@@ -14,13 +14,8 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelRequest, ModelResponse};
 
 fn io() -> SessionIoParams {
-    SessionIoParams::new(
-        "openrouter".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("openrouter".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {

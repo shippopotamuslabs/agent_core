@@ -23,13 +23,8 @@ fn engine() -> AgentEngine {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn submit_no_tool_response(
@@ -366,7 +361,6 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             FfiSessionIoParams {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,
-                tool_catalog_json: "[]".into(),
                 tool_schemas: vec![],
                 system_prompt: "sys".into(),
             },

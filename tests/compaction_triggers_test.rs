@@ -22,22 +22,12 @@ use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 fn io_small() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        256,
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 fn user(id: &str, content: &str) -> AgentMessage {
     AgentMessage {

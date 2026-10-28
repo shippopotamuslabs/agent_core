@@ -283,8 +283,8 @@ mod catalog_split_tests {
             },
             ..ToolSemanticsConfig::agnostic()
         };
-        let config = crate::session::AgentConfig::with_tool_semantics(semantics)
-            .expect("valid semantics");
+        let config =
+            crate::session::AgentConfig::with_tool_semantics(semantics).expect("valid semantics");
         assert_eq!(config.tool_catalog.len(), 1);
         assert_eq!(
             config.tool_catalog.resolve("websearch").unwrap().name,

@@ -204,10 +204,9 @@ fn ltd_09_rust_merges_activated_tool_names_in_first_seen_order() {
 fn enc_296_activated_tool_renders_active_entry_or_name_stub() {
     use agent_core::tool_schema::ToolSchemaSet;
 
-    let set = ToolSchemaSet::parse(
-        r#"[{"name":"web_search","description":"Search","parameters":{}}]"#,
-    )
-    .expect("valid channel");
+    let set =
+        ToolSchemaSet::parse(r#"[{"name":"web_search","description":"Search","parameters":{}}]"#)
+            .expect("valid channel");
     let rendered =
         set.render_active_schemas(&["web_search".to_string(), "brand_new_tool".to_string()]);
     let json = serde_json::to_value(&rendered).expect("entries serialize");

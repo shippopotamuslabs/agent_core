@@ -23,13 +23,8 @@ fn main() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams::new(
-            "openai".into(),
-            128_000,
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid example io params"),
+        SessionIoParams::new("openai".into(), 128_000, "[]".into(), "sys".into())
+            .expect("valid example io params"),
     );
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(

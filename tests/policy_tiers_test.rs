@@ -83,13 +83,8 @@ fn s22_high_context_raises_thresholds() {
         cfg.clone(),
         caps.clone(),
         serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params"),
+        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+            .expect("valid test io params"),
     );
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
