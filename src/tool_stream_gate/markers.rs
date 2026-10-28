@@ -38,41 +38,44 @@ static STRONG_TOOL_MARKERS: Lazy<Vec<(ToolCallFormat, Regex)>> = Lazy::new(|| {
         ),
         (
             ToolCallFormat::RawJson,
-            Regex::new(r#"(?is)^\s*\{\s*"name"\s*:"#).unwrap(),
+            // Unanchored, matching the parser: extract_raw_json scans for
+            // the first `{` anywhere, so prose before the JSON object is a
+            // valid RawJson turn (r_26_raw_json_in_prose) and must hold.
+            Regex::new(r#"(?is)\{\s*"name"\s*:"#).unwrap(),
         ),
     ]
 });
 
-static PARTIAL_TOOL_MARKERS: Lazy<Vec<(ToolCallFormat, &'static str, Regex)>> = Lazy::new(|| {
+static PARTIAL_TOOL_MARKERS: Lazy<Vec<(ToolCallFormat, TentativeKind, Regex)>> = Lazy::new(|| {
     vec![
         (
             ToolCallFormat::Dsml,
-            "dsml_pipe",
+            TentativeKind::DsmlPartial,
             Regex::new(r"(?is)<\s*[|｜]+").unwrap(),
         ),
         (
             ToolCallFormat::Dsml,
-            "dsml_partial",
+            TentativeKind::DsmlPartial,
             Regex::new(r"(?is)<\s*(?:[|｜]+\s*)?DSM").unwrap(),
         ),
         (
             ToolCallFormat::XmlToolCall,
-            "tool_partial",
+            TentativeKind::ToolCallPartial,
             Regex::new(r"(?is)<\s*tool").unwrap(),
         ),
         (
             ToolCallFormat::XmlToolCall,
-            "tool_underscore",
+            TentativeKind::ToolCallPartial,
             Regex::new(r"(?is)<\s*tool_").unwrap(),
         ),
         (
             ToolCallFormat::CallBrace,
-            "call_colon",
+            TentativeKind::CallColon,
             Regex::new(r"(?is)\bcall\s*:").unwrap(),
         ),
         (
             ToolCallFormat::BracketArray,
-            "tool_calls_bracket",
+            TentativeKind::ToolCallsBracket,
             Regex::new(r"(?is)\[TOOL_CALLS\]").unwrap(),
         ),
     ]
@@ -229,16 +232,6 @@ fn is_angle_bracket_format(format: ToolCallFormat) -> bool {
     )
 }
 
-fn partial_kind(name: &str) -> TentativeKind {
-    match name {
-        "call_colon" => TentativeKind::CallColon,
-        "tool_calls_bracket" => TentativeKind::ToolCallsBracket,
-        "dsml_pipe" | "dsml_partial" => TentativeKind::DsmlPartial,
-        "tool_partial" | "tool_underscore" => TentativeKind::ToolCallPartial,
-        _ => TentativeKind::ToolCallPartial,
-    }
-}
-
 /// Earliest tentative trigger of the DECLARED format's set at or after
 /// `search_from` (ENC-300 D5). [`ToolCallFormat::Structured`] never holds:
 /// always `None`. The ambiguous-angle-bracket scan uses the declared
@@ -277,8 +270,8 @@ fn earliest_tentative_trigger_inner(
         best = Some((object_start, TentativeKind::BareJsonTool));
     }
 
-    for (_, name, regex) in PARTIAL_TOOL_MARKERS.iter() {
-        let kind = partial_kind(name);
+    for (_, kind, regex) in PARTIAL_TOOL_MARKERS.iter() {
+        let kind = *kind;
         if !allow_kind(kind) {
             continue;
         }

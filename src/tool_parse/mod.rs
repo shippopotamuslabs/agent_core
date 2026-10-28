@@ -43,80 +43,25 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::ops::Range;
 
-/// Internal port (ENC-300 D3): one parser per envelope shape, each wrapping
-/// the existing `extract_*` function for its shape. The host-declared format
-/// selects the parser; there is no cross-format sniffing.
-pub trait EnvelopeParser {
-    /// Extract envelopes of this parser's shape from normalized model text.
-    /// Errors when the shape's markers are absent or malformed (loud, no
-    /// fallback to another shape). (ENC-300 m4: the unused
-    /// `envelope_format()` shape query is dropped; the extracted
-    /// [`ExtractedEnvelope::format`] carries the shape instead.)
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>;
-}
-
-struct DsmlParser;
-struct BracketArrayParser;
-struct XmlToolCallParser;
-struct CdataParser;
-struct CallBraceParser;
-struct RawJsonParser;
-
-impl EnvelopeParser for DsmlParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_dsml(raw)
-    }
-}
-
-impl EnvelopeParser for BracketArrayParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_bracket_array(raw)
-    }
-}
-
-impl EnvelopeParser for XmlToolCallParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_xml_tool_call(raw)
-    }
-}
-
-impl EnvelopeParser for CdataParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_cdata(raw)
-    }
-}
-
-impl EnvelopeParser for CallBraceParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_call_brace(raw)
-    }
-}
-
-impl EnvelopeParser for RawJsonParser {
-    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-        extract_raw_json(raw)
-    }
-}
-
-static DSML_PARSER: DsmlParser = DsmlParser;
-static BRACKET_ARRAY_PARSER: BracketArrayParser = BracketArrayParser;
-static XML_TOOL_CALL_PARSER: XmlToolCallParser = XmlToolCallParser;
-static CDATA_PARSER: CdataParser = CdataParser;
-static CALL_BRACE_PARSER: CallBraceParser = CallBraceParser;
-static RAW_JSON_PARSER: RawJsonParser = RawJsonParser;
+/// Internal port (ENC-300 D3): one parser per envelope shape — a plain
+/// function table over the existing `extract_*` functions. The host-declared
+/// format selects the parser; there is no cross-format sniffing. Extraction
+/// errors when the shape's markers are absent or malformed (loud, no
+/// fallback to another shape).
+pub type EnvelopeFn = fn(&str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>;
 
 /// Resolve the host-declared format to its envelope parser.
 /// `None` for [`ToolCallFormat::Structured`]: structured sessions never mine
 /// body text.
-pub fn parser_for(format: ToolCallFormat) -> Option<&'static dyn EnvelopeParser> {
+pub fn parser_for(format: ToolCallFormat) -> Option<EnvelopeFn> {
     match format {
         ToolCallFormat::Structured => None,
-        ToolCallFormat::Dsml => Some(&DSML_PARSER),
-        ToolCallFormat::BracketArray => Some(&BRACKET_ARRAY_PARSER),
-        ToolCallFormat::XmlToolCall => Some(&XML_TOOL_CALL_PARSER),
-        ToolCallFormat::Cdata => Some(&CDATA_PARSER),
-        ToolCallFormat::CallBrace => Some(&CALL_BRACE_PARSER),
-        ToolCallFormat::RawJson => Some(&RAW_JSON_PARSER),
+        ToolCallFormat::Dsml => Some(extract_dsml),
+        ToolCallFormat::BracketArray => Some(extract_bracket_array),
+        ToolCallFormat::XmlToolCall => Some(extract_xml_tool_call),
+        ToolCallFormat::Cdata => Some(extract_cdata),
+        ToolCallFormat::CallBrace => Some(extract_call_brace),
+        ToolCallFormat::RawJson => Some(extract_raw_json),
     }
 }
 
@@ -131,7 +76,7 @@ pub fn parse_tool_calls_with_semantics(
         return ToolParseBatch::empty(raw);
     };
     let normalized = normalize_model_text(raw, format);
-    match parser.extract(&normalized) {
+    match parser(&normalized) {
         Ok(extracted) if extracted.is_empty() => ToolParseBatch::empty(raw),
         Ok(extracted) => build_batch_with_semantics(raw, extracted, catalog, semantics),
         Err(error) => ToolParseBatch {
@@ -205,12 +150,16 @@ pub fn has_local_tool_contract(
     static CALL_BRACE_CONTRACT: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?is)\bcall\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\{").unwrap());
     static RAW_JSON_CONTRACT: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\{\s*"name""#).unwrap());
+    // The gate's strong markers match case-insensitively ((?is) throughout),
+    // so the contract scan folds case too: an upper-case marker variant in
+    // the prompt ([tool_calls], <TOOL_CALL) establishes the same contract.
+    let prompt_folded = system_prompt.to_lowercase();
     let marker_present = match format {
         ToolCallFormat::Structured => return false,
-        ToolCallFormat::Dsml => system_prompt.contains("DSML"),
-        ToolCallFormat::BracketArray => system_prompt.contains("[TOOL_CALLS]"),
-        ToolCallFormat::XmlToolCall => system_prompt.contains("<tool_call"),
-        ToolCallFormat::Cdata => system_prompt.contains("<![CDATA[<tool"),
+        ToolCallFormat::Dsml => prompt_folded.contains("dsml"),
+        ToolCallFormat::BracketArray => prompt_folded.contains("[tool_calls]"),
+        ToolCallFormat::XmlToolCall => prompt_folded.contains("<tool_call"),
+        ToolCallFormat::Cdata => prompt_folded.contains("<![cdata[<tool"),
         ToolCallFormat::CallBrace => CALL_BRACE_CONTRACT.is_match(system_prompt),
         ToolCallFormat::RawJson => RAW_JSON_CONTRACT.is_match(system_prompt),
     };

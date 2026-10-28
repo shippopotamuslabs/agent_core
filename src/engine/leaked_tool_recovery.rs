@@ -21,6 +21,10 @@ pub struct ModelTurnTextResolution {
     /// markers present: the turn must fail loudly naming the declared format
     /// (no fallback parse of the other shape).
     pub wrong_format_marker: bool,
+    /// The declared parser's first failure, when the declared-format parse
+    /// ran and produced it. Threaded through so the ingest layer surfaces
+    /// THIS parse's failure instead of re-parsing the same text.
+    pub parse_failure: Option<crate::tool_parse::ToolParseFailure>,
 }
 
 /// Classify buffered assistant text vs native structured tool calls at model turn end.
@@ -68,6 +72,7 @@ fn resolve_structured(
         recovered_tool_calls: Vec::new(),
         had_strong_tool_marker: !allow_tool_call && !native_tool_calls.is_empty(),
         wrong_format_marker: false,
+        parse_failure: None,
     }
 }
 
@@ -103,6 +108,7 @@ fn resolve_envelope(
             recovered_tool_calls: Vec::new(),
             had_strong_tool_marker: false,
             wrong_format_marker: false,
+            parse_failure: None,
         };
     }
 
@@ -111,8 +117,9 @@ fn resolve_envelope(
         let visible_assistant_text = if !batch.successes.is_empty() {
             visible_text_from_batch(&batch, buffered_text)
         } else {
-            truncate_before_normalized_marker(buffered_text, start)
+            truncate_before_marker(buffered_text, start, format)
         };
+        let parse_failure = batch.failures.first().cloned();
 
         if !allow_tool_call {
             return ModelTurnTextResolution {
@@ -121,6 +128,7 @@ fn resolve_envelope(
                 recovered_tool_calls: Vec::new(),
                 had_strong_tool_marker: true,
                 wrong_format_marker: false,
+                parse_failure,
             };
         }
 
@@ -141,6 +149,7 @@ fn resolve_envelope(
             recovered_tool_calls,
             had_strong_tool_marker: true,
             wrong_format_marker: false,
+            parse_failure,
         };
     }
 
@@ -149,7 +158,7 @@ fn resolve_envelope(
         // (no fallback); the ingest layer fails loudly naming the declared
         // format. Visible text is truncated before the offending syntax.
         return ModelTurnTextResolution {
-            visible_assistant_text: truncate_before_normalized_marker(buffered_text, start),
+            visible_assistant_text: truncate_before_marker(buffered_text, start, format),
             native_tool_calls: if allow_tool_call {
                 Vec::new()
             } else {
@@ -158,6 +167,7 @@ fn resolve_envelope(
             recovered_tool_calls: Vec::new(),
             had_strong_tool_marker: true,
             wrong_format_marker: true,
+            parse_failure: None,
         };
     }
 
@@ -168,6 +178,22 @@ fn resolve_envelope(
         recovered_tool_calls: Vec::new(),
         had_strong_tool_marker: true,
         wrong_format_marker: false,
+        parse_failure: None,
+    }
+}
+
+/// Truncate raw text before a marker offset. The offset is measured in
+/// `normalize_spaced_dsml` space only when the declared format is Dsml —
+/// the one format whose text is normalized before scanning. Every other
+/// format scans its raw text untouched, so its offsets are already raw
+/// offsets and must NOT be remapped through DSML space (the remap
+/// over-shifts on collapsible spaced-DSML content and can return `None`,
+/// silently dropping the preamble).
+fn truncate_before_marker(buffered_text: &str, start: usize, format: ToolCallFormat) -> String {
+    if format == ToolCallFormat::Dsml {
+        truncate_before_normalized_marker(buffered_text, start)
+    } else {
+        buffered_text[..start].trim_end().to_string()
     }
 }
 

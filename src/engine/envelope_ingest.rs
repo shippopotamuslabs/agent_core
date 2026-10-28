@@ -5,7 +5,6 @@ use crate::engine::leaked_tool_recovery::resolve_model_turn_text;
 use crate::tool_call_format::ToolCallFormat;
 use crate::tool_parse::envelope_error::{tools_blocked_nudge_json, TOOLS_BLOCKED_USER_FALLBACK};
 use crate::tool_parse::envelope_failure_json;
-use crate::tool_parse::parse_tool_calls_with_semantics;
 use crate::tool_parse::{ToolParseFailure, ToolParseFailureReason};
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
@@ -121,10 +120,12 @@ pub fn ingest_model_response_envelopes(
         );
     }
 
-    // Declared markers present but malformed: surface the declared parser's
-    // failure (existing ParseFailed shape).
-    let batch = parse_tool_calls_with_semantics(format, text, catalog, semantics);
-    if let Some(failure) = batch.failures.first() {
+    // Declared markers present but malformed: surface the failure the
+    // resolution's own parse produced (threaded through
+    // ModelTurnTextResolution — the text is never re-parsed here, so the
+    // failure always comes from the parse that actually ran, on the same
+    // normalized text it ran on).
+    if let Some(failure) = &resolution.parse_failure {
         return (
             EnvelopeIngestOutcome::ParseFailed {
                 error_json_for_model: envelope_failure_json(failure, catalog),
