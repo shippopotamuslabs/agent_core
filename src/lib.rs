@@ -32,6 +32,7 @@ pub mod events;
 pub mod file_context;
 pub mod forgecode_gap_compaction;
 pub mod guardrails;
+pub mod json_repair;
 #[cfg(feature = "lalr-harness")]
 #[doc(hidden)]
 pub mod lalr_harness;
@@ -45,11 +46,13 @@ pub mod parsed_tool_args;
 pub mod policy;
 pub mod repair;
 pub mod request_pipeline;
+pub mod schema_coerce;
 pub mod session;
 pub mod sidecar_builder;
 pub mod state_ledger;
 pub mod token_counter;
 pub mod tool_context;
+pub mod tool_name_match;
 pub mod tool_parse;
 pub mod tool_policy;
 pub mod tool_schema;

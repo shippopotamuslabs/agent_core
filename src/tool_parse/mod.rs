@@ -1,10 +1,25 @@
 //! Public Rust entry point for canonical tool-call parsing.
+//!
+//! Dependency direction (ENC-291): this module delegates to
+//! [`crate::canonicalize`]; the shared primitives live in the leaf modules
+//! [`crate::json_repair`] and [`crate::schema_coerce`] (re-exported below
+//! under their historic paths for compatibility), so the
+//! `canonicalize` <-> `tool_parse` import is one-way
+//! (`tool_parse` -> `canonicalize`).
 
 pub mod envelope;
 pub mod envelope_error;
-pub mod json_repair;
+/// Historic path; the implementation lives in [`crate::json_repair`].
+pub mod json_repair {
+    pub use crate::json_repair::{repair_json, repair_json_value_inplace, JsonRepairError};
+}
 pub mod result;
-pub mod schema_coerce;
+/// Historic path; the implementation lives in [`crate::schema_coerce`].
+pub mod schema_coerce {
+    pub use crate::schema_coerce::{
+        coerce_to_schema, extract_array_from_string, try_parse_string_as_value,
+    };
+}
 
 pub use envelope_error::envelope_failure_json;
 

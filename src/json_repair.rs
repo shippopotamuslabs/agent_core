@@ -4,6 +4,10 @@
 //! regex-only fixer. Model output often combines several JSON mistakes in the
 //! same payload, so parsing the structure directly is less brittle than
 //! repeatedly transforming strings and hoping strict JSON accepts the result.
+//!
+//! Leaf module (ENC-291): depends on nothing else in the crate, so both
+//! [`crate::canonicalize`] and [`crate::tool_parse`] can use it without a
+//! module cycle.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -1,5 +1,9 @@
 //! Fuzzy tool-name resolution via [`strsim::normalized_levenshtein`].
 //! Auto-accept threshold: **0.85** (ADR-locked).
+//!
+//! Leaf module (ENC-291): depends only on [`crate::catalog`], so
+//! [`crate::canonicalize`] and [`crate::repair`] can both use it without a
+//! module cycle.
 
 use crate::catalog::ToolCatalog;
 
