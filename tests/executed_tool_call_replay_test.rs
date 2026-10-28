@@ -80,14 +80,7 @@ fn non_budget_tool_messages(snapshot: &SessionTestSnapshot) -> Vec<&AgentMessage
     snapshot
         .messages
         .iter()
-        .filter(|m| {
-            m.role == AgentRole::Tool
-                && !m
-                    .metadata
-                    .extra("agent_tool_budget")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-        })
+        .filter(|m| m.role == AgentRole::Tool && !m.metadata.agent_tool_budget())
         .collect()
 }
 

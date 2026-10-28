@@ -339,19 +339,35 @@ impl ToolUniverse {
     }
 }
 
+/// The one implementation of the first-seen test behind every
+/// first-seen-order dedup in the crate (ENC-308 item 6): push `item`
+/// unless an equal value is already present, returning whether it
+/// pushed. [`merge_tool_names_deduped`] is the `ToolName` merge built
+/// on it; streaming call sites whose per-item work is fallible or whose
+/// keys are borrowed (the FFI boundary conversions in `ffi::types`)
+/// hold a `Vec` of seen keys and gate on this directly, so the dedup
+/// rule itself lives in exactly one place.
+pub(crate) fn push_first_seen<T: PartialEq>(vec: &mut Vec<T>, item: T) -> bool {
+    if vec.contains(&item) {
+        false
+    } else {
+        vec.push(item);
+        true
+    }
+}
+
 /// The one home for the first-seen-order, deduped `ToolName` merge
 /// (ENC-304 fix pass, s1): [`ToolUniverse::activate`] merges into the
 /// session's active set through here, and the spill-reference activation
 /// path merges into a `ToolResultRecord`'s `activated_tool_names`
-/// through here, so the two sides cannot drift.
+/// through here, so the two sides cannot drift. Built on
+/// [`push_first_seen`] (ENC-308 item 6).
 pub(crate) fn merge_tool_names_deduped(
     target: &mut Vec<ToolName>,
     names: impl IntoIterator<Item = ToolName>,
 ) {
     for name in names {
-        if !target.iter().any(|existing| existing == &name) {
-            target.push(name);
-        }
+        push_first_seen(target, name);
     }
 }
 

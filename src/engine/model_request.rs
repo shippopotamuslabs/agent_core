@@ -101,19 +101,19 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
         active_schemas
     };
 
-    let file_context_index =
-        session
-            .session_context
-            .included_files_json()
-            .and_then(|included_files_json| {
-                condense_file_context(
-                    &included_files_json,
-                    context_store,
-                    config,
-                    capabilities,
-                    turn_index,
-                )
-            });
+    // ENC-308 B1: the typed file list condenses directly; an absent and
+    // an empty list are the same state, so neither produces an index.
+    let file_context_index = if session.session_context.included_files.is_empty() {
+        None
+    } else {
+        condense_file_context(
+            &session.session_context.included_files,
+            context_store,
+            config,
+            capabilities,
+            turn_index,
+        )
+    };
 
     let generation = sidecar_builder.next_generation();
     let sidecar_budget = config.long_loop.sidecar_byte_budget_per_call;

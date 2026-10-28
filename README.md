@@ -23,6 +23,57 @@ Hosts drive it two ways:
   UniFFI is only for the Android bridge. Native Rust hosts should not route
   through the Kotlin callback bridge.
 
+## The UniFFI boundary is closed and typed (ENC-308)
+
+Everything a Kotlin host exchanges with the engine crosses as typed UniFFI
+records — no JSON-string parameters remain on the surface:
+
+- `create_session` takes an `FfiSessionContext` record (the former
+  `session_context_json` string and its lenient parse are gone) and converts
+  initial messages strictly: malformed metadata is an `AgentException`,
+  never a silently defaulted session.
+- Summary requests carry the state ledger as an `FfiStateLedger` record
+  (the former `state_ledger_snapshot_json` string and its silent `.ok()`
+  conversions are gone).
+- `submit_tool_results` is fallible: the batch converts before the engine
+  sees it, and a non-blank invalid activated tool name is an
+  `AgentException` (blank entries are dropped, as documented on the
+  conversion).
+- Message metadata is a closed schema (`MessageMeta`): the keys the engine
+  understands are typed fields. At FFI ingress an unknown key is a typed
+  error naming the key; in stored state (snapshots, persisted history) an
+  unknown key is dropped at the read seam and every engine-owned value
+  survives. Host annotations do not round-trip through the engine — hosts
+  keep them host-side, keyed by message ID, and reattach them to engine
+  emissions themselves. The former `SessionContext` / `MessageMeta` extras
+  catch-alls are deleted.
+
+### Validation model
+
+The host's per-tool JSON Schema is the *provider-facing* description: it is
+rendered into the model request so the model knows what to emit. The engine
+does not validate calls against that document. What the engine enforces at
+ingress is the host-declared typed contract — the `ToolSchemaHint`
+(required fields, defaults) plus the tool semantics. Model arguments are
+parsed exactly once, then checked: required fields present, unknown
+parameters rejected, defaults applied, values coerced per the semantics.
+Failures surface as typed parse errors the model can repair against.
+
+### What still crosses as JSON, and why
+
+Three crossings remain JSON by design (ratified in ENC-308):
+
+- **The session snapshot** (`export_snapshot` / `import_snapshot` strings):
+  the host is a conduit — it stores the blob and hands it back without
+  reading it — so a versioned serialized blob with a fully validating
+  import is the right contract (ENC-305 D7).
+- **Schema-hint default values** (`FfiDefaultValue.value_json`): a
+  default's shape is whatever that tool's argument is, so the honest type
+  is "a JSON value"; it is parsed exactly once at session setup.
+- **Tool arguments and results**: each tool's shape is host-defined, and
+  model output is JSON text. The discipline is parse-once plus the ingress
+  validation above, not a static type.
+
 ## Tests
 
 The suite compiles and passes in a standalone checkout of this repo (no
@@ -118,7 +169,6 @@ Release process, from the Enclave side:
 | Path | Contents |
 | --- | --- |
 | `src/engine/`, `src/compact/`, `src/repair/`, `src/canonicalize/` | The loop, the compaction tiers, tool-call repair, and message canonicalization |
-| `src/host.rs` | The native host trait surface |
 | `src/ffi/` | The UniFFI bridge for Kotlin |
 | `src/events.rs`, `src/policy.rs`, `src/guardrails.rs`, `src/budget.rs` | The event schema, policy, guardrails, and session accounting |
 | `tests/leak_repro_manual_test.rs` | The leaked-tool-call recovery harness, kept as a source test |
