@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn bare_string_entries_are_rejected_at_parse() {
-        // The fcg_011/fcg_016 fixture shape (bare strings, not schema
+        // The runtime-tool-view/delegation fixture shape (bare strings, not schema
         // objects) is a contract violation now, caught at parse instead of
         // being honored by the runtime-view gates.
         assert!(matches!(

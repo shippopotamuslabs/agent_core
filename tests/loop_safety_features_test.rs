@@ -3,7 +3,6 @@ use std::sync::Arc;
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent, CompactionTrigger};
-use agent_core::forgecode_gap_compaction::destructive_eviction_ids_with_retention;
 use agent_core::loop_hooks::{
     AgentLoopHook, DoomLoopReminderHook, HookCheckpoint, HookContext, PendingWorkReminderHook,
 };
@@ -155,7 +154,7 @@ impl RequestTransformer for AppendTransformer {
 }
 
 #[test]
-fn fcg_001_repeated_tool_attempts_are_counted_exactly() {
+fn repeated_tool_attempts_are_counted_exactly() {
     let mut metrics = LoopMetrics::default();
     let call = call("call-1", "web_search", r#"{"query":"rust"}"#);
 
@@ -169,7 +168,7 @@ fn fcg_001_repeated_tool_attempts_are_counted_exactly() {
 }
 
 #[test]
-fn fcg_002_patch_is_allowed_after_prior_read() {
+fn patch_is_allowed_after_prior_read() {
     let mut metrics = LoopMetrics::default();
     metrics.files_read.insert("/repo/src/lib.rs".into());
 
@@ -177,7 +176,7 @@ fn fcg_002_patch_is_allowed_after_prior_read() {
 }
 
 #[test]
-fn fcg_003_overwrite_is_denied_without_prior_read() {
+fn overwrite_is_denied_without_prior_read() {
     let config = AgentConfig {
         require_read_before_edit: true,
         ..AgentConfig::default()
@@ -195,7 +194,7 @@ fn fcg_003_overwrite_is_denied_without_prior_read() {
 }
 
 #[test]
-fn fcg_004_doom_loop_reminder_appears_once() {
+fn doom_loop_reminder_appears_once() {
     let mut metrics = LoopMetrics::default();
     metrics.repeated_tool_signatures.push(ToolSignatureWindow {
         signature: r#"web_search:{"query":"same"}"#.into(),
@@ -223,7 +222,7 @@ fn fcg_004_doom_loop_reminder_appears_once() {
 }
 
 #[test]
-fn fcg_005_pending_work_guard_blocks_finish() {
+fn pending_work_guard_blocks_finish() {
     let mut metrics = LoopMetrics::default();
     metrics.pending_work_items.push(PendingWorkItem {
         text: "verify failing tests".into(),
@@ -244,7 +243,7 @@ fn fcg_005_pending_work_guard_blocks_finish() {
 }
 
 #[test]
-fn fcg_006_hook_ordering_is_stable() {
+fn hook_ordering_is_stable() {
     let engine = red_engine();
     let handle = engine
         .create_session(
@@ -301,7 +300,7 @@ fn fcg_006_hook_ordering_is_stable() {
 }
 
 #[test]
-fn fcg_007_absolute_token_threshold_triggers_compaction() {
+fn absolute_token_threshold_triggers_compaction() {
     let engine = red_engine();
     let config = AgentConfig {
         threshold_ratio: 1.0,
@@ -334,7 +333,7 @@ fn fcg_007_absolute_token_threshold_triggers_compaction() {
 }
 
 #[test]
-fn fcg_007b_lone_user_soft_threshold_preserves_active_query() {
+fn lone_user_soft_threshold_preserves_active_query() {
     let engine = red_engine();
     let config = AgentConfig {
         threshold_ratio: 1.0,
@@ -366,7 +365,7 @@ fn fcg_007b_lone_user_soft_threshold_preserves_active_query() {
 }
 
 #[test]
-fn fcg_008_turn_threshold_triggers_compaction() {
+fn turn_threshold_triggers_compaction() {
     let engine = red_engine();
     let config = AgentConfig {
         turn_threshold: Some(4),
@@ -400,7 +399,7 @@ fn fcg_008_turn_threshold_triggers_compaction() {
 }
 
 #[test]
-fn fcg_009_turn_end_compaction_fires_on_user_tail() {
+fn turn_end_compaction_fires_on_user_tail() {
     let engine = red_engine();
     let config = AgentConfig {
         compact_on_turn_end: true,
@@ -439,7 +438,7 @@ fn fcg_009_turn_end_compaction_fires_on_user_tail() {
 }
 
 #[test]
-fn fcg_010_request_transformers_run_in_order() {
+fn request_transformers_run_in_order() {
     let pipeline = RequestPipeline {
         transformers: vec![
             Arc::new(AppendTransformer("alpha")),
@@ -455,7 +454,7 @@ fn fcg_010_request_transformers_run_in_order() {
 }
 
 #[test]
-fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
+fn runtime_tool_view_hides_unsafe_edit_tools() {
     let config = AgentConfig {
         require_read_before_edit: true,
         ..AgentConfig::default()
@@ -484,7 +483,7 @@ fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
 }
 
 #[test]
-fn fcg_012_delegation_metadata_stays_inside_tool_metadata() {
+fn delegation_metadata_stays_inside_tool_metadata() {
     let action = execute_delegation_call("c-delegate");
 
     assert!(matches!(action, AgentAction::ExecuteTools(_)));
@@ -492,7 +491,7 @@ fn fcg_012_delegation_metadata_stays_inside_tool_metadata() {
 }
 
 #[test]
-fn fcg_013_tool_result_metadata_is_structured() {
+fn tool_result_metadata_is_structured() {
     let engine = red_engine();
     let handle = engine
         .create_session(
@@ -527,7 +526,7 @@ fn fcg_013_tool_result_metadata_is_structured() {
 }
 
 #[test]
-fn fcg_014_pending_work_reminder_deduplicates() {
+fn pending_work_reminder_deduplicates() {
     let mut metrics = LoopMetrics::default();
     metrics.pending_work_items.push(PendingWorkItem {
         text: "verify failing tests".into(),
@@ -546,27 +545,7 @@ fn fcg_014_pending_work_reminder_deduplicates() {
 }
 
 #[test]
-fn fcg_015_retention_window_preserves_the_last_two_messages() {
-    let config = AgentConfig {
-        retention_window_messages: 2,
-        ..AgentConfig::default()
-    };
-    let messages = vec![
-        message("m1", AgentRole::User, "one"),
-        message("m2", AgentRole::Assistant, "two"),
-        message("m3", AgentRole::User, "three"),
-        message("m4", AgentRole::Assistant, "four"),
-    ];
-
-    let selected =
-        destructive_eviction_ids_with_retention(&config, &messages).expect("eviction ids");
-
-    assert!(!selected.contains(&"m3".to_string()));
-    assert!(!selected.contains(&"m4".to_string()));
-}
-
-#[test]
-fn fcg_016_delegation_tools_are_removed_when_unsupported() {
+fn delegation_tools_are_removed_when_unsupported() {
     let capabilities = SessionCapabilities {
         delegation_tools_supported: false,
         ..SessionCapabilities::default()
@@ -588,7 +567,7 @@ fn fcg_016_delegation_tools_are_removed_when_unsupported() {
 }
 
 #[test]
-fn fcg_017_policy_denial_is_typed() {
+fn policy_denial_is_typed() {
     let outcome = process_policy_denial("shell_exec").expect("policy denial outcome");
 
     assert!(outcome.result_metadata.policy_denied);
@@ -600,7 +579,7 @@ fn fcg_017_policy_denial_is_typed() {
 }
 
 #[test]
-fn fcg_018_timeout_is_typed() {
+fn timeout_is_typed() {
     let outcome = record_timeout_result(100).expect("timeout outcome");
 
     assert!(outcome.result_metadata.timed_out);
@@ -612,7 +591,7 @@ fn fcg_018_timeout_is_typed() {
 }
 
 #[test]
-fn fcg_019_end_to_end_order_remains_deterministic() {
+fn end_to_end_order_remains_deterministic() {
     let engine = red_engine();
     let handle = engine
         .create_session(
@@ -657,7 +636,7 @@ fn fcg_019_end_to_end_order_remains_deterministic() {
 }
 
 #[test]
-fn fcg_020_string_only_reminder_is_insufficient() {
+fn string_only_reminder_is_insufficient() {
     let string_only_result = ToolResultRecord {
         call_id: "call-1".into(),
         result_json: r#"{"message":"policy_denied"}"#.into(),

@@ -36,7 +36,6 @@ pub mod context_store;
 pub mod engine;
 pub mod events;
 pub mod file_context;
-pub mod forgecode_gap_compaction;
 pub mod guardrails;
 pub mod json_repair;
 #[cfg(feature = "lalr-harness")]
