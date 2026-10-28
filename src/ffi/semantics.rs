@@ -851,6 +851,80 @@ mod tests {
     }
 
     #[test]
+    fn ffi_create_session_with_unknown_reference_is_agent_exception() {
+        // ENC-299 D4: the typed FFI boundary propagates referential failures
+        // through the existing create_session -> AgentException path.
+        use crate::ffi::{create_agent_engine, FfiAgentMessage, FfiAgentRole, FfiSessionIoParams};
+        use crate::ffi::{FfiSessionCapabilities, FfiToolSchemaEntry};
+
+        let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
+        tree.argument_repairs[0].tool_name = "typo_tool_xyz".to_string();
+        let config = FfiAgentConfig {
+            tool_semantics: Some(tree),
+            tool_specs: legacy_specs().iter().map(FfiToolSpec::from).collect(),
+            ..Default::default()
+        };
+        let engine = create_agent_engine();
+        let error = match engine.create_session(
+            vec![FfiAgentMessage {
+                id: "u1".into(),
+                role: FfiAgentRole::User,
+                content: "hi".into(),
+                metadata_json: "{}".into(),
+            }],
+            config,
+            FfiSessionCapabilities::default(),
+            "null".to_string(),
+            FfiSessionIoParams {
+                provider: "anthropic".into(),
+                context_window_tokens: 200_000,
+                tool_schemas: vec![FfiToolSchemaEntry {
+                    name: "web_search".into(),
+                    description: None,
+                    reproducible: None,
+                    deferrable: None,
+                    max_result_bytes: None,
+                }],
+                system_prompt: "sys".into(),
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("dangling reference must fail FFI session creation"),
+        };
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("UnknownToolReference")
+                        && detail.contains("argument_repairs.tool_name")
+                        && detail.contains("typo_tool_xyz"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ffi_blank_tool_name_is_agent_exception_naming_field() {
+        // ENC-299: core ToolName construction is fallible, so a blank FFI
+        // tool name fails typed conversion with the field named.
+        let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
+        tree.argument_repairs[0].tool_name = "".to_string();
+        let error = tree
+            .into_core()
+            .expect_err("blank tool name must fail conversion");
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("argument_repairs[].tool_name"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn none_semantics_is_host_declared_agnostic() {
         // D2: None is the explicit host-declared default, not a fallback —
         // it converts to the agnostic core config with an empty catalog.

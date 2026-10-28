@@ -128,7 +128,10 @@ impl AgentEngine {
     /// Fallible (ENC-297 J1): re-syncs the policy catalog from the
     /// construction-time semantics and fails on invalid struct-literal /
     /// serde configs (duplicate tool names, alias collisions) instead of
-    /// running the session with a stale or empty catalog. Returns
+    /// running the session with a stale or empty catalog. ENC-299 D4 also
+    /// fails session creation when a semantics section references a tool
+    /// that is neither a catalog tool nor an active schema
+    /// ([`ToolSemanticsError::UnknownToolReference`]). Returns
     /// [`ToolSemanticsError`] so every caller decides how to surface it.
     pub fn create_session(
         &self,
@@ -143,6 +146,15 @@ impl AgentEngine {
         // ENC-297 J1: propagate — no `let _` discard. An invalid literal
         // config fails session creation; no live session exists on error.
         config.prepare_tool_semantics()?;
+        // ENC-299 D4: referential validation runs here, where the policy
+        // catalog and the parsed schema set meet for the first time. Known
+        // names are the catalog (canonical + aliases) union the active
+        // schemas; sections that are absent/empty are skipped, so the
+        // agnostic config passes.
+        let schema_names = io.schemas.initial_active_names();
+        config
+            .tool_semantics
+            .validate_references(&config.tool_catalog, &schema_names)?;
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {

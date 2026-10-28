@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::catalog::{ToolSchemaHint, ToolSpec};
 use crate::tool_name::ToolName;
@@ -61,6 +61,20 @@ impl ToolSemanticsConfig {
                         });
                     }
                 } else {
+                    // ENC-299 D5: an alias colliding with another tool's
+                    // canonical name is the same collision — without this, the
+                    // first-alias-wins catalog index would silently shadow the
+                    // canonical owner post-validation. An alias equal to its
+                    // OWN canonical name is harmless and stays allowed.
+                    if let Some(owner) = names.get(alias) {
+                        if *owner != &tool.name {
+                            return Err(ToolSemanticsError::AliasCollision {
+                                alias: alias.as_str().to_string(),
+                                first_tool: owner.as_str().to_string(),
+                                second_tool: tool.name.as_str().to_string(),
+                            });
+                        }
+                    }
                     aliases.insert(alias, &tool.name);
                 }
             }
@@ -114,6 +128,71 @@ impl ToolSemanticsConfig {
             }
         }
 
+        Ok(())
+    }
+
+    /// Referential validation (ENC-299 D4): every tool name referenced by a
+    /// configured semantics section must resolve — either to a catalog tool
+    /// (canonical name or declared alias) or to an active schema name.
+    ///
+    /// Only enforced when the containing section is present/non-empty, so the
+    /// agnostic config passes. The engine runs this in `create_session`
+    /// after [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics),
+    /// where the catalog and the parsed schema set meet for the first time.
+    pub fn validate_references(
+        &self,
+        catalog: &crate::catalog::ToolCatalog,
+        schema_names: &[ToolName],
+    ) -> Result<(), ToolSemanticsError> {
+        let mut known: HashSet<&ToolName> = HashSet::new();
+        for spec in catalog.all() {
+            known.insert(&spec.name);
+            for alias in &spec.aliases {
+                known.insert(alias);
+            }
+        }
+        for name in schema_names {
+            if !name.is_empty() {
+                known.insert(name);
+            }
+        }
+        let check = |section: &str, name: &ToolName| -> Result<(), ToolSemanticsError> {
+            if !known.contains(name) {
+                return Err(ToolSemanticsError::UnknownToolReference {
+                    section: section.to_string(),
+                    name: name.as_str().to_string(),
+                });
+            }
+            Ok(())
+        };
+        if let Some(discovery) = &self.discovery {
+            check("discovery.tool_name", &discovery.tool_name)?;
+            for companion in &discovery.companion_callable_tools {
+                check("discovery.companion_callable_tools", companion)?;
+            }
+        }
+        if let Some(artifact) = &self.artifact {
+            check("artifact.start_tool_name", &artifact.start_tool_name)?;
+            check("artifact.append_tool_name", &artifact.append_tool_name)?;
+        }
+        for rule in &self.argument_repairs {
+            check("argument_repairs.tool_name", &rule.tool_name)?;
+        }
+        for shape in &self.canonical_shapes {
+            check("canonical_shapes.tool_name", &shape.tool_name)?;
+        }
+        for policy in &self.result_policies {
+            check("result_policies.tool_name", &policy.tool_name)?;
+        }
+        if let Some(squash) = self.compaction.artifact_squash.as_ref() {
+            check(
+                "compaction.artifact_squash.append_tool_name",
+                &squash.append_tool_name,
+            )?;
+        }
+        for greedy in &self.greedy_extension_tools {
+            check("greedy_extension_tools.tool_name", &greedy.tool_name)?;
+        }
         Ok(())
     }
 }
@@ -220,6 +299,12 @@ pub enum ToolSemanticsError {
         alias: String,
         first_tool: String,
         second_tool: String,
+    },
+    /// A semantics section references a tool that is neither a catalog tool
+    /// (canonical name or alias) nor an active schema name (ENC-299 D4).
+    UnknownToolReference {
+        section: String,
+        name: String,
     },
     InvalidDiscoveryConfig {
         message: String,
