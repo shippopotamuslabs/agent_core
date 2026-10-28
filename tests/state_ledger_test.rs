@@ -126,13 +126,13 @@ fn s15_artifact_squash_persists_artifact_state_into_ledger() {
     let mut ledger = StateLedger::default();
     let anchor = ArtifactStateAnchor {
         artifact_id: "art-1".into(),
-        total_blocks: 3,
+        observed_total_blocks: Some(3),
         last_block_preview: "gamma".into(),
         continuation_instruction: "Continue appending.".into(),
     };
     ledger.observe_artifact_anchor(anchor);
     assert_eq!(ledger.artifact_states[0].artifact_id, "art-1");
-    assert_eq!(ledger.artifact_states[0].total_blocks, 3);
+    assert_eq!(ledger.artifact_states[0].observed_total_blocks, Some(3));
     assert_eq!(ledger.artifact_states[0].last_block_preview, "gamma");
     assert_eq!(
         ledger.artifact_states[0].continuation_instruction,
@@ -180,7 +180,7 @@ fn m5_artifact_continuation_cannot_rely_only_on_synthetic_system_text() {
     let mut ledger = StateLedger::default();
     ledger.observe_artifact_anchor(ArtifactStateAnchor {
         artifact_id: "art-2".into(),
-        total_blocks: 1,
+        observed_total_blocks: Some(1),
         last_block_preview: "omega".into(),
         continuation_instruction: "Continue appending.".into(),
     });

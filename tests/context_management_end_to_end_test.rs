@@ -127,7 +127,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         req_ledger
             .artifact_states
             .iter()
-            .any(|anchor| anchor.artifact_id == "art-9" && anchor.total_blocks == 3),
+            .any(|anchor| anchor.artifact_id == "art-9" && anchor.observed_total_blocks == Some(3)),
         "artifact state missing from ledger: {:?}",
         req_ledger.artifact_states
     );

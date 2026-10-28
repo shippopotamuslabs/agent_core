@@ -40,10 +40,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 
+/// Anchor of artifact continuation state (ENC-302 Option A).
+///
+/// The anchor is an explicitly derived cache of engine-processed append
+/// results, not ground truth: `observed_total_blocks` is the newest observed
+/// `totalBlocks` value and may be stale (out-of-band host growth is not
+/// visible until the next successful append result is observed). The host
+/// artifact is the source of truth. Never branch control flow on the cached
+/// count; the continuation instruction is emitted verbatim regardless.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactStateAnchor {
     pub artifact_id: String,
-    pub total_blocks: u32,
+    /// Newest observed total-blocks value (`None` when the successful
+    /// append result carried no integer total field). Deserializes the
+    /// pre-ENC-302 `total_blocks` name via alias; serializes the new name.
+    #[serde(alias = "total_blocks")]
+    pub observed_total_blocks: Option<u32>,
     pub last_block_preview: String,
     pub continuation_instruction: String,
 }
@@ -487,9 +499,16 @@ impl StateLedger {
         }
         if !self.artifact_states.is_empty() {
             for a in &self.artifact_states {
+                // ENC-302: the cached count is display-only; an unobserved
+                // count renders as the literal `unknown`. The continuation
+                // instruction is always emitted verbatim.
+                let total = a
+                    .observed_total_blocks
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 body.push_str(&format!(
                     "Artifact {}: {} blocks, last `{}`. {}\n",
-                    a.artifact_id, a.total_blocks, a.last_block_preview, a.continuation_instruction
+                    a.artifact_id, total, a.last_block_preview, a.continuation_instruction
                 ));
             }
         }

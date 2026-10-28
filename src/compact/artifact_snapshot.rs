@@ -13,9 +13,14 @@ pub fn persist_artifact_snapshot(
 ) -> ContextReference {
     let id = format!("artifact-snapshot-{}", anchor.artifact_id);
     let content = serde_json::to_string(anchor).unwrap_or_else(|_| {
+        // ENC-302: same `unknown` treatment as the anchor message render.
+        let total = anchor
+            .observed_total_blocks
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         format!(
             "{}:{}:{}",
-            anchor.artifact_id, anchor.total_blocks, anchor.last_block_preview
+            anchor.artifact_id, total, anchor.last_block_preview
         )
     });
     let reference = ContextReference {

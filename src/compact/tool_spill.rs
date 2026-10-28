@@ -104,9 +104,26 @@ fn tool_message_reference_id(message: &AgentMessage) -> String {
 /// (`artifact_squash::is_semantic_success_payload`), so large semantic
 /// results still reach `ArtifactSquashCompactionTier` instead of being
 /// spilled out from under it (see `s5_artifact_squash_is_preferred_over_fifo`).
-fn is_squash_claimed_payload(content: &str, squash: Option<&ArtifactSquashSemantics>) -> bool {
+fn is_squash_claimed_payload(
+    message: &AgentMessage,
+    squash: Option<&ArtifactSquashSemantics>,
+) -> bool {
     squash.is_some_and(|semantics| {
-        super::artifact_squash::is_semantic_success_payload(content, semantics)
+        // ENC-302: scope the exemption to results of the configured append
+        // tool; other tools' success payloads (e.g. start_artifact) spill
+        // normally. Metadata-less messages keep the content-only sniff.
+        match message.metadata.tool_name() {
+            Some(name) => {
+                name == semantics.append_tool_name.as_str()
+                    && super::artifact_squash::is_semantic_success_payload(
+                        &message.content,
+                        semantics,
+                    )
+            }
+            None => {
+                super::artifact_squash::is_semantic_success_payload(&message.content, semantics)
+            }
+        }
     })
 }
 
@@ -129,7 +146,7 @@ pub fn spill_tool_messages_in_session(
         if message.role != AgentRole::Tool
             || message.content.len() <= threshold_bytes
             || message.metadata.is_spilled()
-            || is_squash_claimed_payload(&message.content, artifact_squash)
+            || is_squash_claimed_payload(message, artifact_squash)
         {
             continue;
         }
