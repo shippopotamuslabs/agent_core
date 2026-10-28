@@ -1,20 +1,22 @@
-//! Envelope detection: DSML, GLM, CDATA, `<tool_call>`, Mistral `[TOOL_CALLS]`,
-//! raw JSON object/array shapes.
+//! Envelope detection, one parser per declared shape (ENC-300).
 //!
-//! Red phase stub: all behavior is unimplemented.
+//! Shapes: DSML, BracketArray (`[TOOL_CALLS]`), XmlToolCall (`<tool_call>`,
+//! including the `<arg_key>`/`<arg_value>` payload sub-shape), CDATA,
+//! CallBrace (`call: name { … }`), and raw JSON objects/arrays.
 
 use serde::{Deserialize, Serialize};
 
-/// Marker enum that lets the failure path tell callers whether the malformed
-/// envelope used DSML delimiters (so the Kotlin facade can format the right
-/// exception message).
+/// Marker enum that lets the failure path tell callers which envelope shape
+/// was being parsed when extraction failed (so the Kotlin facade can format
+/// the right exception message). Shape-only names (ENC-300 D1): the former
+/// provider-flavored names (`Mistral`, `ToolCall`, `LiteRtCall`) are gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnvelopeFormat {
     Dsml,
-    Mistral,
-    ToolCall,
+    BracketArray,
+    XmlToolCall,
     Cdata,
-    LiteRtCall,
+    CallBrace,
     RawJson,
 }
 

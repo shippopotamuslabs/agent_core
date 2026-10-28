@@ -14,6 +14,7 @@ use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_name::ToolName;
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::Value;
@@ -360,7 +361,16 @@ fn tb_05_soft_failure_streak_sets_reason() {
 #[test]
 fn tb_06_envelope_parse_streak_sets_reason() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng, AgentConfig::default());
+    // ENC-300: this turn feeds DSML text, so the session declares Dsml
+    // (the default Structured config never mines body text, so no
+    // envelope-parse streak could build).
+    let h = new_session(
+        &eng,
+        AgentConfig {
+            tool_call_format: ToolCallFormat::Dsml,
+            ..AgentConfig::default()
+        },
+    );
     // Envelope streak 2: allow true for CallModel; hits limit after parse failure.
     h.integration_test_seed_guardrails(2, 0, 2, vec![]);
 

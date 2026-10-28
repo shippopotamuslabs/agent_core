@@ -4,13 +4,15 @@ mod gate_state;
 mod markers;
 mod result;
 
+use crate::tool_call_format::ToolCallFormat;
+
 pub use gate_state::{has_tool_marker_at_finish, native_tool_flush_end, ActiveHold, HoldKind};
 pub(crate) use markers::original_offset_for_normalized_offset;
 pub use markers::{
-    earliest_confirmed_marker_start, earliest_tentative_trigger,
-    first_stream_holdback_marker_start, first_strong_tool_marker_start, first_tool_marker_start,
-    might_be_tool_marker_prefix, normalize_spaced_dsml, resolve_tentative_hold, safe_emit_end,
-    HoldResolution, TentativeKind, TOOL_MARKER_HOLDBACK_CHARS,
+    declared_marker_start, earliest_tentative_trigger_for, last_ambiguous_angle_bracket_for,
+    might_be_tool_marker_prefix_for, normalize_spaced_dsml, other_format_marker_start,
+    resolve_tentative_hold_for, safe_emit_end, HoldResolution, TentativeKind,
+    TOOL_MARKER_HOLDBACK_CHARS,
 };
 pub use result::{PushResult, StreamGateFinish};
 
@@ -18,15 +20,21 @@ pub use result::{PushResult, StreamGateFinish};
 pub struct ToolStreamGate {
     #[allow(dead_code)]
     allow_tool_call: bool,
+    format: ToolCallFormat,
     buffer: String,
     emitted_length: usize,
     hold: Option<ActiveHold>,
 }
 
 impl ToolStreamGate {
-    pub fn new(allow_tool_call: bool) -> Self {
+    /// Create a gate for one declared format (ENC-300 D5): detection and
+    /// resolution consult only that format's marker set.
+    /// [`ToolCallFormat::Structured`] is pure pass-through — no holds, no
+    /// marker at finish, trailing flush emits everything.
+    pub fn new(allow_tool_call: bool, format: ToolCallFormat) -> Self {
         Self {
             allow_tool_call,
+            format,
             buffer: String::new(),
             emitted_length: 0,
             hold: None,
@@ -41,8 +49,12 @@ impl ToolStreamGate {
 
     pub fn push(&mut self, chunk: &str) -> PushResult {
         self.buffer.push_str(chunk);
-        let reconciled =
-            gate_state::reconcile_after_push(&self.buffer, self.emitted_length, self.hold);
+        let reconciled = gate_state::reconcile_after_push(
+            &self.buffer,
+            self.emitted_length,
+            self.hold,
+            self.format,
+        );
         self.hold = reconciled.hold;
 
         let mut emitted_prefix = String::new();
@@ -57,9 +69,9 @@ impl ToolStreamGate {
     }
 
     pub fn finish(&mut self, has_native_tool_calls: bool) -> StreamGateFinish {
-        let has_tool_marker = has_tool_marker_at_finish(&self.buffer, self.hold);
+        let has_tool_marker = has_tool_marker_at_finish(&self.buffer, self.hold, self.format);
         let trailing_flush = if has_native_tool_calls {
-            let flush_end = native_tool_flush_end(&self.buffer, self.hold);
+            let flush_end = native_tool_flush_end(&self.buffer, self.hold, self.format);
             self.flush_emitted_prefix(flush_end)
         } else if has_tool_marker {
             String::new()
@@ -90,6 +102,6 @@ impl ToolStreamGate {
     }
 
     pub fn has_tool_markup_at_finish(&self) -> bool {
-        has_tool_marker_at_finish(&self.buffer, self.hold)
+        has_tool_marker_at_finish(&self.buffer, self.hold, self.format)
     }
 }

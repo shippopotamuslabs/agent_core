@@ -108,9 +108,17 @@ pub fn result_json_looks_soft_failure(json: &str) -> bool {
     is_soft_failure_result_json(json)
 }
 
+/// Markerless-failure contract (ENC-300 m7, loud by design): only the
+/// declared `tool_call_format`'s parser runs on `raw`. Markerless text (no
+/// markers of the declared shape) is NOT silent success — it fails with a
+/// `MalformedEnvelope` failure naming the declared shape, and text in
+/// another shape's syntax fails the same way (no cross-shape fallback).
+/// [`ToolCallFormat::Structured`](crate::tool_call_format::ToolCallFormat::Structured)
+/// never mines text: it always returns an empty batch.
 #[uniffi::export]
 pub fn parse_tool_calls(
     raw: &str,
+    tool_call_format: super::types::FfiToolCallFormat,
     tool_semantics: Option<FfiToolSemantics>,
     tool_specs: Vec<FfiToolSpec>,
 ) -> FfiToolParseBatch {
@@ -131,12 +139,15 @@ pub fn parse_tool_calls(
             };
         }
     };
-    tool_parse::parse_tool_calls_with_semantics(raw, &catalog, &semantics).into()
+    // ENC-300 D3: the host declares the format per call; only that parser runs.
+    let format = crate::tool_call_format::ToolCallFormat::from(tool_call_format);
+    tool_parse::parse_tool_calls_with_semantics(format, raw, &catalog, &semantics).into()
 }
 
 #[uniffi::export]
 pub fn has_local_tool_contract(
     system_prompt: &str,
+    tool_call_format: super::types::FfiToolCallFormat,
     tool_semantics: Option<FfiToolSemantics>,
     tool_specs: Vec<FfiToolSpec>,
 ) -> bool {
@@ -146,7 +157,9 @@ pub fn has_local_tool_contract(
         Ok(loaded) => loaded,
         Err(_) => return false,
     };
-    tool_parse::has_local_tool_contract(system_prompt, &catalog)
+    // ENC-300 D3: declared-format markers only (Structured => false).
+    let format = crate::tool_call_format::ToolCallFormat::from(tool_call_format);
+    tool_parse::has_local_tool_contract(format, system_prompt, &catalog)
 }
 
 #[uniffi::export]

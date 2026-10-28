@@ -289,6 +289,7 @@ impl AgentEngine {
         let semantics = g.config.tool_semantics.clone();
         let catalog = g.config.tool_catalog.clone();
         let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
+            g.config.tool_call_format,
             response.assistant_text.as_deref(),
             &response.tool_calls,
             allow_tool_call,

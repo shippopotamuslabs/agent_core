@@ -1,9 +1,10 @@
 //! Tentative-hold state machine for streaming tool-syntax disambiguation.
 
 use super::markers::{
-    earliest_confirmed_marker_start, earliest_tentative_trigger, last_ambiguous_angle_bracket,
-    resolve_tentative_hold, HoldResolution, TentativeKind, TOOL_MARKER_HOLDBACK_CHARS,
+    declared_marker_start, earliest_tentative_trigger_for, last_ambiguous_angle_bracket_for,
+    resolve_tentative_hold_for, HoldResolution, TentativeKind, TOOL_MARKER_HOLDBACK_CHARS,
 };
+use crate::tool_call_format::ToolCallFormat;
 
 /// Active hold region in the streaming buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,36 +27,47 @@ pub struct ReconcileResult {
 }
 
 /// Reconcile hold state and compute how far it is safe to emit through `buffer`.
+///
+/// Declared-format only (ENC-300 D5): detection and resolution consult the
+/// declared format's marker set. [`ToolCallFormat::Structured`] is pure
+/// pass-through — no holds, everything emitted.
 pub fn reconcile_after_push(
     buffer: &str,
     emitted_length: usize,
     hold: Option<ActiveHold>,
+    format: ToolCallFormat,
 ) -> ReconcileResult {
+    if format.is_structured() {
+        return ReconcileResult {
+            hold: None,
+            emit_exclusive_end: char_boundary_truncate(buffer, buffer.len()),
+        };
+    }
     // Step 1: resolve a carried-over tentative hold.
     let (mut hold, mut disproved_flush) = match hold {
         Some(ActiveHold {
             start,
             kind: HoldKind::Tentative(kind),
-        }) => resolve_hold(buffer, start, kind),
+        }) => resolve_hold(buffer, start, kind, format),
         unchanged => (unchanged, false),
     };
 
     // Step 2: detect a fresh hold when nothing blocks emission.
     if hold.is_none() && !disproved_flush {
-        hold = detect_hold(buffer, emitted_length);
+        hold = detect_hold(buffer, emitted_length, format);
         if let Some(ActiveHold {
             start,
             kind: HoldKind::Tentative(kind),
         }) = hold
         {
-            (hold, disproved_flush) = resolve_hold(buffer, start, kind);
+            (hold, disproved_flush) = resolve_hold(buffer, start, kind, format);
         }
     }
 
     let emit_exclusive_end = if disproved_flush {
         char_boundary_truncate(buffer, buffer.len())
     } else {
-        emit_boundary(buffer, emitted_length, hold)
+        emit_boundary(buffer, emitted_length, hold, format)
     };
 
     ReconcileResult {
@@ -66,8 +78,13 @@ pub fn reconcile_after_push(
 
 /// Resolve one tentative hold at `start`, returning the updated hold plus
 /// whether a disproved hold requires a full flush.
-fn resolve_hold(buffer: &str, start: usize, kind: TentativeKind) -> (Option<ActiveHold>, bool) {
-    match resolve_tentative_hold(&buffer[start..], kind) {
+fn resolve_hold(
+    buffer: &str,
+    start: usize,
+    kind: TentativeKind,
+    format: ToolCallFormat,
+) -> (Option<ActiveHold>, bool) {
+    match resolve_tentative_hold_for(&buffer[start..], kind, format) {
         HoldResolution::Confirmed => (
             Some(ActiveHold {
                 start,
@@ -86,9 +103,9 @@ fn resolve_hold(buffer: &str, start: usize, kind: TentativeKind) -> (Option<Acti
     }
 }
 
-fn detect_hold(buffer: &str, search_from: usize) -> Option<ActiveHold> {
-    let confirmed_at = earliest_confirmed_marker_start(buffer, search_from);
-    let tentative = earliest_tentative_trigger(buffer, search_from);
+fn detect_hold(buffer: &str, search_from: usize, format: ToolCallFormat) -> Option<ActiveHold> {
+    let confirmed_at = declared_marker_start(buffer, search_from, format);
+    let tentative = earliest_tentative_trigger_for(buffer, search_from, format);
 
     match (confirmed_at, tentative) {
         (Some(confirmed), Some((start, _kind))) if confirmed <= start => Some(ActiveHold {
@@ -111,23 +128,28 @@ fn detect_hold(buffer: &str, search_from: usize) -> Option<ActiveHold> {
     }
 }
 
-fn emit_boundary(buffer: &str, emitted_length: usize, hold: Option<ActiveHold>) -> usize {
+fn emit_boundary(
+    buffer: &str,
+    emitted_length: usize,
+    hold: Option<ActiveHold>,
+    format: ToolCallFormat,
+) -> usize {
     let emitted_length = char_boundary_truncate(buffer, emitted_length);
     if let Some(active) = hold {
         return char_boundary_truncate(buffer, active.start);
     }
-    emit_without_active_hold(buffer, emitted_length)
+    emit_without_active_hold(buffer, emitted_length, format)
 }
 
-fn emit_without_active_hold(buffer: &str, emitted_length: usize) -> usize {
-    if let Some(angle) = last_ambiguous_angle_bracket(buffer) {
+fn emit_without_active_hold(buffer: &str, emitted_length: usize, format: ToolCallFormat) -> usize {
+    if let Some(angle) = last_ambiguous_angle_bracket_for(buffer, format) {
         if angle >= emitted_length {
             return angle;
         }
     }
     let tail_start = buffer.len().saturating_sub(TOOL_MARKER_HOLDBACK_CHARS);
     let search_from = emitted_length.max(tail_start);
-    if let Some((start, _)) = earliest_tentative_trigger(buffer, search_from) {
+    if let Some((start, _)) = earliest_tentative_trigger_for(buffer, search_from, format) {
         return start;
     }
     char_boundary_truncate(buffer, buffer.len())
@@ -142,8 +164,17 @@ pub(crate) fn char_boundary_truncate(buffer: &str, end: usize) -> usize {
 }
 
 /// Whether the gate should report a tool marker at finish (fail-closed for unresolved holds).
-pub fn has_tool_marker_at_finish(buffer: &str, hold: Option<ActiveHold>) -> bool {
-    if earliest_confirmed_marker_start(buffer, 0).is_some() {
+///
+/// [`ToolCallFormat::Structured`] never reports a marker: pure pass-through.
+pub fn has_tool_marker_at_finish(
+    buffer: &str,
+    hold: Option<ActiveHold>,
+    format: ToolCallFormat,
+) -> bool {
+    if format.is_structured() {
+        return false;
+    }
+    if declared_marker_start(buffer, 0, format).is_some() {
         return true;
     }
     match hold {
@@ -155,7 +186,7 @@ pub fn has_tool_marker_at_finish(buffer: &str, hold: Option<ActiveHold>) -> bool
             start,
             kind: HoldKind::Tentative(kind),
         }) => !matches!(
-            resolve_tentative_hold(&buffer[start..], kind),
+            resolve_tentative_hold_for(&buffer[start..], kind, format),
             HoldResolution::Disproved
         ),
         None => false,
@@ -163,10 +194,14 @@ pub fn has_tool_marker_at_finish(buffer: &str, hold: Option<ActiveHold>) -> bool
 }
 
 /// Exclusive end index for trailing flush when native structured tool calls are present.
-pub fn native_tool_flush_end(buffer: &str, hold: Option<ActiveHold>) -> Option<usize> {
+pub fn native_tool_flush_end(
+    buffer: &str,
+    hold: Option<ActiveHold>,
+    format: ToolCallFormat,
+) -> Option<usize> {
     hold.map(|h| h.start)
-        .or_else(|| earliest_confirmed_marker_start(buffer, 0))
-        .or_else(|| earliest_tentative_trigger(buffer, 0).map(|(start, _)| start))
+        .or_else(|| declared_marker_start(buffer, 0, format))
+        .or_else(|| earliest_tentative_trigger_for(buffer, 0, format).map(|(start, _)| start))
 }
 
 #[cfg(test)]
@@ -176,7 +211,15 @@ mod tests {
     #[test]
     fn reconcile_disproved_call_colon_flushes_through_end() {
         let buffer = "To call: the API";
-        let result = reconcile_after_push(buffer, 0, None);
+        let result = reconcile_after_push(buffer, 0, None, ToolCallFormat::CallBrace);
+        assert_eq!(result.emit_exclusive_end, buffer.len());
+        assert!(result.hold.is_none());
+    }
+
+    #[test]
+    fn reconcile_structured_never_holds() {
+        let buffer = "<|DSML|tool_calls></|DSML|tool_calls>";
+        let result = reconcile_after_push(buffer, 0, None, ToolCallFormat::Structured);
         assert_eq!(result.emit_exclusive_end, buffer.len());
         assert!(result.hold.is_none());
     }

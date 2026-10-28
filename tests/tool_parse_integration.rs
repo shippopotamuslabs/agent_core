@@ -7,6 +7,7 @@
 mod support;
 
 use agent_core::catalog::{FieldHint, ToolSchemaHint};
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_parse::json_repair::repair_json;
 use agent_core::tool_parse::result::ToolParseFailureReason;
 use agent_core::tool_parse::schema_coerce::coerce_to_schema;
@@ -18,7 +19,7 @@ use support::enclave_test_semantics::parse_enclave_tool_calls as parse_tool_call
 fn faal_cp_05_parse_tool_calls_coerces_stringified_blocks() {
     let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-cp-5","blocks":"[{\"type\":\"paragraph\",\"text\":\"Envelope\"}]","isComplete":false}}</tool_call>"#;
 
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
 
     assert_eq!(batch.successes.len(), 1, "FAAL-CP-05 successes");
     let args: Value = serde_json::from_str(&batch.successes[0].arguments_json)
@@ -64,7 +65,7 @@ fn r_01_dsml_standard_delimiters_single_invoke() {
     let raw = "<| DSML | tool_calls><| DSML | invoke name=\"web_search\">\n\
                <| DSML | parameter name=\"query\" string=\"true\">digg.com xAI completes training Grok V9</| DSML | parameter>\n\
                </| DSML | invoke></| DSML | tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "web_search");
     assert_eq!(
@@ -81,7 +82,7 @@ fn r_02_dsml_fullwidth_delimiters() {
     let raw = "<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"web_search\">\n\
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">android api 36</｜｜DSML｜｜parameter>\n\
                </｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "web_search");
     assert_eq!(
@@ -96,7 +97,7 @@ fn r_03_dsml_invoke_string_true_repair_false() {
     let raw = "<| DSML | tool_calls><| DSML | invoke name=\"web_search\">\n\
                <| DSML | parameter name=\"query\" string=\"true\">digg.com xAI completes training Grok V9</| DSML | parameter>\n\
                </| DSML | invoke></| DSML | tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     assert!(!batch.successes[0].repaired);
     assert!(batch.successes[0].repairs.is_empty());
@@ -115,7 +116,7 @@ fn r_04_dsml_three_invokes_in_one_tool_calls_block() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">kotlin parser repair</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 3);
     assert_eq!(batch.successes[0].tool_name, "web_extract");
     assert_eq!(batch.successes[1].tool_name, "web_extract");
@@ -139,7 +140,7 @@ fn r_05_two_tool_calls_blocks_in_one_response() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">second query</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 2);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -162,7 +163,7 @@ fn r_06_dsml_missing_closing_parameter_tag() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">unclosed parameter body\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert!(batch.successes.is_empty());
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
@@ -179,7 +180,7 @@ fn r_07_dsml_missing_closing_invoke_tag() {
                <｜｜DSML｜｜invoke name=\"web_search\">\
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">closed param</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -196,7 +197,7 @@ fn r_08_dsml_empty_required_parameter_body() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">   </｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -214,7 +215,7 @@ fn r_09_dsml_unknown_tool_name() {
                <｜｜DSML｜｜parameter name=\"x\" string=\"true\">y</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -232,7 +233,7 @@ fn r_10_dsml_unknown_parameter_name() {
                <｜｜DSML｜｜parameter name=\"extra\" string=\"true\">ignored</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -251,7 +252,7 @@ fn r_11_dsml_duplicate_parameter_name() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">second</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -269,7 +270,7 @@ fn r_12_dsml_unknown_parameter_precedence_over_missing_required() {
                <｜｜DSML｜｜parameter name=\"unused\" string=\"true\">android</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -291,7 +292,7 @@ fn r_13_dsml_string_true_mismatched_with_array_schema() {
                <｜｜DSML｜｜parameter name=\"urls\" string=\"true\">[\"[https://example.com\"]</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(args["urls"], json!(["https://example.com"]));
@@ -307,7 +308,7 @@ fn r_14_dsml_malformed_bracket_prefixed_url() {
                <｜｜DSML｜｜parameter name=\"urls\" string=\"false\">[\"[https://example.com\"]</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(args["urls"], json!(["https://example.com"]));
@@ -327,7 +328,7 @@ fn r_15_dsml_trailing_comma_inside_json_like_parameter() {
                <｜｜DSML｜｜parameter name=\"urls\" string=\"false\">[\"[https://example.com\",]</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(args["urls"], json!(["https://example.com"]));
@@ -347,7 +348,7 @@ fn r_16_dsml_preserves_nested_brackets_escapes_newlines() {
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">find [docs] with \\\"quoted\\\" phrase\\nnext line</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -364,7 +365,7 @@ fn r_17_markdown_fenced_tool_calls() {
                </｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>\n\
                ```\n\n\
                Done.";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -375,10 +376,10 @@ fn r_17_markdown_fenced_tool_calls() {
 }
 
 #[test]
-fn r_18_mistral_tool_calls_single_element() {
+fn r_18_bracket_array_single_element() {
     let raw =
         r#"[TOOL_CALLS] [{"name": "web_search", "arguments": {"query": "kotlin coroutines"}}]"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "web_search");
     assert_eq!(
@@ -388,9 +389,9 @@ fn r_18_mistral_tool_calls_single_element() {
 }
 
 #[test]
-fn r_19_mistral_tool_calls_multi_element() {
+fn r_19_bracket_array_multi_element() {
     let raw = r#"[TOOL_CALLS] [{"name":"web_search","arguments":{"query":"news"}},{"name":"search_chat_history","arguments":{"query":"old chats"}}]"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.successes.len(), 2);
     assert_eq!(batch.successes[1].tool_name, "search_chat_history");
     assert!(batch.successes[1]
@@ -399,9 +400,9 @@ fn r_19_mistral_tool_calls_multi_element() {
 }
 
 #[test]
-fn r_20_mistral_sentinel_without_json_array() {
+fn r_20_bracket_array_sentinel_without_json_array() {
     let raw = "[TOOL_CALLS] not_json_here";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -410,9 +411,9 @@ fn r_20_mistral_sentinel_without_json_array() {
 }
 
 #[test]
-fn r_21_mistral_with_visible_prefix() {
+fn r_21_bracket_array_with_visible_prefix() {
     let raw = "I will search now.\n[TOOL_CALLS] [{\"name\": \"web_search\", \"arguments\": {\"query\": \"android 15\"}}]";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.visible_prefix, "I will search now.");
     assert_eq!(batch.visible_suffix, "");
@@ -421,7 +422,7 @@ fn r_21_mistral_with_visible_prefix() {
 #[test]
 fn r_22_tool_call_wrapping_json_object() {
     let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"pocket crew android"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -432,7 +433,7 @@ fn r_22_tool_call_wrapping_json_object() {
 #[test]
 fn r_23_tool_call_wrapping_json_array_two_elements() {
     let raw = r#"<tool_call>[{"name":"web_search","arguments":{"query":"q1"}},{"name":"web_extract","arguments":{"urls":["https://a.com"]}}]</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 2);
     assert_eq!(batch.successes[0].arguments_json, r#"{"query":"q1"}"#);
     assert!(batch.successes[1]
@@ -447,9 +448,9 @@ fn r_23_tool_call_wrapping_json_array_two_elements() {
 }
 
 #[test]
-fn r_24_glm_arg_key_arg_value_form() {
+fn r_24_xml_tool_call_arg_key_arg_value_form() {
     let raw = r#"<tool_call> web_search <arg_key>query</arg_key> <arg_value>"weather in London"</arg_value> </tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "web_search");
     assert_eq!(
@@ -461,7 +462,7 @@ fn r_24_glm_arg_key_arg_value_form() {
 #[test]
 fn r_25_cdata_payload() {
     let raw = r#"<![CDATA[<tool> {"name": "web_search", "arguments": {"query": "weather in London"}} </tool>]]>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Cdata);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -474,7 +475,7 @@ fn r_26_raw_json_in_prose() {
     let raw = "I will fetch that.\n\
                {\"name\":\"web_extract\",\"arguments\":{\"urls\":[\"https://example.com\"]}}\n\
                Done.";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::RawJson);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].tool_name, "web_extract");
     assert!(batch.successes[0]
@@ -487,7 +488,7 @@ fn r_26_raw_json_in_prose() {
 #[test]
 fn r_27_parameters_key_normalized() {
     let raw = r#"<tool_call>{"name":"web_search","parameters":{"query":"llama 3.2 benchmarks"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -498,7 +499,7 @@ fn r_27_parameters_key_normalized() {
 #[test]
 fn r_28_single_quoted_json_repaired() {
     let raw = r#"<tool_call> {'name': 'web_search', 'arguments': {'query': 'weather in London'}} </tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -513,7 +514,7 @@ fn r_28_single_quoted_json_repaired() {
 #[test]
 fn r_29_smart_quotes_normalized() {
     let raw = "<tool_call> {\"name\": \"web_search\", \"arguments\": {\"query\": \"cost of \u{201C}bread\u{201D} in Paris\"}} </tool_call>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(
         batch.successes[0].arguments_json,
@@ -528,7 +529,7 @@ fn r_30_mutation_defense_string_true_on_urls_plus_catalog_defaults() {
                <｜｜DSML｜｜parameter name=\"urls\" string=\"true\">[\"[https://example.com\"]</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.successes.len(), 1);
     let args: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(args["urls"], json!(["https://example.com"]));
@@ -540,7 +541,7 @@ fn r_30_mutation_defense_string_true_on_urls_plus_catalog_defaults() {
 #[test]
 fn catalog_append_blocks_uses_schema_required_fields_and_default() {
     let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"artifact-1","blocks":[{"type":"heading","level":1,"text":"Research Document"}]}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -557,7 +558,7 @@ fn catalog_append_blocks_uses_schema_required_fields_and_default() {
 #[test]
 fn cl_tr_07_artifact_id_alias_coerces_to_camel_case() {
     let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifact_id":"id-7","blocks":[{"type":"paragraph","text":"x"}],"is_complete":false}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1, "CL-TR-07 successes");
     assert!(
         batch.successes[0]
@@ -579,7 +580,7 @@ fn cl_tr_07_artifact_id_alias_coerces_to_camel_case() {
 #[test]
 fn catalog_append_blocks_accepts_snake_case_artifact_aliases() {
     let raw = r#"<tool_call>{"name":"append_blocks","arguments":{"artifact_id":"artifact-1","blocks":[{"type":"paragraph","text":"Research Document"}],"is_complete":true}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -597,7 +598,7 @@ fn catalog_append_blocks_accepts_snake_case_artifact_aliases() {
 #[test]
 fn catalog_start_artifact_accepts_catalog_required_title() {
     let raw = r#"<tool_call>{"name":"start_artifact","arguments":{"title":"Research Brief"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -615,7 +616,7 @@ fn catalog_start_artifact_accepts_catalog_required_title() {
 fn catalog_manage_memories_accepts_catalog_required_action() {
     let raw =
         r#"<tool_call>{"name":"manage_memories","arguments":{"action":"search"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -629,7 +630,7 @@ fn catalog_manage_memories_accepts_catalog_required_action() {
 #[test]
 fn catalog_search_current_artifact_is_explicitly_covered() {
     let raw = r#"<tool_call>{"name":"search_current_artifact","arguments":{"artifactId":"artifact-1","query":"summary"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -646,7 +647,7 @@ fn catalog_search_current_artifact_is_explicitly_covered() {
 #[test]
 fn catalog_search_current_artifact_accepts_snake_case_artifact_alias() {
     let raw = r#"<tool_call>{"name":"search_current_artifact","arguments":{"artifact_id":"artifact-1","query":"summary"}}</tool_call>"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -816,7 +817,7 @@ fn r_46_dsml_three_invokes_web_extract_plus_two_web_search_with_quoted_queries()
                <｜｜DSML｜｜parameter name=\"query\" string=\"true\">xAI Grok 4.20 model release date May 2026 intermediate</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -864,7 +865,7 @@ fn r_47_dsml_string_false_parses_json_directly_without_coercion() {
                <｜｜DSML｜｜parameter name=\"urls\" string=\"false\">[\"https://example.com\",\"https://example.org\"]</｜｜DSML｜｜parameter>\
                </｜｜DSML｜｜invoke>\
                </｜｜DSML｜｜tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert!(
         batch.failures.is_empty(),
         "unexpected failures: {:?}",
@@ -891,7 +892,7 @@ fn r_47_dsml_string_false_parses_json_directly_without_coercion() {
 fn r_48_string_is_complete_coerced_to_boolean_on_parse() {
     let args = r#"{"artifactId":"art-1","blocks":[],"isComplete":"false"}"#;
     let raw = format!(r#"<tool_call>{{"name":"append_blocks","arguments":{args}}}</tool_call>"#);
-    let batch = parse_tool_calls(&raw);
+    let batch = parse_tool_calls(&raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1, "failures: {:?}", batch.failures);
     let value: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(value["isComplete"], Value::Bool(false));
@@ -901,7 +902,7 @@ fn r_48_string_is_complete_coerced_to_boolean_on_parse() {
 fn r_49_string_x_search_boolean_filters_coerced_on_parse() {
     let args = r#"{"keywords":["android"],"has_geo":"true","has_media":"false"}"#;
     let raw = format!(r#"<tool_call>{{"name":"search_x_recent","arguments":{args}}}</tool_call>"#);
-    let batch = parse_tool_calls(&raw);
+    let batch = parse_tool_calls(&raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1, "failures: {:?}", batch.failures);
     let value: Value = serde_json::from_str(&batch.successes[0].arguments_json).unwrap();
     assert_eq!(value["has_geo"], Value::Bool(true));
@@ -925,7 +926,7 @@ fn frg45_duplicate_param_failure_envelope_keeps_exact_block_byte_offsets() {
                <| DSML | parameter name=\"query\" string=\"true\">second</| DSML | parameter>\
                </| DSML | invoke>\
                </| DSML | tool_calls>POSTAMBLE";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.visible_prefix, "PREAMBLE");
     assert_eq!(batch.visible_suffix, "POSTAMBLE");
     assert_eq!(batch.failures.len(), 1);
@@ -952,7 +953,7 @@ fn frg45_duplicate_param_is_soft_failure_and_parse_continues() {
                <| DSML | parameter name=\"query\" string=\"true\">third</| DSML | parameter>\
                </| DSML | invoke>\
                </| DSML | tool_calls>";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::Dsml);
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
         batch.failures[0].reason,
@@ -969,10 +970,10 @@ fn frg45_duplicate_param_is_soft_failure_and_parse_continues() {
 #[test]
 fn frg45_truncated_tool_call_recovers_at_eos_with_repair_hint() {
     // Unclosed <tool_call> at end of output with no later open tag and no
-    // GLM markers recovers: the truncated payload parses and the batch
+    // arg-key markers recover: the truncated payload parses and the batch
     // records the recovery hint.
     let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"weather"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(batch.failures.is_empty(), "failures: {:?}", batch.failures);
     assert_eq!(batch.successes.len(), 1);
     assert_eq!(batch.successes[0].arguments_json, r#"{"query":"weather"}"#);
@@ -983,11 +984,11 @@ fn frg45_truncated_tool_call_recovers_at_eos_with_repair_hint() {
 }
 
 #[test]
-fn frg45_truncated_glm_never_takes_recovery_path() {
-    // GLM form (<arg_key>) without a closing tag is a hard failure even at
+fn frg45_truncated_arg_key_value_never_takes_recovery_path() {
+    // Arg-key/arg-value form (<arg_key>) without a closing tag is a hard failure even at
     // end of output: it must NOT recover.
     let raw = r#"<tool_call> web_search <arg_key>query</arg_key> <arg_value>"weather"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(batch.successes.is_empty());
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
@@ -1001,7 +1002,7 @@ fn frg45_unclosed_tool_call_with_later_open_is_hard_failure() {
     // An unclosed <tool_call> followed by another <tool_call> opener is a
     // hard failure: no recovery is attempted.
     let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"a"}} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(batch.successes.is_empty());
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(
@@ -1015,7 +1016,7 @@ fn frg45_truncated_tool_call_empty_payload_is_hard_failure() {
     // An unclosed <tool_call> with no payload content at end of output is a
     // hard failure (there is nothing to recover).
     let raw = "<tool_call>   ";
-    let batch = parse_tool_calls(raw);
+    let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert!(batch.successes.is_empty());
     assert_eq!(batch.failures.len(), 1);
     assert_eq!(

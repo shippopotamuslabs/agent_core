@@ -914,6 +914,53 @@ impl From<LongLoopPolicy> for FfiLongLoopPolicy {
     }
 }
 
+/// Host-declared tool-call format (ENC-300 D2): the FFI mirror of
+/// [`crate::tool_call_format::ToolCallFormat`]. NOT inside `tool_semantics`;
+/// the provider string is untouched.
+///
+/// Host migration note (ENC-300, intended per ratified design — not a
+/// defect): hosts that never set this field get `Structured` and stop mining
+/// body text; text-envelope hosts must declare their shape. The FFI surface
+/// is breaking on purpose (new field/params).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiToolCallFormat {
+    Structured,
+    Dsml,
+    Cdata,
+    BracketArray,
+    XmlToolCall,
+    RawJson,
+    CallBrace,
+}
+
+impl From<crate::tool_call_format::ToolCallFormat> for FfiToolCallFormat {
+    fn from(format: crate::tool_call_format::ToolCallFormat) -> Self {
+        match format {
+            crate::tool_call_format::ToolCallFormat::Structured => Self::Structured,
+            crate::tool_call_format::ToolCallFormat::Dsml => Self::Dsml,
+            crate::tool_call_format::ToolCallFormat::Cdata => Self::Cdata,
+            crate::tool_call_format::ToolCallFormat::BracketArray => Self::BracketArray,
+            crate::tool_call_format::ToolCallFormat::XmlToolCall => Self::XmlToolCall,
+            crate::tool_call_format::ToolCallFormat::RawJson => Self::RawJson,
+            crate::tool_call_format::ToolCallFormat::CallBrace => Self::CallBrace,
+        }
+    }
+}
+
+impl From<FfiToolCallFormat> for crate::tool_call_format::ToolCallFormat {
+    fn from(format: FfiToolCallFormat) -> Self {
+        match format {
+            FfiToolCallFormat::Structured => Self::Structured,
+            FfiToolCallFormat::Dsml => Self::Dsml,
+            FfiToolCallFormat::Cdata => Self::Cdata,
+            FfiToolCallFormat::BracketArray => Self::BracketArray,
+            FfiToolCallFormat::XmlToolCall => Self::XmlToolCall,
+            FfiToolCallFormat::RawJson => Self::RawJson,
+            FfiToolCallFormat::CallBrace => Self::CallBrace,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiAgentConfig {
     pub max_turns: u32,
@@ -930,6 +977,11 @@ pub struct FfiAgentConfig {
     /// assigned into `semantics.catalog.tools` at conversion, then validated
     /// by the single fallible core constructor.
     pub tool_specs: Vec<super::semantics::FfiToolSpec>,
+    /// Host-declared tool-call format (ENC-300 D2): `Structured` (default)
+    /// mines no text; each envelope shape parses only its own markers.
+    /// Migration: unset means `Structured` (text mining stops); declare the
+    /// shape to keep parsing text envelopes.
+    pub tool_call_format: FfiToolCallFormat,
     pub tool_result_budget_cloud_bytes: u64,
     pub tool_result_budget_relaxed_bytes: u64,
     pub tool_result_truncation_pressure_ratio: f32,
@@ -978,6 +1030,7 @@ impl Default for FfiAgentConfig {
             // carries no semantics record and no specs.
             tool_semantics: None,
             tool_specs: Vec::new(),
+            tool_call_format: FfiToolCallFormat::from(c.tool_call_format),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
             tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,
@@ -1080,6 +1133,7 @@ pub(crate) fn agent_config(f: FfiAgentConfig) -> Result<AgentConfig, AgentExcept
         max_model_requests_per_turn: f.max_model_requests_per_turn,
         long_loop: LongLoopPolicy::from(f.long_loop),
         tool_semantics: semantics,
+        tool_call_format: f.tool_call_format.into(),
         tool_catalog: catalog,
     })
 }

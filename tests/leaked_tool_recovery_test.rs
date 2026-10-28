@@ -4,6 +4,7 @@
 mod support;
 
 use agent_core::engine::resolve_model_turn_text;
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::turn_io::RawToolCall;
 use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
@@ -11,10 +12,18 @@ fn resolve_enclave(
     buffered: &str,
     native: &[RawToolCall],
     allow_tool_call: bool,
+    format: ToolCallFormat,
 ) -> agent_core::engine::ModelTurnTextResolution {
     let catalog = enclave_test_catalog();
     let semantics = enclave_test_semantics();
-    resolve_model_turn_text(buffered, native, allow_tool_call, &catalog, &semantics)
+    resolve_model_turn_text(
+        format,
+        buffered,
+        native,
+        allow_tool_call,
+        &catalog,
+        &semantics,
+    )
 }
 
 const APPEND_BLOCKS_TOOL_CALL: &str = r#"<tool_call>{"name":"append_blocks","arguments":{"artifactId":"art-99","blocks":[],"isComplete":false}}</tool_call>"#;
@@ -25,7 +34,12 @@ const SPACED_DSML_WEB_SEARCH: &str = r#"< | DSML | tool_calls>< | DSML | invoke 
 
 #[test]
 fn cl_tr_01_recover_append_blocks_without_native_tools() {
-    let resolution = resolve_enclave(APPEND_BLOCKS_TOOL_CALL, &[], true);
+    let resolution = resolve_enclave(
+        APPEND_BLOCKS_TOOL_CALL,
+        &[],
+        true,
+        ToolCallFormat::XmlToolCall,
+    );
     assert_eq!(
         resolution.recovered_tool_calls.len(),
         1,
@@ -48,6 +62,11 @@ fn cl_tr_01_recover_append_blocks_without_native_tools() {
     );
 }
 
+/// ENC-300 D4 re-pin: native-wins-over-leak holds ONLY under Structured.
+/// Structured sessions never mine body text, so leaked DSML syntax is inert:
+/// native calls pass through and the text stays intact byte-for-byte. (The
+/// envelope-mode counterpart below pins the opposite: declared text wins and
+/// the native channel is ignored.)
 #[test]
 fn cl_tr_02_native_preferred_over_leaked_dsml() {
     let buffered =
@@ -58,7 +77,7 @@ fn cl_tr_02_native_preferred_over_leaked_dsml() {
         name: "web_search".into(),
         arguments_json: r#"{"query":"kotlin"}"#.into(),
     }];
-    let resolution = resolve_enclave(&buffered, &native, true);
+    let resolution = resolve_enclave(&buffered, &native, true, ToolCallFormat::Structured);
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-02 recovered must be empty"
@@ -72,11 +91,55 @@ fn cl_tr_02_native_preferred_over_leaked_dsml() {
         resolution.native_tool_calls[0].name, "web_search",
         "CL-TR-02 native name"
     );
+    assert_eq!(
+        resolution.visible_assistant_text, buffered,
+        "CL-TR-02 Structured text stays intact (never truncated)"
+    );
+    assert!(
+        !resolution.had_strong_tool_marker,
+        "CL-TR-02 Structured never reports text markers"
+    );
+}
+
+/// ENC-300 D4 counterpart to CL-TR-02: in envelope mode the declared text
+/// parser wins and the native channel is IGNORED — the reverse precedence of
+/// the old structured-wins rule.
+#[test]
+fn cl_tr_02_envelope_dsml_text_wins_over_native() {
+    let buffered = concat!(
+        "preamble.",
+        "<|DSML|tool_calls><|DSML|invoke name=\"web_search\">",
+        "<|DSML|parameter name=\"query\" string=\"true\">kotlin</|DSML|parameter>",
+        "</|DSML|invoke></|DSML|tool_calls>"
+    );
+    let native = vec![RawToolCall {
+        id: Some("call_native".into()),
+        name: "web_search".into(),
+        arguments_json: r#"{"query":"native wins"}"#.into(),
+    }];
+    let resolution = resolve_enclave(buffered, &native, true, ToolCallFormat::Dsml);
+    assert_eq!(
+        resolution.recovered_tool_calls.len(),
+        1,
+        "envelope text-parsed calls are the calls"
+    );
+    assert_eq!(
+        resolution.recovered_tool_calls[0].arguments_json, r#"{"query":"kotlin"}"#,
+        "text args win, not native args"
+    );
+    assert!(
+        resolution.native_tool_calls.is_empty(),
+        "envelope mode ignores the native channel"
+    );
+    assert_eq!(
+        resolution.visible_assistant_text, "preamble.",
+        "marker region stripped, preamble kept"
+    );
 }
 
 #[test]
 fn cl_tr_03_spaced_dsml_recovers_web_search() {
-    let resolution = resolve_enclave(SPACED_DSML_WEB_SEARCH, &[], true);
+    let resolution = resolve_enclave(SPACED_DSML_WEB_SEARCH, &[], true, ToolCallFormat::Dsml);
     assert_eq!(
         resolution.recovered_tool_calls.len(),
         1,
@@ -98,7 +161,7 @@ fn cl_tr_03_spaced_dsml_recovers_web_search() {
 #[test]
 fn cl_tr_04_prose_json_flushes_verbatim() {
     let buffered = r#"Configure {"name":"value","enabled":true} carefully."#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::Structured);
     assert!(
         resolution.recovered_tool_calls.is_empty(),
         "CL-TR-04 recovered must be empty"
@@ -112,7 +175,7 @@ fn cl_tr_04_prose_json_flushes_verbatim() {
 #[test]
 fn cl_tr_05_allow_false_still_detects_and_strips_tool_markers() {
     let buffered = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
-    let resolution = resolve_enclave(buffered, &[], false);
+    let resolution = resolve_enclave(buffered, &[], false, ToolCallFormat::XmlToolCall);
     assert_eq!(
         resolution.visible_assistant_text, "",
         "CL-TR-05 visible text"
@@ -142,7 +205,7 @@ fn cl_tr_06_normalize_spaced_dsml() {
 #[test]
 fn cl_tr_07_call_colon_in_prose_does_not_truncate_visible_text() {
     let buffered = "Here is the answer. To call: the API, do this next.";
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
     assert_eq!(
         resolution.visible_assistant_text, buffered,
         "CL-TR-07 visible text"
@@ -163,7 +226,7 @@ fn cl_tr_08_spaced_dsml_prefix_offset_does_not_panic_on_multibyte_boundary() {
     // marker offset in normalized text lands inside the 4-byte rocket emoji
     // when applied to the raw text.
     let buffered = "A</ |DSML| x>\u{1F680}<|DSML|tool_calls junk";
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::Dsml);
     assert!(
         resolution.had_strong_tool_marker,
         "CL-TR-08 must detect the strong marker"
@@ -179,9 +242,9 @@ fn cl_tr_08_spaced_dsml_prefix_offset_does_not_panic_on_multibyte_boundary() {
 }
 
 #[test]
-fn cl_tr_09_litert_call_syntax_recovers_and_is_hidden() {
+fn cl_tr_09_call_brace_syntax_recovers_and_is_hidden() {
     let buffered = r#"Before call:web_search{query="good news"}"#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
 
     assert_eq!(resolution.recovered_tool_calls.len(), 1);
     assert_eq!(resolution.recovered_tool_calls[0].name, "web_search");
@@ -193,9 +256,9 @@ fn cl_tr_09_litert_call_syntax_recovers_and_is_hidden() {
 }
 
 #[test]
-fn cl_tr_10_litert_quote_sentinels_recover() {
+fn cl_tr_10_call_brace_quote_sentinels_recover() {
     let buffered = r#"call:web_search{query: <|"|>kotlin news<|"|>}"#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
 
     assert_eq!(resolution.recovered_tool_calls.len(), 1);
     assert_eq!(
@@ -212,7 +275,7 @@ fn cl_tr_11_tool_call_truncated_at_eos_recovers() {
     // Truncated at end of generation — no </tool_call> closer.
     let buffered =
         r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"good news"}"#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::XmlToolCall);
 
     assert_eq!(
         resolution.recovered_tool_calls.len(),
@@ -236,13 +299,13 @@ fn cl_tr_11_tool_call_truncated_at_eos_recovers() {
     );
 }
 
-/// CL-TR-12: call: LiteRT envelope truncated at EOS (no closing brace) is
+/// CL-TR-12: call-brace envelope truncated at EOS (no closing brace) is
 /// recovered into a valid tool call.
 #[test]
-fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
+fn cl_tr_12_call_brace_truncated_at_eos_recovers() {
     // Truncated mid-argument — no closing brace.
     let buffered = r#"call:tool_discovery_tool{capability="whats good"#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
 
     assert_eq!(
         resolution.recovered_tool_calls.len(),
@@ -273,7 +336,7 @@ fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
 fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
     // Two open tags, no close tag at all — ambiguous, not a simple EOS truncation.
     let buffered = r#"<tool_call>{"name":"tool_discovery_tool","arguments":{"capability":"a"} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
-    let resolution = resolve_enclave(buffered, &[], true);
+    let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::XmlToolCall);
 
     // Neither envelope should silently recover when there are multiple opens
     // without any close tag.
@@ -294,7 +357,7 @@ fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
 
 #[test]
 fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
-    use agent_core::tool_stream_gate::first_strong_tool_marker_start;
+    use agent_core::tool_stream_gate::declared_marker_start;
     use std::fs;
 
     let markers_path = concat!(
@@ -307,8 +370,15 @@ fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
         "CL-MD-03 weak JSON regex must not be in stream gate markers"
     );
     assert_eq!(
-        first_strong_tool_marker_start(r#"Tips: {"name":"x"}"#),
+        declared_marker_start(r#"Tips: {"name":"x"}"#, 0, ToolCallFormat::XmlToolCall),
         None,
         "CL-MD-03 weak JSON prose must not match strong marker"
+    );
+    // ENC-300: the declared-format view agrees — a mid-line JSON object is
+    // not a RawJson marker (the shape only anchors at object start).
+    assert_eq!(
+        declared_marker_start(r#"Tips: {"name":"x"}"#, 0, ToolCallFormat::RawJson),
+        None,
+        "CL-MD-03 RawJson-declared prose has no marker"
     );
 }

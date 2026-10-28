@@ -4,7 +4,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
+use agent_core::tool_call_format::ToolCallFormat;
+use support::enclave_test_agent_config::enclave_test_agent_config_for;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
@@ -34,10 +35,10 @@ fn user_msg() -> AgentMessage {
     }
 }
 
-fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine, format: ToolCallFormat) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
-        enclave_test_agent_config(),
+        enclave_test_agent_config_for(format),
         SessionCapabilities {
             summarization_allowed: false,
             kv_fixed: false,
@@ -94,7 +95,7 @@ fn last_assistant_content(snapshot: &agent_core::engine::SessionTestSnapshot) ->
 #[test]
 fn e_01_malformed_dsml_retries_model() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(&h, malformed_response());
     let next = eng.next_action(&h);
@@ -123,7 +124,7 @@ fn e_01_malformed_dsml_retries_model() {
 #[test]
 fn e_02_envelope_failure_json_shape() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
     let snapshot = h.integration_test_snapshot();
@@ -141,7 +142,7 @@ fn e_02_envelope_failure_json_shape() {
 #[test]
 fn e_03_valid_leaked_dsml_executes_tool() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
@@ -169,7 +170,7 @@ fn e_03_valid_leaked_dsml_executes_tool() {
 #[test]
 fn e_04_persisted_assistant_strips_dsml() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
@@ -190,7 +191,7 @@ fn e_04_persisted_assistant_strips_dsml() {
 #[test]
 fn e_05_stop_plus_malformed_not_terminal() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
     let next = eng.next_action(&h);
@@ -204,7 +205,7 @@ fn e_05_stop_plus_malformed_not_terminal() {
 #[test]
 fn e_06_envelope_streak_disables_tools() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     for _ in 0..3 {
         let _ = eng.next_action(&h);
         eng.submit_model_response(&h, malformed_response());
@@ -226,7 +227,7 @@ fn e_06_envelope_streak_disables_tools() {
 #[test]
 fn e_07_success_resets_envelope_streak() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     for _ in 0..2 {
         let _ = eng.next_action(&h);
         eng.submit_model_response(&h, malformed_response());
@@ -269,7 +270,7 @@ fn e_07_success_resets_envelope_streak() {
 #[test]
 fn md_02_recovery_only_in_engine() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
@@ -295,6 +296,9 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
             vec![user_msg()],
             AgentConfig {
                 max_model_requests_per_turn: 10,
+                // ENC-300: envelope session — the parse-failure streak that
+                // disables tools only builds when text is actually mined.
+                tool_call_format: ToolCallFormat::Dsml,
                 ..AgentConfig::default()
             },
             SessionCapabilities {
@@ -388,6 +392,9 @@ fn cl_tr_06_native_tools_blocked_fallback_finishes_with_tool_use_finish_reason()
             vec![user_msg()],
             AgentConfig {
                 max_model_requests_per_turn: 10,
+                // ENC-300: envelope session — the parse-failure streak that
+                // disables tools only builds when text is actually mined.
+                tool_call_format: ToolCallFormat::Dsml,
                 ..AgentConfig::default()
             },
             SessionCapabilities {
@@ -448,7 +455,7 @@ const APPEND_BLOCKS_LEAK: &str = r#"<tool_call>{"name":"append_blocks","argument
 #[test]
 fn cl_e_01_engine_executes_recovered_append_blocks() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::XmlToolCall);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
@@ -474,10 +481,13 @@ fn cl_e_01_engine_executes_recovered_append_blocks() {
     );
 }
 
+/// ENC-300 D4 re-pin (with CL-MD-01 below): native-wins holds ONLY under
+/// Structured. The leaked DSML text is never mined, so the native call
+/// executes and the engine behaves as if the text were plain prose.
 #[test]
 fn cl_e_02_native_only_when_native_and_leak_present() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Structured);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
@@ -504,7 +514,7 @@ fn cl_e_02_native_only_when_native_and_leak_present() {
 #[test]
 fn cl_e_03_malformed_dsml_retries_model() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Dsml);
     let _ = eng.next_action(&h);
     eng.submit_model_response(&h, malformed_response());
     let next = eng.next_action(&h);
@@ -525,10 +535,48 @@ fn cl_e_03_malformed_dsml_retries_model() {
     );
 }
 
+/// ENC-300 D4 acceptance: a Structured session ignores DSML text — the
+/// native call executes and the body text persists intact (never mined,
+/// never truncated).
+#[test]
+fn structured_dsml_text_executes_native_with_text_intact() {
+    let eng = AgentEngine::new();
+    let h = new_session(&eng, ToolCallFormat::Structured);
+    let text = format!("Working on it.{VALID_DSML_WEB_SEARCH}");
+    let _ = eng.next_action(&h);
+    eng.submit_model_response(
+        &h,
+        ModelResponse {
+            assistant_text: Some(text.clone()),
+            tool_calls: vec![agent_core::turn_io::RawToolCall {
+                id: Some("call_native_1".into()),
+                name: "web_search".into(),
+                arguments_json: r#"{"query":"kotlin"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+    match eng.next_action(&h) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1, "native call count");
+            assert_eq!(calls[0].name, "web_search", "native call name");
+            assert_eq!(calls[0].call_id, "call_native_1", "native call id");
+        }
+        other => panic!("expected ExecuteTools, got {other:?}"),
+    }
+    let snapshot = h.integration_test_snapshot();
+    assert_eq!(
+        last_assistant_content(&snapshot),
+        text,
+        "Structured body text persists intact"
+    );
+}
+
 #[test]
 fn cl_e_04_preamble_preserved_marker_stripped() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::XmlToolCall);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
@@ -551,10 +599,13 @@ fn cl_e_04_preamble_preserved_marker_stripped() {
     );
 }
 
+/// ENC-300 D4 re-pin (with CL-E-02 above): native-wins holds ONLY under
+/// Structured. See also `cl_tr_02_envelope_dsml_text_wins_over_native` for
+/// the envelope-mode reverse precedence.
 #[test]
 fn cl_md_01_native_only_execution() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    let h = new_session(&eng, ToolCallFormat::Structured);
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,

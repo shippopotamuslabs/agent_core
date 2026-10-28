@@ -27,8 +27,9 @@ pub use types::{
     FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind, FfiFinishReason,
     FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
     FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams,
-    FfiSummaryRequest, FfiSummaryResult, FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure,
-    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord, FfiToolSchemaEntry,
+    FfiSummaryRequest, FfiSummaryResult, FfiToolCallFormat, FfiToolCallRecord, FfiToolParseBatch,
+    FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
+    FfiToolSchemaEntry,
 };
 
 use std::sync::Arc;

@@ -16,12 +16,12 @@ pub use ffi::{
     FfiManualCompactResult, FfiModelRequest, FfiModelResponse, FfiParameterAlias,
     FfiProviderContextSnapshot, FfiRawToolCall, FfiSession, FfiSessionCapabilities,
     FfiSessionIoParams, FfiSpecialValueRepair, FfiStreamGateFinish, FfiStreamGatePushResult,
-    FfiSummaryRequest, FfiSummaryResult, FfiToolArgumentRepairRule, FfiToolCallRecord,
-    FfiToolCanonicalShape, FfiToolCompactionSemantics, FfiToolDiscoverySemantics,
-    FfiToolGreedyExtensionSemantics, FfiToolParseBatch, FfiToolParseFailure,
-    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultPolicy, FfiToolResultRecord,
-    FfiToolSchemaEntry, FfiToolSchemaHint, FfiToolSemantics, FfiToolSpec, FfiToolStreamGate,
-    RepairResult,
+    FfiSummaryRequest, FfiSummaryResult, FfiToolArgumentRepairRule, FfiToolCallFormat,
+    FfiToolCallRecord, FfiToolCanonicalShape, FfiToolCompactionSemantics,
+    FfiToolDiscoverySemantics, FfiToolGreedyExtensionSemantics, FfiToolParseBatch,
+    FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField, FfiToolResultPolicy,
+    FfiToolResultRecord, FfiToolSchemaEntry, FfiToolSchemaHint, FfiToolSemantics, FfiToolSpec,
+    FfiToolStreamGate, RepairResult,
 };
 
 pub mod action;
@@ -56,6 +56,7 @@ pub mod session;
 pub mod sidecar_builder;
 pub mod state_ledger;
 pub mod token_counter;
+pub mod tool_call_format;
 pub mod tool_context;
 pub mod tool_name;
 pub mod tool_name_match;
