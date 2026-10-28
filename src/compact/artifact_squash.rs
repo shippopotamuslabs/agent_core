@@ -16,7 +16,7 @@ use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::session::{AgentConfig, AgentSession};
-use crate::state_ledger::ArtifactStateAnchor;
+use crate::state_ledger::{observed_count_display, ArtifactStateAnchor};
 use crate::tool_semantics::ArtifactSquashSemantics;
 use serde_json::Value;
 
@@ -43,10 +43,9 @@ fn build_semantic_summary_line(
         .map(|t| tail_chars(t, semantics.snippet_max_chars))
         .unwrap_or_default();
     // ENC-302: the cached count is display-only; an unobserved count renders
-    // as the literal `unknown`. The template's continuation text is untouched.
-    let observed = observed_total_blocks
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // as the literal `unknown` (shared observed_count_display). The
+    // template's continuation text is untouched.
+    let observed = observed_count_display(observed_total_blocks);
     semantics
         .summary_template
         .replace("{total}", &observed)

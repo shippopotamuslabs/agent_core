@@ -177,6 +177,16 @@ fn until_sentence_end(s: &str) -> (String, usize) {
     (trimmed[..end].trim().to_string(), leading + end)
 }
 
+/// Display form of an observed artifact count (ENC-302): the number, or
+/// the literal `unknown` when unobserved. The single home for this
+/// wording — the ledger anchor render and the squash summary line both
+/// use it, so the two surfaces can never drift apart.
+pub(crate) fn observed_count_display(observed: Option<u32>) -> String {
+    observed
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Normalization for COMPARISON keys only (precedence rule 3): trim, collapse
 /// whitespace runs, case-fold, strip trailing `?`/`.`. Stored entry text is
 /// unchanged.
@@ -499,13 +509,10 @@ impl StateLedger {
         }
         if !self.artifact_states.is_empty() {
             for a in &self.artifact_states {
-                // ENC-302: the cached count is display-only; an unobserved
-                // count renders as the literal `unknown`. The continuation
+                // ENC-302: the cached count is display-only (rendered via
+                // the shared observed_count_display). The continuation
                 // instruction is always emitted verbatim.
-                let total = a
-                    .observed_total_blocks
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let total = observed_count_display(a.observed_total_blocks);
                 body.push_str(&format!(
                     "Artifact {}: {} blocks, last `{}`. {}\n",
                     a.artifact_id, total, a.last_block_preview, a.continuation_instruction
