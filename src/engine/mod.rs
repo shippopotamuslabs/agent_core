@@ -1026,6 +1026,23 @@ pub(super) fn session_has_append_context(
     })
 }
 
+/// The one derivation of an effective config (ENC-304): a clone of the
+/// stored config with its tool fields replaced by the universe's live
+/// semantics + catalog. The stored config's tool fields were consumed at
+/// session construction, so every consumer that reads tool data through
+/// a config goes through here — `InnerSession::effective_tool_config`
+/// for session methods, and the finish path (which holds disjoint
+/// fields, not an `InnerSession`) calls this directly.
+pub(super) fn effective_tool_config_from(
+    stored: &AgentConfig,
+    universe: &ToolUniverse,
+) -> AgentConfig {
+    let mut config = stored.clone();
+    config.tool_semantics = universe.semantics().clone();
+    config.tool_catalog = universe.catalog().clone();
+    config
+}
+
 impl InnerSession {
     /// The effective config for `&AgentConfig` tool-data consumers
     /// (ENC-304 fix pass, M3): a clone of the stored config with its tool
@@ -1037,10 +1054,7 @@ impl InnerSession {
     /// tiers (micro result policies, artifact squash) — must be fed this
     /// instead of `&self.config`.
     pub(super) fn effective_tool_config(&self) -> AgentConfig {
-        let mut config = self.config.clone();
-        config.tool_semantics = self.universe.semantics().clone();
-        config.tool_catalog = self.universe.catalog().clone();
-        config
+        effective_tool_config_from(&self.config, &self.universe)
     }
 
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the

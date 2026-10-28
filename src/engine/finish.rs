@@ -126,7 +126,9 @@ impl InnerSession {
         // from the session's universe — the stored `self.config` tool fields
         // were consumed at session construction. (`build_model_request`
         // below keeps `&self.config`: it reads no tool fields from it,
-        // taking tool data from `self.universe` directly.)
+        // taking tool data from `self.universe` directly.) The derivation
+        // itself is the shared `effective_tool_config_from`, the same one
+        // `InnerSession::effective_tool_config` uses.
         let allow = self.guardrails.allow_tool_call(
             &self.effective_tool_config(),
             &self.last_model_response_greedy_tool_names,

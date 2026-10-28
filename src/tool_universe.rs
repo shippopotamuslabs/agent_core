@@ -86,12 +86,7 @@ impl ToolUniverse {
                 });
             }
         }
-        let mut schema_index = HashMap::new();
-        for (index, entry) in schemas.active.iter().enumerate() {
-            if !entry.name.is_empty() {
-                schema_index.entry(entry.name.clone()).or_insert(index);
-            }
-        }
+        let schema_index = Self::schema_index_for(&schemas);
         Ok(Self {
             schemas,
             semantics,
@@ -99,6 +94,29 @@ impl ToolUniverse {
             active,
             schema_index,
         })
+    }
+
+    /// Derive the by-name index from the schema set's active entries —
+    /// the single construction of the map from the vec (first occurrence
+    /// wins; `build` has already rejected empty and duplicate names).
+    fn schema_index_for(schemas: &ToolSchemaSet) -> HashMap<ToolName, usize> {
+        let mut index = HashMap::new();
+        for (position, entry) in schemas.active.iter().enumerate() {
+            if !entry.name.is_empty() {
+                index.entry(entry.name.clone()).or_insert(position);
+            }
+        }
+        index
+    }
+
+    /// The single mutation point for entries + index: append the entry
+    /// and index it atomically, so the vec and the map cannot desync.
+    /// Admission commits through here and nowhere else.
+    fn commit_schema_entry(&mut self, entry: SchemaEntry) {
+        let index = self.schemas.active.len();
+        let name = entry.name.clone();
+        self.schemas.push_entry(entry);
+        self.schema_index.insert(name, index);
     }
 
     /// The semantics bundle the world was built from.
@@ -299,9 +317,7 @@ impl ToolUniverse {
         // All checks passed: commit entry + semantics + catalog together.
         // The entry push resyncs the schema set's raw text via the
         // `entries_json` path.
-        let index = self.schemas.active.len();
-        self.schemas.push_entry(entry);
-        self.schema_index.insert(entry_name, index);
+        self.commit_schema_entry(entry);
         self.semantics = candidate_semantics;
         self.catalog = candidate_catalog;
         Ok(())
