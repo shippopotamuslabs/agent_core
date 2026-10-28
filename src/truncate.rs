@@ -1,15 +1,9 @@
 //! Tool-result and message-content truncation before prompts hit providers (AGENT-019).
 
-use once_cell::sync::Lazy;
-use tiktoken_rs::CoreBPE;
-
-use crate::budget::count_tokens;
+use crate::token_counter::{default_counter, TokenCounter};
 
 const TRUNCATION_NOTE: &str = "\n[Result truncated to fit context budget]";
 pub const MESSAGE_TRUNCATION_NOTE: &str = "\n[... earlier content truncated to fit context ...]";
-
-static ENCODER: Lazy<CoreBPE> =
-    Lazy::new(|| tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load"));
 
 /// Truncate UTF-8 `json` to fit within `budget_bytes`, preserving character boundaries.
 /// Appends [`TRUNCATION_NOTE`] when truncated.
@@ -32,30 +26,26 @@ pub fn truncate_tool_result_json(json: &str, budget_bytes: usize) -> (String, bo
     (out, true)
 }
 
-/// Truncate UTF-8 `text` to at most `max_tokens` using the shared tiktoken encoder.
+/// Truncate UTF-8 `text` to at most `max_tokens` using the default counter.
+/// Identical to the pre-ENC-292 shared-`tiktoken`-encoder behavior.
 pub fn truncate_message_content_to_tokens(text: &str, max_tokens: u32) -> (String, bool) {
-    if max_tokens == 0 {
-        return (MESSAGE_TRUNCATION_NOTE.trim_start().to_string(), true);
-    }
-    let tokens = ENCODER.encode_with_special_tokens(text);
-    if tokens.len() <= max_tokens as usize {
-        return (text.to_string(), false);
-    }
-    let note_tokens = count_tokens(MESSAGE_TRUNCATION_NOTE);
-    let keep = max_tokens.saturating_sub(note_tokens).max(1) as usize;
-    let truncated_tokens = tokens[..keep.min(tokens.len())].to_vec();
-    let decoded = ENCODER
-        .decode(truncated_tokens)
-        .unwrap_or_else(|_| text.chars().take(keep.saturating_mul(4)).collect());
-    let mut out = decoded;
-    out.push_str(MESSAGE_TRUNCATION_NOTE);
-    (out, true)
+    truncate_message_content_to_tokens_with(default_counter(), text, max_tokens)
+}
+
+/// Truncate UTF-8 `text` to at most `max_tokens` using an explicit
+/// host-supplied [`TokenCounter`] (ENC-292 port).
+pub fn truncate_message_content_to_tokens_with(
+    counter: &dyn TokenCounter,
+    text: &str,
+    max_tokens: u32,
+) -> (String, bool) {
+    counter.truncate_text_to_tokens(text, max_tokens, MESSAGE_TRUNCATION_NOTE)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::{truncate_budget_per_result, PromptBudgetParts, TokenLedger};
+    use crate::budget::{count_tokens, truncate_budget_per_result, PromptBudgetParts, TokenLedger};
     use crate::message::{AgentMessage, AgentRole};
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 
