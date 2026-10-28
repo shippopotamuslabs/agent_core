@@ -5,14 +5,14 @@
       2026-10-28 morning + execution commission 11:29 EDT)
 - [x] Plan
 - [x] Implementation
-- [ ] Review — rounds: 0/3, result: pending
+- [ ] Review — rounds: 1/3, result: 2 MINOR findings, no BLOCKER/MAJOR
 - [ ] Ship — PR: none
 
 ## Current Gate
 none
 
 ## Next Phase
-Review
+Review round 2 — implementer fixes for findings R1/R2, then re-review
 
 ## Notes
 - 2026-10-28 (A1): Compaction encapsulation trio done. (1) `attach_summary_staging` lost its redundant `trigger` param — both callers had already settled `req.trigger` (forced-fixup in the pipeline arm; Manual ctx in the manual path), so the snapshot stamps `req.trigger`. (2) `CompactionState::set_suppress_summary_tier` deleted; suppression is the begin/end pair `begin_summary_tier_suppression() -> bool` / `end_summary_tier_suppression(previous)` owned by CompactionState, and `retry_without_summary` just brackets the re-run (restores the previous value, not a hard-coded false — behavior identical at the only call site). Grep acceptance: no `set_suppress_summary_tier` hits remain anywhere. (3) `CompactionPassState`: `last_history_ref()` deleted — the `NotApplicable` arm now uses the single consuming read `take_history_ref()` like the early-exit branch; `message_count_before` is a plain `pub(super)` field fixed at construction (getter deleted). Verification: `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; targeted tests both configs — `cargo test --locked [--no-default-features] --test compaction_triggers_test --test manual_compact_test --test context_management_end_to_end_test` (22+1+4 passed, 0 failed each config), `--lib compaction` (6 passed, 0 failed each config); extra guard `cargo test --locked --features lalr-harness --test compaction_boundary_test` runs 6 tests: 3 passed / 3 FAILED — and the identical 3 failures (lalr_03_boundary_id_literal_format, lalr_09_post_compact_revision_matches_session, lalr_15_kv_fixed_emits_boundary_without_summary_tier) reproduce on the pre-A1 plan commit 4646395, verified in a scratch worktree. Pre-existing red on main, unrelated to A1; the target requires lalr-harness+ffi so it sits outside both gate configs and its redness was never gated. (Correction to this entry's first version, which misstated the suite as "3 passed" from truncated poll output; the gate-config results above were read in full and stand.) No existing tests changed. Note: plain `cargo test --test compaction_boundary_test` under gate configs errors on required-features — run it via the lalr-harness invocation.
@@ -147,3 +147,33 @@ Review
   delta list, latent spilled-flag bug fix, item-11 unreachability
   note, gate counts). No existing tests changed in this chunk.
   Next: Review.
+
+- 2026-10-28 (Review round 1, fresh-context reviewer): independent
+  re-run of all gates on the branch — fmt clean, clippy -D warnings
+  clean, cargo test --locked 721 passed / 0 failed (42 sections),
+  --no-default-features 671 passed / 0 failed (40 sections); worker
+  counts reproduced exactly. Traced and verified clean: absorb
+  completeness (base bag-key universe == the promoted typed set; the
+  B2 "spilled" routing fix confirmed against base code, which had no
+  spilled arm in from_value), FfiStateLedger/FfiArtifactStateAnchor
+  fidelity (11/11 and 4/4 fields, total Froms both directions),
+  submit_tool_results converts the full batch before the engine call,
+  test-integrity walk (item-12 renames match the ticket exactly; no
+  weakened assertions found), lib.rs exports purely additive (+4),
+  PR-description ENC-294 delta list complete. FINDINGS:
+  R1 (MINOR) src/message.rs absorb "name" arm sets tool_name
+  unconditionally; base guarded it (`if self.tool_name.is_none()`), so
+  explicit tool_name only wins today because serde_json resolves
+  without preserve_order in this tree (verified via cargo tree).
+  Correction: restore the guard so precedence is order-independent.
+  R2 (MINOR, test confidence) no single test drives a legacy-populated
+  SessionSnapshot blob (junk-carrying context + spilled/junk message
+  metadata) through import_snapshot; the seams are each proven
+  (AgentSession/AgentMessage legacy-row tests, FFI boundary tests) but
+  the composite D2 artifact path is unexercised. Correction: add one
+  such import test. Architecture Questions: none. Judged immaterial
+  and recorded, not findings: included_files absent≡empty collapse
+  (explicit-[] sessions lose the always-Some empty FileContextIndex —
+  disclosed in B1 note, confined to a degenerate state) and
+  content:"" re-serializing without the key (semantically lossless
+  normalization).
