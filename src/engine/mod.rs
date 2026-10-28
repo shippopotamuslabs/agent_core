@@ -128,7 +128,7 @@ impl AgentEngine {
         initial_messages: Vec<AgentMessage>,
         mut config: AgentConfig,
         capabilities: SessionCapabilities,
-        session_context: serde_json::Value,
+        session_context: impl Into<crate::session::SessionContext>,
         io: SessionIoParams,
     ) -> SessionHandle {
         config
@@ -145,19 +145,13 @@ impl AgentEngine {
         let initial_msg_count = initial_messages.len() as u32;
         // Single session-construction parse: names come from the parsed set.
         let initial_active_tool_names = io.schemas.initial_active_names();
-        let pending_work_items = session_context
-            .get("pending_work")
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str())
-                    .map(|text| PendingWorkItem {
-                        text: text.to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let session_context = session_context.into();
+        let pending_work_items: Vec<PendingWorkItem> = session_context
+            .pending_work
+            .clone()
+            .into_iter()
+            .map(|text| PendingWorkItem { text })
+            .collect();
         SessionHandle {
             inner: Arc::new(Mutex::new(InnerSession {
                 session: AgentSession::new(initial_messages, session_context),
@@ -1118,15 +1112,7 @@ impl InnerSession {
     }
 
     fn remember_history_snapshot_ids(&mut self, message_ids: Vec<String>) {
-        if !self.session.session_context.is_object() {
-            self.session.session_context = serde_json::json!({});
-        }
-        self.session.session_context["history_snapshot_ids"] = serde_json::Value::Array(
-            message_ids
-                .into_iter()
-                .map(serde_json::Value::String)
-                .collect(),
-        );
+        self.session.session_context.history_snapshot_ids = message_ids;
     }
 
     fn run_compaction_pass(

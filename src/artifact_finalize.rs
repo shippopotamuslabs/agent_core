@@ -94,6 +94,27 @@ fn parse_success_bool_field(
     result.get_bool_coerced(field)
 }
 
+/// Renders the synthetic finalize call's arguments JSON for one pending
+/// artifact (ENC-290): the three finalize values keyed by the configured
+/// wire names (`id_field` / `append_blocks_field` / `completion_field`),
+/// serialized exactly once. The [`ToolSemanticsConfig`] `Value` payload
+/// (`empty_append_payload_value`) is cloned exactly once, here at the
+/// typed boundary — no other site clones config `Value`s into call
+/// arguments.
+pub fn finalize_arguments_json(
+    artifact: &crate::tool_semantics::ArtifactToolSemantics,
+    id: &str,
+) -> String {
+    let mut args = serde_json::Map::with_capacity(3);
+    args.insert(artifact.id_field.clone(), Value::String(id.to_string()));
+    args.insert(
+        artifact.append_blocks_field.clone(),
+        artifact.empty_append_payload_value.clone(),
+    );
+    args.insert(artifact.completion_field.clone(), Value::Bool(true));
+    Value::Object(args).to_string()
+}
+
 pub fn synthetic_finalize_calls_with_semantics(
     pending: &HashSet<String>,
     semantics: &ToolSemanticsConfig,
@@ -104,17 +125,11 @@ pub fn synthetic_finalize_calls_with_semantics(
     pending
         .iter()
         .map(|id| {
-            let mut args = serde_json::Map::new();
-            args.insert(artifact.id_field.clone(), Value::String(id.clone()));
-            args.insert(
-                artifact.append_blocks_field.clone(),
-                artifact.empty_append_payload_value.clone(),
-            );
-            args.insert(artifact.completion_field.clone(), Value::Bool(true));
+            let arguments_json = finalize_arguments_json(artifact, id);
             ToolCallRecord {
                 call_id: format!("{}{}", artifact.synthetic_call_id_prefix, id),
                 name: artifact.append_tool_name.clone(),
-                arguments_json: Value::Object(args).to_string(),
+                arguments_json,
                 attempt_metadata: None,
                 repair_metadata: None,
             }
@@ -172,5 +187,24 @@ mod tests {
         assert!(calls
             .iter()
             .all(|c| c.call_id.starts_with("auto-finalize-")));
+    }
+
+    #[test]
+    fn synthetic_finalize_args_byte_identical() {
+        // ENC-290: the typed finalize path must emit exactly the JSON the
+        // direct-`Value` construction produced.
+        let semantics = crate::tool_semantics::test_fixture_enclave_semantics();
+        let artifact = semantics.artifact.as_ref().expect("artifact semantics");
+        let json = finalize_arguments_json(artifact, "a");
+        assert_eq!(json, r#"{"artifactId":"a","blocks":[],"isComplete":true}"#);
+
+        let p: HashSet<_> = ["a".into()].into_iter().collect();
+        let calls = synthetic_finalize_calls_with_semantics(&p, &semantics);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].arguments_json,
+            r#"{"artifactId":"a","blocks":[],"isComplete":true}"#
+        );
+        assert_eq!(calls[0].call_id, "auto-finalize-a");
     }
 }

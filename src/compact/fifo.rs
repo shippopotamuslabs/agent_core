@@ -144,18 +144,7 @@ fn first_removable_unit_range(
 }
 
 fn snapshot_context_covers(session: &AgentSession, message_ids: &[String]) -> bool {
-    session
-        .session_context
-        .get("history_snapshot_ids")
-        .and_then(|value| value.as_array())
-        .map(|values| {
-            message_ids.iter().all(|id| {
-                values
-                    .iter()
-                    .any(|value| value.as_str().is_some_and(|snapshot_id| snapshot_id == id))
-            })
-        })
-        .unwrap_or(false)
+    session.session_context.history_snapshot_covers(message_ids)
 }
 
 /// The first removable unit under the current retention window, if any.

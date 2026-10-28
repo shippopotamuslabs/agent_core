@@ -99,19 +99,19 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
         active_schemas
     };
 
-    let file_context_index = session
-        .session_context
-        .get("included_files")
-        .and_then(|value| serde_json::to_string(value).ok())
-        .and_then(|included_files_json| {
-            condense_file_context(
-                &included_files_json,
-                context_store,
-                config,
-                capabilities,
-                turn_index,
-            )
-        });
+    let file_context_index =
+        session
+            .session_context
+            .included_files_json()
+            .and_then(|included_files_json| {
+                condense_file_context(
+                    &included_files_json,
+                    context_store,
+                    config,
+                    capabilities,
+                    turn_index,
+                )
+            });
 
     let generation = sidecar_builder.next_generation();
     let sidecar_budget = config.long_loop.sidecar_byte_budget_per_call;
