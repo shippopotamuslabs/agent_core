@@ -195,6 +195,34 @@ impl ToolSemanticsConfig {
             for exemption in &discovery.gate_exemptions {
                 check("discovery.gate_exemptions", &exemption.tool_name)?;
             }
+            // ENC-303 J1: silent discovery self-lockout. With a non-empty
+            // initial active set the discovery gate is enabled: every call
+            // for a tool that is neither in the active set nor gate-exempt
+            // is rejected — including the discovery tool itself. A discovery
+            // tool that is neither exempt nor in the initial active schemas
+            // can therefore never be called, so fail construction naming the
+            // tool and the remediation. An empty active set means the gate
+            // is disabled (host has not opted in), so no check applies.
+            let active: Vec<&ToolName> = schema_names
+                .iter()
+                .filter(|name| !name.is_empty())
+                .collect();
+            if !active.is_empty()
+                && !active.iter().any(|name| **name == discovery.tool_name)
+                && discovery.gate_exemption_for(&discovery.tool_name).is_none()
+            {
+                return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                    message: format!(
+                        "discovery tool '{}' is not callable with a non-empty initial active set: \
+                         it is neither in the initial active schemas nor gate-exempt; add a \
+                         gate_exemptions entry for '{}' with activates=false, or include '{}' \
+                         in the initial active schemas",
+                        discovery.tool_name.as_str(),
+                        discovery.tool_name.as_str(),
+                        discovery.tool_name.as_str(),
+                    ),
+                });
+            }
         }
         if let Some(artifact) = &self.artifact {
             check("artifact.start_tool_name", &artifact.start_tool_name)?;
@@ -241,6 +269,7 @@ pub struct ToolDiscoverySemantics {
     /// `companion_callable_tools` pair (ENC-303): an exemption makes the
     /// tool callable without prior discovery activation, and
     /// `activates == true` additionally merges it into the active set.
+    #[serde(default)]
     pub gate_exemptions: Vec<DiscoveryGateExemption>,
 }
 

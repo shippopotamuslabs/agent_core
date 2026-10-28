@@ -276,6 +276,36 @@ fn ts_033_blank_gate_exemption_reason_is_rejected() {
 }
 
 #[test]
+fn ts_035_missing_gate_exemptions_defaults_to_empty() {
+    // ENC-303 m2: `gate_exemptions` carries #[serde(default)] (the old
+    // companion field had one), so discovery JSON without the key parses
+    // to an empty exemption list instead of failing.
+    let semantics = ToolSemanticsConfig::from_json(
+        r#"{
+          "catalog": { "tools": [] },
+          "discovery": {
+            "tool_name": "open_tools",
+            "request_field_name": "names"
+          },
+          "argument_repairs": [],
+          "canonical_shapes": [],
+          "result_policies": [],
+          "compaction": {},
+          "greedy_extension_tools": []
+        }"#,
+    )
+    .expect("discovery without gate_exemptions must parse");
+    assert!(
+        semantics
+            .discovery
+            .expect("discovery must be present")
+            .gate_exemptions
+            .is_empty(),
+        "missing gate_exemptions must default to empty"
+    );
+}
+
+#[test]
 fn ts_034_duplicate_gate_exemption_is_rejected() {
     let semantics = discovery_with(vec![
         exemption("open_tools", false, "discovery entry point"),

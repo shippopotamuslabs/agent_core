@@ -63,7 +63,7 @@ pub struct CompactionPlan {
 
 /// Pressure class per compaction tier (ENC-303 Q1): how much pressure
 /// evidence a tier needs before a ratio-triggered plan may include it.
-/// See the module-level rule table.
+/// See the module-level rule table. Only `ConfirmationGated` gates plan inclusion; the other classes are documentary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PressureClass {
     /// Non-destructive snapshot steps: safe to run once the plan fires.
@@ -90,11 +90,16 @@ pub fn tier_pressure_class(tier: &CompactionTier) -> PressureClass {
 /// [`PressureClass::ConfirmationGated`] tiers from `plan.ordered_tiers`
 /// unless the plan may include them — hard ceiling exceeded (the output
 /// reserve is threatened), a manual trigger, or (Fifo only) the
-/// snapshot-first requirement already satisfied. Snapshot satisfaction is
-/// the plan-level proxy: `require_snapshot_before_fifo` is off, or the plan
-/// already runs `HistorySnapshot` ahead of the destructive tiers (as
-/// [`build_compaction_plan`] always does on the ratio path). The FIFO tier
-/// keeps its own session-state snapshot gate at apply time regardless.
+/// snapshot-first requirement already satisfied. Snapshot satisfaction is a
+/// plan-level pre-filter on `plan.require_snapshot_before_destructive_drop`:
+/// the requirement is off, or the plan already runs `HistorySnapshot` ahead
+/// of the destructive tiers (as [`build_compaction_plan`] always does on the
+/// ratio path). Enforcement stays at apply time — the FIFO tier keeps its
+/// own session-state snapshot gate (see `snapshot_gate_outcome` in
+/// [`super::fifo`]) regardless of what the pre-filter kept. A forced
+/// non-ratio entry (`forced_by_non_ratio`: absolute threshold, turn count,
+/// or turn-end) zeroes the plan ratio but still passes through this gate,
+/// so forced entry does not imply the destructive tiers survive it.
 ///
 /// Manual plans are untouched: the host explicitly asked for full compaction.
 pub fn apply_confirmation_gate(plan: &mut CompactionPlan, pressure: &Pressure) {

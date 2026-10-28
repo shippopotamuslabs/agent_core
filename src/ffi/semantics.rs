@@ -879,6 +879,89 @@ mod tests {
     }
 
     #[test]
+    fn gate_exemption_round_trips_tool_name_activates_reason() {
+        // ENC-303 m4: gate exemptions cross the FFI boundary field-for-field —
+        // core -> FFI -> core preserves tool_name, activates, and reason.
+        for activates in [false, true] {
+            let exemption = DiscoveryGateExemption {
+                tool_name: ToolName::new("open_tools").expect("valid test name"),
+                activates,
+                reason: format!("reason for activates={activates}"),
+            };
+            let round_tripped = FfiDiscoveryGateExemption::from(exemption.clone())
+                .into_core()
+                .expect("exemption converts");
+            assert_eq!(round_tripped.tool_name, exemption.tool_name);
+            assert_eq!(round_tripped.activates, exemption.activates);
+            assert_eq!(round_tripped.reason, exemption.reason);
+        }
+    }
+
+    #[test]
+    fn ffi_create_session_with_lockout_discovery_is_agent_exception() {
+        // ENC-303 J1: the typed FFI boundary propagates the discovery
+        // self-lockout failure through the existing create_session ->
+        // AgentException path (fixture discovery tool stripped of its
+        // self-exemption, active schemas non-empty without it).
+        use crate::ffi::{create_agent_engine, FfiAgentMessage, FfiAgentRole, FfiSessionIoParams};
+        use crate::ffi::{FfiSessionCapabilities, FfiToolSchemaEntry};
+
+        let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
+        let discovery_name = tree
+            .discovery
+            .as_ref()
+            .expect("fixture has discovery")
+            .tool_name
+            .clone();
+        tree.discovery
+            .as_mut()
+            .expect("fixture has discovery")
+            .gate_exemptions
+            .retain(|exemption| exemption.tool_name != discovery_name);
+        let config = FfiAgentConfig {
+            tool_semantics: Some(tree),
+            tool_specs: legacy_specs().iter().map(FfiToolSpec::from).collect(),
+            ..Default::default()
+        };
+        let engine = create_agent_engine();
+        let error = match engine.create_session(
+            vec![FfiAgentMessage {
+                id: "u1".into(),
+                role: FfiAgentRole::User,
+                content: "hi".into(),
+                metadata_json: "{}".into(),
+            }],
+            config,
+            FfiSessionCapabilities::default(),
+            "null".to_string(),
+            FfiSessionIoParams {
+                provider: "anthropic".into(),
+                context_window_tokens: 200_000,
+                tool_schemas: vec![FfiToolSchemaEntry {
+                    name: "web_search".into(),
+                    description: None,
+                    reproducible: None,
+                    deferrable: None,
+                    max_result_bytes: None,
+                }],
+                system_prompt: "sys".into(),
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("lockout discovery must fail FFI session creation"),
+        };
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("InvalidDiscoveryConfig") && detail.contains(&discovery_name),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ffi_create_session_with_unknown_reference_is_agent_exception() {
         // ENC-299 D4: the typed FFI boundary propagates referential failures
         // through the existing create_session -> AgentException path.

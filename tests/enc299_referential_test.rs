@@ -144,7 +144,7 @@ fn enc299_dangling_reference_rejected_in_every_section() {
                     .gate_exemptions = vec![agent_core::tool_semantics::DiscoveryGateExemption {
                     tool_name: tn("ghost_tool"),
                     activates: true,
-                    reason: "ghost companion".to_string(),
+                    reason: "ghost exemption".to_string(),
                 }];
             }),
         ),
@@ -229,7 +229,7 @@ fn enc299_unknown_gate_exemption_rejects_session() {
         .gate_exemptions = vec![agent_core::tool_semantics::DiscoveryGateExemption {
         tool_name: tn("ghost_tool"),
         activates: true,
-        reason: "ghost companion".to_string(),
+        reason: "ghost exemption".to_string(),
     }];
 
     assert_eq!(
