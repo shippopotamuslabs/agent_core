@@ -28,7 +28,6 @@ fn io() -> SessionIoParams {
         200_000,
         "[]".into(),
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid test io params")
@@ -369,7 +368,6 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,
                 tool_catalog_json: "[]".into(),
-                tool_schema_registry: vec![],
                 tool_schemas: vec![],
                 system_prompt: "sys".into(),
             },

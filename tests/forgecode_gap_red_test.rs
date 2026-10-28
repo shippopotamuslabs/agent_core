@@ -93,7 +93,6 @@ fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoP
         "anthropic".into(),
         context_window_tokens,
         "[]".into(),
-        "[]".into(),
         tools_schema_json.into(),
         "sys".into(),
     )

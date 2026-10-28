@@ -78,6 +78,8 @@ impl From<AgentMessage> for FfiAgentMessage {
     }
 }
 
+// ENC-296: the host-owned ToolSchema/ToolCatalogIndex kinds are deleted
+// with the tool registry; the remaining engine-created kinds map 1:1.
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiContextReferenceKind {
     ToolOutput,
@@ -86,8 +88,6 @@ pub enum FfiContextReferenceKind {
     ArtifactSnapshot,
     FileOutline,
     FileChunk,
-    ToolSchema,
-    ToolCatalogIndex,
 }
 
 impl From<ContextReferenceKind> for FfiContextReferenceKind {
@@ -99,8 +99,6 @@ impl From<ContextReferenceKind> for FfiContextReferenceKind {
             ContextReferenceKind::ArtifactSnapshot => FfiContextReferenceKind::ArtifactSnapshot,
             ContextReferenceKind::FileOutline => FfiContextReferenceKind::FileOutline,
             ContextReferenceKind::FileChunk => FfiContextReferenceKind::FileChunk,
-            ContextReferenceKind::ToolSchema => FfiContextReferenceKind::ToolSchema,
-            ContextReferenceKind::ToolCatalogIndex => FfiContextReferenceKind::ToolCatalogIndex,
         }
     }
 }
@@ -114,8 +112,6 @@ impl From<FfiContextReferenceKind> for ContextReferenceKind {
             FfiContextReferenceKind::ArtifactSnapshot => ContextReferenceKind::ArtifactSnapshot,
             FfiContextReferenceKind::FileOutline => ContextReferenceKind::FileOutline,
             FfiContextReferenceKind::FileChunk => ContextReferenceKind::FileChunk,
-            FfiContextReferenceKind::ToolSchema => ContextReferenceKind::ToolSchema,
-            FfiContextReferenceKind::ToolCatalogIndex => ContextReferenceKind::ToolCatalogIndex,
         }
     }
 }
@@ -225,13 +221,9 @@ impl From<FfiModelRequest> for ModelRequest {
             // the string echoes a request the engine itself rendered, so a
             // contract violation here falls back to an empty active set
             // rather than failing a conversion that cannot return an error.
-            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(
-                &m.tools_schema_json,
-                "[]",
-                "[]",
-            )
-            .map(|schemas| schemas.active)
-            .unwrap_or_default(),
+            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json, "[]")
+                .map(|schemas| schemas.active)
+                .unwrap_or_default(),
             rendered_tool_catalog: Vec::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
@@ -759,20 +751,20 @@ impl From<SummaryResult> for FfiSummaryResult {
     }
 }
 
-/// One tool-schema entry at the FFI session boundary (ENC-295).
+/// One tool-schema entry at the FFI session boundary (ENC-295, registry
+/// removed ENC-296).
 ///
-/// The six typed fields ARE the contract: the host builds these records in
-/// its own language, so a malformed entry (missing name, non-object
-/// parameters) is unrepresentable or rejected at conversion — unlike the
-/// legacy raw JSON strings, whose shape was only assumed. Keys outside
-/// these fields are not carried across the boundary. `parameters_json` is
-/// the tool's parameter schema as a JSON string; it must parse to a JSON
-/// object (enforced in [`session_io_params`]).
+/// The five typed fields ARE the contract: the host builds these records in
+/// its own language, so a malformed entry (missing/duplicate name) is
+/// rejected at conversion — unlike the legacy raw JSON strings, whose shape
+/// was only assumed. Keys outside these fields are not carried across the
+/// boundary. Only the engine-consumed fields travel here (name, description,
+/// reproducible, deferrable, max_result_bytes); the host keeps full
+/// parameter schemas in its own registry.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiToolSchemaEntry {
     pub name: String,
     pub description: Option<String>,
-    pub parameters_json: Option<String>,
     pub reproducible: Option<bool>,
     pub deferrable: Option<bool>,
     pub max_result_bytes: Option<u64>,
@@ -783,37 +775,17 @@ pub struct FfiSessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
     pub tool_catalog_json: String,
-    pub tool_schema_registry: Vec<FfiToolSchemaEntry>,
     pub tool_schemas: Vec<FfiToolSchemaEntry>,
     pub system_prompt: String,
 }
 
-/// Rebuild one entry's schema object: the parsed `parameters_json` value
-/// becomes the object's `parameters` field; the remaining typed fields are
-/// set when present. Key order normalizes sorted on serialization,
-/// matching the legacy host-string renders.
+/// Rebuild one entry's schema object from the typed fields: every present
+/// field is set on the object. Key order normalizes sorted on
+/// serialization, matching the legacy host-string renders.
 fn tool_schema_entry_value(
     entry: &FfiToolSchemaEntry,
 ) -> Result<serde_json::Value, AgentException> {
     let mut object = serde_json::Map::new();
-    if let Some(parameters_json) = &entry.parameters_json {
-        let parameters: serde_json::Value =
-            serde_json::from_str(parameters_json).map_err(|error| AgentException::Internal {
-                detail: format!(
-                    "tool schema entry '{}': parameters_json is not valid JSON: {error}",
-                    entry.name
-                ),
-            })?;
-        if !parameters.is_object() {
-            return Err(AgentException::Internal {
-                detail: format!(
-                    "tool schema entry '{}': parameters_json must be a JSON object",
-                    entry.name
-                ),
-            });
-        }
-        object.insert("parameters".to_string(), parameters);
-    }
     object.insert(
         "name".to_string(),
         serde_json::Value::String(entry.name.clone()),
@@ -846,14 +818,28 @@ fn tool_schema_entry_value(
 }
 
 /// Convert typed boundary entries into parsed [`SchemaEntry`]s in one
-/// pass: each entry's schema object is built (and its `parameters_json`
-/// validated) by [`tool_schema_entry_value`], then wrapped directly —
-/// no serialize-to-string / re-parse round-trip.
+/// pass: each entry's schema object is built by [`tool_schema_entry_value`],
+/// then wrapped directly — no serialize-to-string / re-parse round-trip.
+/// Names are validated here (present, non-blank, unique): a violation is a
+/// typed `AgentException` naming the entry, never a silent empty channel.
 fn tool_schema_entries(
     entries: &[FfiToolSchemaEntry],
 ) -> Result<Vec<crate::tool_schema::SchemaEntry>, AgentException> {
     let mut converted = Vec::with_capacity(entries.len());
-    for entry in entries {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.name.trim().is_empty() {
+            return Err(AgentException::Internal {
+                detail: format!(
+                    "tool schema entry {index} has no valid \"name\" (missing or empty)"
+                ),
+            });
+        }
+        if !seen.insert(entry.name.as_str()) {
+            return Err(AgentException::Internal {
+                detail: format!("tool schema entry '{}' is a duplicate", entry.name),
+            });
+        }
         converted.push(crate::tool_schema::SchemaEntry::from(
             tool_schema_entry_value(entry)?,
         ));
@@ -869,13 +855,11 @@ fn tool_schema_entries(
 pub(crate) fn session_io_params(
     p: FfiSessionIoParams,
 ) -> Result<crate::engine::SessionIoParams, AgentException> {
-    let registry = tool_schema_entries(&p.tool_schema_registry)?;
     let active = tool_schema_entries(&p.tool_schemas)?;
-    let schemas =
-        crate::tool_schema::ToolSchemaSet::from_entries(active, registry, &p.tool_catalog_json)
-            .map_err(|error| AgentException::Internal {
-                detail: error.to_string(),
-            })?;
+    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(active, &p.tool_catalog_json)
+        .map_err(|error| AgentException::Internal {
+            detail: error.to_string(),
+        })?;
     Ok(crate::engine::SessionIoParams {
         provider: p.provider,
         context_window_tokens: p.context_window_tokens,
@@ -1589,11 +1573,11 @@ mod tests {
     }
 
     fn io_with_active(entries: Vec<FfiToolSchemaEntry>) -> FfiSessionIoParams {
+        // ENC-296: no tool_schema_registry field; the host owns the registry.
         FfiSessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
             tool_catalog_json: "[]".into(),
-            tool_schema_registry: vec![],
             tool_schemas: entries,
             system_prompt: "sys".into(),
         }
@@ -1603,7 +1587,6 @@ mod tests {
         FfiToolSchemaEntry {
             name: name.into(),
             description: None,
-            parameters_json: None,
             reproducible: None,
             deferrable: None,
             max_result_bytes: None,
@@ -1612,10 +1595,10 @@ mod tests {
 
     #[test]
     fn session_io_params_full_entry_round_trips_to_schema_object() {
+        // ENC-296: parameters_json is gone (host-owned registry); only the
+        // engine-consumed fields cross the boundary.
         let mut entry = bare_entry("read_file");
         entry.description = Some("Read a file".into());
-        entry.parameters_json =
-            Some(r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into());
         entry.reproducible = Some(false);
         entry.deferrable = Some(true);
         entry.max_result_bytes = Some(4096);
@@ -1628,7 +1611,6 @@ mod tests {
             serde_json::json!([{
                 "name": "read_file",
                 "description": "Read a file",
-                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
                 "reproducible": false,
                 "deferrable": true,
                 "max_result_bytes": 4096,
@@ -1646,18 +1628,35 @@ mod tests {
     }
 
     #[test]
-    fn session_io_params_rejects_malformed_parameters_json() {
-        let mut entry = bare_entry("read_file");
-        entry.parameters_json = Some("not json".into());
-        let error = session_io_params(io_with_active(vec![entry])).err();
-        assert!(matches!(error, Some(AgentException::Internal { .. })));
+    fn session_io_params_rejects_blank_entry_name() {
+        // ENC-296: with parameters_json deleted, the remaining malformed
+        // input is a missing/blank name — still a typed error naming the
+        // entry index, never a silent fallback.
+        let error = session_io_params(io_with_active(vec![bare_entry("  ")])).err();
+        match error {
+            Some(AgentException::Internal { detail }) => {
+                assert!(
+                    detail.contains("has no valid"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected typed Internal error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn session_io_params_rejects_non_object_parameters_json() {
-        let mut entry = bare_entry("read_file");
-        entry.parameters_json = Some(r#"["not","an","object"]"#.into());
-        let error = session_io_params(io_with_active(vec![entry])).err();
-        assert!(matches!(error, Some(AgentException::Internal { .. })));
+    fn session_io_params_rejects_duplicate_entry_names() {
+        let error = session_io_params(io_with_active(vec![
+            bare_entry("web_search"),
+            bare_entry("web_search"),
+        ]))
+        .err();
+        match error {
+            Some(AgentException::Internal { detail }) => {
+                assert!(detail.contains("web_search"), "unexpected detail: {detail}");
+                assert!(detail.contains("duplicate"), "unexpected detail: {detail}");
+            }
+            other => panic!("expected typed Internal error, got {other:?}"),
+        }
     }
 }

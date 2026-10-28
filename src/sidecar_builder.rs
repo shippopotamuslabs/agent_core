@@ -95,17 +95,15 @@ impl SidecarBuilder {
         index: &ToolContextIndex,
         budget: usize,
     ) -> Option<String> {
-        let mut payload_index = index.clone();
-        if payload_index.full_schema_ref.len() > 64 {
-            let len = payload_index.full_schema_ref.len();
-            payload_index.full_schema_ref = format!("<omitted:{len} chars>");
-        }
-        let payload = serde_json::to_string(&payload_index).ok()?;
+        // ENC-296: the index is advertisement-only (no full_schema_ref to
+        // omit) and the ToolCatalogIndex spill kind is deleted; oversized
+        // payloads spill under the generic ArtifactSnapshot kind.
+        let payload = serde_json::to_string(index).ok()?;
         Some(enforce_byte_budget(
             store,
             &payload,
             budget,
-            ContextReferenceKind::ToolCatalogIndex,
+            ContextReferenceKind::ArtifactSnapshot,
             "tool_context_index",
         ))
     }
@@ -161,7 +159,6 @@ fn insert_spilled_sidecar(
     let seq = store.next_sequence();
     let prefix = match kind {
         ContextReferenceKind::ArtifactSnapshot => "ledger",
-        ContextReferenceKind::ToolCatalogIndex => "tool-index",
         ContextReferenceKind::FileOutline => "file-index",
         _ => "sidecar",
     };

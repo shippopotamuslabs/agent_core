@@ -48,7 +48,6 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
             200_000,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),
@@ -113,7 +112,6 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
         SessionIoParams::new(
             "anthropic".into(),
             256,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),
@@ -181,7 +179,6 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
             200_000,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),
@@ -240,7 +237,6 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),

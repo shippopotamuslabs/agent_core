@@ -24,15 +24,6 @@ const ACTIVE_SCHEMA_JSON: &str = r#"[
   {"name":"web_extract","parameters":{}}
 ]"#;
 
-const REGISTRY_JSON: &str = r#"[
-  {"name":"tool_discovery_tool","parameters":{}},
-  {"name":"web_search","parameters":{}},
-  {"name":"web_extract","parameters":{}},
-  {"name":"search_chat_history","parameters":{}},
-  {"name":"append_blocks","parameters":{"properties":{"artifactId":{"type":"string"}}}},
-  {"name":"search_current_artifact","parameters":{}}
-]"#;
-
 fn engine() -> AgentEngine {
     AgentEngine::new()
 }
@@ -71,7 +62,6 @@ fn create_session(
             "anthropic".into(),
             200_000,
             CATALOG_JSON.into(),
-            REGISTRY_JSON.into(),
             tools_schema_json.into(),
             "sys".into(),
         )
@@ -132,10 +122,6 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
         .iter()
         .map(|tool| tool.name.as_str())
         .collect();
-    let stored_registry = eng
-        .read_context_reference(&handle, index.full_schema_ref.clone())
-        .expect("full schema registry reference must be readable");
-
     assert_eq!(
         tool_names(&request.tools_schema_json()),
         vec!["tool_discovery_tool", "web_search", "web_extract"]
@@ -147,9 +133,14 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
         advertised,
         vec!["tool_discovery_tool", "web_search", "web_extract"]
     );
-    // The full registry is still stashed behind full_schema_ref so a disclosed tool's
-    // schema can be retrieved after activation.
-    assert!(stored_registry.contains("\"append_blocks\""));
+    // ENC-296: no schema text is stashed anymore (host owns the registry;
+    // full schemas are wired provider-side), so there is nothing to read
+    // back — the store holds no schema text at all.
+    assert!(
+        eng.search_context_references(&handle, "append_blocks".into(), 5)
+            .is_empty(),
+        "no schema text may be stashed in the ContextStore"
+    );
 }
 
 #[test]
@@ -199,6 +190,44 @@ fn ltd_09_rust_merges_activated_tool_names_in_first_seen_order() {
             "append_blocks",
             "search_current_artifact",
         ]
+    );
+    // ENC-296: the activated tools are not in the active channel (the
+    // registry is deleted), so they render as name stubs for the host to
+    // fill provider-side — while initially active tools keep full entries.
+    let rendered: serde_json::Value = serde_json::from_str(&next_request.tools_schema_json())
+        .expect("tools_schema_json must parse");
+    let entries = rendered.as_array().expect("must be an array");
+    assert_eq!(entries[0]["parameters"], serde_json::json!({}));
+    assert_eq!(entries[1]["parameters"], serde_json::json!({}));
+    assert_eq!(entries[2], serde_json::json!({"name": "append_blocks"}));
+    assert_eq!(
+        entries[3],
+        serde_json::json!({"name": "search_current_artifact"})
+    );
+}
+
+// ENC-296 focused regression: a tool activated mid-session that is NOT in
+// the active channel renders as a name stub (never from a registry — the
+// channel is deleted); a tool that IS in the active channel renders its
+// full active entry.
+#[test]
+fn enc_296_activated_tool_renders_active_entry_or_name_stub() {
+    use agent_core::tool_schema::ToolSchemaSet;
+
+    let set = ToolSchemaSet::parse(
+        r#"[{"name":"web_search","description":"Search","parameters":{}}]"#,
+        "[]",
+    )
+    .expect("valid channels");
+    let rendered =
+        set.render_active_schemas(&["web_search".to_string(), "brand_new_tool".to_string()]);
+    let json = serde_json::to_value(&rendered).expect("entries serialize");
+    assert_eq!(
+        json,
+        serde_json::json!([
+            {"name": "web_search", "description": "Search", "parameters": {}},
+            {"name": "brand_new_tool"},
+        ])
     );
 }
 

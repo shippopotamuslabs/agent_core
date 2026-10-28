@@ -26,8 +26,6 @@ const CATALOG_JSON: &str = r#"[
   {"name":"lookup_memory","aliases":[],"reproducible":true,"schema_hint":null}
 ]"#;
 
-const REGISTRY_JSON: &str = r#"[{"name":"open_tools"},{"name":"search_web"},{"name":"write_doc"},{"name":"lookup_memory"}]"#;
-
 fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_core::SessionHandle {
     let eng = engine();
     eng.create_session(
@@ -54,7 +52,6 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
             "anthropic".to_string(),
             200_000,
             CATALOG_JSON.to_string(),
-            REGISTRY_JSON.to_string(),
             active_schema.to_string(),
             "sys".to_string(),
         )

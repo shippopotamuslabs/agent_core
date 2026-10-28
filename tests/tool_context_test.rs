@@ -1,7 +1,6 @@
 //! TDD Red — tool context index tests (S13, S14, E6, M6).
 
 use agent_core::action::AgentAction;
-use agent_core::context_store::ContextReferenceKind;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::ContextPolicyTier;
@@ -38,7 +37,6 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             SCHEMAS_JSON.into(),
             "sys".into(),
         )
@@ -57,10 +55,12 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
                 .map(|s| s.name.as_str())
                 .collect();
             assert_eq!(names, vec!["web_search", "append_blocks"]);
+            // ENC-296: no schema text is stashed anymore (host owns the
+            // registry), so the index carries advertised metadata only.
             assert!(
-                index.full_schema_ref.starts_with("tool-schema-"),
-                "full_schema_ref must start with 'tool-schema-', got {}",
-                index.full_schema_ref
+                eng.search_context_references(&handle, "web_search".into(), 5)
+                    .is_empty(),
+                "no schema text may be stashed in the ContextStore"
             );
             // Crude token estimate of tools_schema_json must drop sharply when
             // deferral is in effect.
@@ -76,11 +76,12 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
 }
 
 #[test]
-fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
-    // Drive the index build through the engine's `next_action`, which the
-    // spec says is the entry point that registers tool schemas into the
-    // engine-owned ContextStore when deferral is enabled. Then search and
-    // read back through the engine APIs so both ends share the same store.
+fn s14_deferred_tool_schema_metadata_is_advertised_without_stash() {
+    // ENC-296 re-pin: the engine no longer stashes schema text (host owns
+    // the registry; full schemas are served provider-side). Drive the index
+    // build through the engine's `next_action` and assert the advertised
+    // metadata is present while the store holds no schema text: search
+    // finds nothing to load.
     let cfg = AgentConfig {
         enable_tool_schema_deferral: true,
         ..Default::default()
@@ -105,31 +106,32 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             SCHEMAS_JSON.into(),
             "sys".into(),
         )
         .expect("valid test io params"),
     );
 
-    let schema_ref = match eng.next_action(&handle) {
+    let summaries = match eng.next_action(&handle) {
         AgentAction::CallModel(req) => req
             .tool_context_index
             .as_ref()
             .expect("tool_context_index expected when deferral enabled")
-            .full_schema_ref
+            .advertised_tools
             .clone(),
         other => panic!("expected CallModel, got {other:?}"),
     };
 
-    let hits = eng.search_context_references(&handle, "web_search".into(), 5);
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].kind, ContextReferenceKind::ToolSchema);
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].name, "web_search");
+    assert!(summaries[0].description_preview.contains("Search the web"));
+    assert_eq!(summaries[1].name, "append_blocks");
 
-    let raw = eng
-        .read_context_reference(&handle, schema_ref)
-        .expect("schema reference should be loadable through the engine");
-    assert!(raw.contains("web_search"));
+    let hits = eng.search_context_references(&handle, "web_search".into(), 5);
+    assert!(
+        hits.is_empty(),
+        "no schema text may be stashed for search/read-back, got {hits:?}"
+    );
 }
 
 #[test]
@@ -157,7 +159,6 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             r#"[{"name":"web_search"}]"#.into(),
             "sys".into(),
         )
@@ -173,9 +174,12 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
 }
 
 #[test]
-fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
-    // Drive everything through the engine so the store driving the index
-    // build and the store backing reads are the same instance.
+fn m6_tool_deferral_advertises_active_tools_without_stashing_schemas() {
+    // ENC-296 re-pin: retrievability of full schemas moved host-side with
+    // the registry. The engine-side guarantee is now that deferral keeps
+    // advertising the active tools' metadata while stashing nothing: the
+    // full schemas stay out of the model payload (no catalog here) and out
+    // of the store.
     let cfg = AgentConfig {
         enable_tool_schema_deferral: true,
         ..Default::default()
@@ -201,25 +205,34 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             schemas.into(),
             "sys".into(),
         )
         .expect("valid test io params"),
     );
 
-    // Force the engine to register schemas in its owned store.
-    let _ = match eng.next_action(&handle) {
+    // Drive the index build through the engine.
+    let req = match eng.next_action(&handle) {
         AgentAction::CallModel(req) => req,
         other => panic!("expected CallModel, got {other:?}"),
     };
 
-    let hits = eng.search_context_references(&handle, "rare_tool".into(), 5);
-    assert_eq!(hits.len(), 1);
-    let id = hits[0].id.clone();
+    let names: Vec<&str> = req
+        .tool_context_index
+        .as_ref()
+        .expect("tool_context_index expected when deferral enabled")
+        .advertised_tools
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["rare_tool"]);
+    // No catalog: the full schemas stay out of the model payload.
+    assert_eq!(req.tools_schema_json(), "[]");
 
-    let raw = eng
-        .read_context_reference(&handle, id)
-        .expect("schema should be readable by ref id");
-    assert!(raw.contains("rare_tool"));
+    // And no schema text is stashed in the engine-owned store.
+    let hits = eng.search_context_references(&handle, "rare_tool".into(), 5);
+    assert!(
+        hits.is_empty(),
+        "no schema text may be stashed in the ContextStore, got {hits:?}"
+    );
 }

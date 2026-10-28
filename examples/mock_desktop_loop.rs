@@ -28,7 +28,6 @@ fn main() {
             128_000,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid example io params"),

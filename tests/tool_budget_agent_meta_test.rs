@@ -23,7 +23,6 @@ fn io_large() -> SessionIoParams {
         200_000,
         "[]".into(),
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid test io params")
