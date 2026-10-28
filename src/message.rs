@@ -367,6 +367,15 @@ impl MessageMeta {
             .unwrap_or_default()
     }
 
+    /// Strict sibling of [`Self::from_json_str`] (ENC-305): identical
+    /// per-field handling via [`Self::from_value`], but malformed JSON is a
+    /// `serde_json::Error` instead of a silent empty default. Used on paths
+    /// where a parse failure must surface as a typed error (the per-turn
+    /// FFI request conversion); [`Self::from_json_str`] is unchanged.
+    pub fn from_json_str_strict(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s).map(Self::from_value)
+    }
+
     /// Encode for JSON persistence / FFI. Empty metadata encodes as `null`,
     /// matching the pre-typed default.
     pub fn to_json_string(&self) -> String {
@@ -629,6 +638,23 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&s).unwrap(),
             json!({"call_id": "c1"})
         );
+    }
+
+    #[test]
+    fn message_meta_from_json_str_strict_rejects_malformed_json() {
+        // ENC-305: the strict sibling surfaces malformed JSON as an error
+        // while valid blobs (object and null) parse exactly as the lenient
+        // path parses them.
+        assert!(MessageMeta::from_json_str_strict("{not json").is_err());
+        assert!(MessageMeta::from_json_str_strict("bogus").is_err());
+        let meta = MessageMeta::from_json_str_strict(r#"{"call_id":"c1"}"#)
+            .expect("valid object metadata must parse");
+        assert_eq!(meta.call_id(), Some("c1"));
+        assert!(MessageMeta::from_json_str_strict("null")
+            .expect("null metadata must parse")
+            .is_empty());
+        // The lenient path is unchanged.
+        assert_eq!(MessageMeta::from_json_str("bogus").to_json_string(), "null");
     }
 
     #[test]
