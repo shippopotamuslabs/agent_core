@@ -10,11 +10,12 @@
 use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, CompactionTier};
 use crate::budget::effective_micro_keep_recent;
 use crate::catalog::ToolCatalog;
-use crate::events::{CompactionEvent, CompactionTier as TierEnum};
-use crate::message::{AgentRole, MessageMeta};
+use crate::events::{AgentError, CompactionEvent, CompactionTier as TierEnum};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 use crate::tool_semantics::result_policy_for;
 use crate::transcript_revision::replace_message_content;
+use std::collections::HashMap;
 
 const PLACEHOLDER: &str = "[Previous tool output cleared]";
 
@@ -28,6 +29,68 @@ impl Default for MicroCompactionTier {
 
 fn tool_name_from_message(meta: &MessageMeta) -> Option<String> {
     meta.tool_name().map(|s| s.to_string())
+}
+
+/// A micro-compaction candidate: the canonical tool name and the message index.
+/// Returns `None` when the message must be left untouched.
+fn micro_candidate(
+    msg: &AgentMessage,
+    idx: usize,
+    catalog: &ToolCatalog,
+    config: &AgentConfig,
+) -> Option<(String, usize)> {
+    if msg.role != AgentRole::Tool {
+        return None;
+    }
+    if msg.metadata.is_superseded() {
+        return None;
+    }
+    let raw_name = tool_name_from_message(&msg.metadata)?;
+    let spec = catalog.resolve(&raw_name)?;
+    if !spec.reproducible {
+        return None;
+    }
+    if result_policy_for(&config.tool_semantics, &spec.name)
+        .is_some_and(|policy| policy.preserve_in_micro_compaction)
+    {
+        return None;
+    }
+    if config
+        .tool_semantics
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| {
+            spec.name == artifact.start_tool_name || spec.name == artifact.append_tool_name
+        })
+    {
+        return None;
+    }
+    Some((spec.name.clone(), idx))
+}
+
+/// Indices to replace: per tool, every index older than the `keep` most recent.
+/// A `keep` of 0 selects every candidate index.
+fn cutoff_indices(per_tool: &HashMap<String, Vec<usize>>, keep: usize) -> Vec<usize> {
+    let mut replace: Vec<usize> = per_tool
+        .values()
+        .filter(|indices| indices.len() > keep)
+        .flat_map(|indices| indices.iter().take(indices.len() - keep).copied())
+        .collect();
+    replace.sort_unstable();
+    replace.dedup();
+    replace
+}
+
+/// Swap each selected result for the placeholder; fails fast on rewrite errors.
+fn rewrite_placeholders(session: &mut AgentSession, replace: &[usize]) -> Result<(), AgentError> {
+    let ids: Vec<String> = replace
+        .iter()
+        .filter_map(|&idx| session.messages.get(idx).map(|m| m.id.clone()))
+        .collect();
+    for id in ids {
+        replace_message_content(session, &id, PLACEHOLDER.into(), TierEnum::Micro)?;
+    }
+    Ok(())
 }
 
 impl CompactionTier for MicroCompactionTier {
@@ -45,77 +108,26 @@ impl CompactionTier for MicroCompactionTier {
             Err(_) => return CompactionOutcome::NotApplicable,
         };
 
-        // Per-canonical-tool-name, indices of Tool messages (chronological).
-        let mut per_tool: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-
-        for (idx, msg) in session.messages.iter().enumerate() {
-            if msg.role != AgentRole::Tool {
-                continue;
-            }
-            if msg.metadata.is_superseded() {
-                continue;
-            }
-            let Some(raw_name) = tool_name_from_message(&msg.metadata) else {
-                continue;
-            };
-            let Some(spec) = catalog.resolve(&raw_name) else {
-                continue;
-            };
-            if !spec.reproducible {
-                continue;
-            }
-            if result_policy_for(&config.tool_semantics, &spec.name)
-                .is_some_and(|policy| policy.preserve_in_micro_compaction)
-            {
-                continue;
-            }
-            if config
-                .tool_semantics
-                .artifact
-                .as_ref()
-                .is_some_and(|artifact| {
-                    spec.name == artifact.start_tool_name || spec.name == artifact.append_tool_name
-                })
-            {
-                continue;
-            }
-            per_tool.entry(spec.name.clone()).or_default().push(idx);
+        // Collect: per-canonical-tool-name indices of Tool messages (chronological).
+        let mut per_tool: HashMap<String, Vec<usize>> = HashMap::new();
+        for (tool, idx) in session
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, msg)| micro_candidate(msg, idx, &catalog, config))
+        {
+            per_tool.entry(tool).or_default().push(idx);
         }
 
-        let mut replace: Vec<usize> = Vec::new();
-        for indices in per_tool.values() {
-            if indices.is_empty() {
-                continue;
-            }
-            if keep == 0 {
-                replace.extend(indices.iter().copied());
-                continue;
-            }
-            if indices.len() <= keep {
-                continue;
-            }
-            let cutoff = indices.len() - keep;
-            replace.extend(indices.iter().take(cutoff).copied());
-        }
-
-        replace.sort_unstable();
-        replace.dedup();
-
+        // Replace: oldest indices beyond the keep window.
+        let replace = cutoff_indices(&per_tool, keep);
         if replace.is_empty() {
             return CompactionOutcome::NotApplicable;
         }
 
-        let ids: Vec<String> = replace
-            .iter()
-            .filter_map(|&idx| session.messages.get(idx).map(|m| m.id.clone()))
-            .collect();
-        for id in ids {
-            if let Err(err) =
-                replace_message_content(&mut session, &id, PLACEHOLDER.into(), TierEnum::Micro)
-            {
-                return CompactionOutcome::Failed(err);
-            }
+        // Rewrite: swap each selected result for the placeholder.
+        if let Err(err) = rewrite_placeholders(&mut session, &replace) {
+            return CompactionOutcome::Failed(err);
         }
 
         let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
@@ -265,6 +277,50 @@ mod tests {
                         .filter(|m| m.content == PLACEHOLDER)
                         .count()
                         >= 2
+                );
+            }
+            o => panic!("expected Applied, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn micro_keep_zero_clears_every_same_tool_result() {
+        // Characterization (FRG-41): keep == 0 replaces ALL reproducible results,
+        // including every message of the same tool — no "recent" survivors.
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            micro_keep_recent: 0,
+            ..Default::default()
+        };
+
+        let session = AgentSession::new(
+            vec![
+                tool_msg("t1", "web_search", "first"),
+                tool_msg("t2", "web_search", "second"),
+                tool_msg("t3", "web_search", "third"),
+            ],
+            serde_json::Value::Null,
+        );
+
+        let tier = MicroCompactionTier;
+        let outcome = tier.apply(session, &cfg, &ctx(CompactionTrigger::PostToolResult));
+        match outcome {
+            CompactionOutcome::Applied(s, ev) => {
+                assert_eq!(ev.tier, TierEnum::Micro);
+                // Rewrite appends one placeholder per replaced id and marks the
+                // original superseded, so all 3 originals are superseded and
+                // exactly 3 live placeholders remain.
+                for id in ["t1", "t2", "t3"] {
+                    let original = s.messages.iter().find(|m| m.id == id).unwrap();
+                    assert!(original.metadata.is_superseded());
+                }
+                assert_eq!(
+                    s.messages
+                        .iter()
+                        .filter(|m| !m.metadata.is_superseded())
+                        .filter(|m| m.content == PLACEHOLDER)
+                        .count(),
+                    3
                 );
             }
             o => panic!("expected Applied, got {o:?}"),

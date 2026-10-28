@@ -19,8 +19,13 @@ pub enum AgentRole {
 /// dialects round-trip byte-compatibly. Serialization emits keys in sorted
 /// order (serde_json's map ordering), exactly as plain `Value` objects did,
 /// so persisted sessions keep their shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+///
+/// Deserialization is lenient per field (see `absorb`): a known key whose
+/// value does not fit its typed field is preserved verbatim in `extra`
+/// instead of discarding the whole metadata object, and a known key never
+/// lives in both a typed field and `extra` at once, so serialization never
+/// emits a key twice.
+#[derive(Debug, Clone, Serialize)]
 pub struct MessageMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     call_id: Option<String>,
@@ -35,12 +40,19 @@ pub struct MessageMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     compaction_tier: Option<String>,
     /// Unknown host keys, round-tripped verbatim.
-    #[serde(flatten, default = "default_extra")]
-    extra: serde_json::Value,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
-fn default_extra() -> serde_json::Value {
-    serde_json::Value::Object(Default::default())
+impl<'de> Deserialize<'de> for MessageMeta {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::from_value(serde_json::Value::deserialize(
+            deserializer,
+        )?))
+    }
 }
 
 impl Default for MessageMeta {
@@ -52,7 +64,7 @@ impl Default for MessageMeta {
             superseded: None,
             rewrite_of: None,
             compaction_tier: None,
-            extra: default_extra(),
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -71,8 +83,7 @@ impl MessageMeta {
             && self.superseded.is_none()
             && self.rewrite_of.is_none()
             && self.compaction_tier.is_none()
-            && (matches!(&self.extra, serde_json::Value::Null)
-                || matches!(&self.extra, serde_json::Value::Object(map) if map.is_empty()))
+            && self.extra.is_empty()
     }
 
     pub fn call_id(&self) -> Option<&str> {
@@ -80,29 +91,30 @@ impl MessageMeta {
     }
 
     pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
-        self.call_id = Some(call_id.into());
+        self.set_call_id(call_id);
         self
     }
 
     pub fn set_call_id(&mut self, call_id: impl Into<String>) {
         self.call_id = Some(call_id.into());
+        self.extra.remove("call_id");
     }
 
-    /// Canonical tool name. Falls back to the legacy `name` dialect key when
-    /// `tool_name` is absent so old host payloads keep resolving.
+    /// Canonical tool name. The legacy `name` dialect key is normalized
+    /// into this field on the read path (see `absorb`), so reads never
+    /// consult the catch-all.
     pub fn tool_name(&self) -> Option<&str> {
-        self.tool_name
-            .as_deref()
-            .or_else(|| self.extra.get("name").and_then(|v| v.as_str()))
+        self.tool_name.as_deref()
     }
 
     pub fn with_tool_name(mut self, tool_name: impl Into<String>) -> Self {
-        self.tool_name = Some(tool_name.into());
+        self.set_tool_name(tool_name);
         self
     }
 
     pub fn set_tool_name(&mut self, tool_name: impl Into<String>) {
         self.tool_name = Some(tool_name.into());
+        self.extra.remove("tool_name");
     }
 
     pub fn raw_tool_calls(&self) -> &[RawToolCall] {
@@ -111,10 +123,11 @@ impl MessageMeta {
 
     pub fn set_raw_tool_calls(&mut self, calls: Vec<RawToolCall>) {
         self.raw_tool_calls = calls;
+        self.extra.remove("raw_tool_calls");
     }
 
     pub fn with_raw_tool_calls(mut self, calls: Vec<RawToolCall>) -> Self {
-        self.raw_tool_calls = calls;
+        self.set_raw_tool_calls(calls);
         self
     }
 
@@ -124,6 +137,7 @@ impl MessageMeta {
 
     pub fn mark_superseded(&mut self) {
         self.superseded = Some(true);
+        self.extra.remove("superseded");
     }
 
     pub fn rewrite_of(&self) -> Option<&str> {
@@ -132,6 +146,7 @@ impl MessageMeta {
 
     pub fn with_rewrite_of(mut self, rewrite_of: impl Into<String>) -> Self {
         self.rewrite_of = Some(rewrite_of.into());
+        self.extra.remove("rewrite_of");
         self
     }
 
@@ -140,12 +155,13 @@ impl MessageMeta {
     }
 
     pub fn with_compaction_tier(mut self, tier: impl Into<String>) -> Self {
-        self.compaction_tier = Some(tier.into());
+        self.set_compaction_tier(tier);
         self
     }
 
     pub fn set_compaction_tier(&mut self, tier: impl Into<String>) {
         self.compaction_tier = Some(tier.into());
+        self.extra.remove("compaction_tier");
     }
 
     /// Read an unknown host key from the catch-all.
@@ -153,31 +169,176 @@ impl MessageMeta {
         self.extra.get(key)
     }
 
-    /// Store an unknown host key in the catch-all (builder).
+    /// Store a host key (builder). Known keys route to their typed field
+    /// when the value fits (see `absorb`); anything else is stored verbatim
+    /// in the catch-all.
     pub fn with_extra(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.set_extra(key, value);
         self
     }
 
-    /// Store an unknown host key in the catch-all.
+    /// Store a host key. Routes through `absorb`, so a known key can never
+    /// shadow its typed field inside the catch-all.
     pub fn set_extra(&mut self, key: impl Into<String>, value: serde_json::Value) {
-        if !self.extra.is_object() {
-            self.extra = default_extra();
-        }
-        if let Some(obj) = self.extra.as_object_mut() {
-            obj.insert(key.into(), value);
+        self.absorb(key.into(), value);
+    }
+
+    /// Single entry point for host-provided keys. A known key whose value
+    /// fits its typed field lands there; a known key whose value does not
+    /// fit is preserved verbatim in the catch-all (never silently dropped,
+    /// and never duplicated alongside an already-set typed field). The
+    /// legacy `name` dialect key normalizes into `tool_name`. Unknown keys
+    /// are stored verbatim.
+    fn absorb(&mut self, key: String, value: serde_json::Value) {
+        match key.as_str() {
+            "call_id" => match value {
+                serde_json::Value::String(s) => self.set_call_id(s),
+                _ if self.call_id.is_none() => {
+                    self.extra.insert(key, value);
+                }
+                _ => {}
+            },
+            "tool_name" => match value {
+                serde_json::Value::String(s) => self.set_tool_name(s),
+                _ if self.tool_name.is_none() => {
+                    self.extra.insert(key, value);
+                }
+                _ => {}
+            },
+            "raw_tool_calls" => match serde_json::from_value::<Vec<RawToolCall>>(value.clone()) {
+                Ok(calls) => self.set_raw_tool_calls(calls),
+                Err(_) if self.raw_tool_calls.is_empty() => {
+                    self.extra.insert(key, value);
+                }
+                Err(_) => {}
+            },
+            "superseded" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.superseded = Some(b);
+                    self.extra.remove("superseded");
+                }
+                _ if self.superseded.is_none() => {
+                    self.extra.insert(key, value);
+                }
+                _ => {}
+            },
+            "rewrite_of" => match value {
+                serde_json::Value::String(s) => {
+                    self.rewrite_of = Some(s);
+                    self.extra.remove("rewrite_of");
+                }
+                _ if self.rewrite_of.is_none() => {
+                    self.extra.insert(key, value);
+                }
+                _ => {}
+            },
+            "compaction_tier" => match value {
+                serde_json::Value::String(s) => self.set_compaction_tier(s),
+                _ if self.compaction_tier.is_none() => {
+                    self.extra.insert(key, value);
+                }
+                _ => {}
+            },
+            "name" if self.tool_name.is_none() => match value {
+                serde_json::Value::String(s) => self.set_tool_name(s),
+                _ => {
+                    self.extra.insert(key, value);
+                }
+            },
+            _ => {
+                self.extra.insert(key, value);
+            }
         }
     }
 
+    // -- Well-known host keys: stored in the catch-all, accessed typed. --
+
+    /// True when this message is the synthetic agent-tool-budget row.
+    pub fn agent_tool_budget(&self) -> bool {
+        self.extra
+            .get("agent_tool_budget")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Mark this message as the synthetic agent-tool-budget row.
+    pub fn with_agent_tool_budget(mut self) -> Self {
+        self.set_extra("agent_tool_budget", serde_json::json!(true));
+        self
+    }
+
+    /// True when the tool result payload was truncated.
+    pub fn truncated(&self) -> bool {
+        self.extra
+            .get("truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Record whether the tool result payload was truncated.
+    pub fn with_truncated(mut self, truncated: bool) -> Self {
+        self.set_extra("truncated", serde_json::json!(truncated));
+        self
+    }
+
+    /// Envelope ingest outcome recorded on an assistant message
+    /// (e.g. "failed", "tools_blocked", "reified").
+    pub fn envelope_ingest(&self) -> Option<&str> {
+        self.extra.get("envelope_ingest").and_then(|v| v.as_str())
+    }
+
+    /// Record the envelope ingest outcome on this message.
+    pub fn with_envelope_ingest(mut self, state: impl Into<String>) -> Self {
+        self.set_extra("envelope_ingest", serde_json::json!(state.into()));
+        self
+    }
+
+    /// Mark that envelope parsing failed for this message.
+    pub fn with_envelope_parse_failure(mut self) -> Self {
+        self.set_extra("envelope_parse_failure", serde_json::json!(true));
+        self
+    }
+
+    /// Mark that this message is the tools-blocked fallback notice.
+    pub fn with_tools_blocked_fallback(mut self) -> Self {
+        self.set_extra("tools_blocked_fallback", serde_json::json!(true));
+        self
+    }
+
+    /// True when this message is the tools-blocked nudge row.
+    pub fn tools_blocked_nudge(&self) -> bool {
+        self.extra
+            .get("tools_blocked_nudge")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Mark this message as the tools-blocked nudge row.
+    pub fn with_tools_blocked_nudge(mut self) -> Self {
+        self.set_extra("tools_blocked_nudge", serde_json::json!(true));
+        self
+    }
+
+    /// Provider reasoning content captured at model-response ingest.
+    pub fn provider_reasoning_content(&self) -> Option<&str> {
+        self.extra
+            .get("provider_reasoning")?
+            .get("reasoning_content")?
+            .as_str()
+    }
+
     /// Build from an untyped JSON value. `null` (and missing) maps to empty;
-    /// objects split known keys into typed fields; anything else maps to empty
-    /// (only objects and null were ever written by the engine).
+    /// objects split known keys into typed fields via `absorb`; anything
+    /// else maps to empty (only objects and null were ever written by the
+    /// engine).
     pub fn from_value(value: serde_json::Value) -> Self {
-        match value {
-            serde_json::Value::Null => Self::default(),
-            serde_json::Value::Object(_) => serde_json::from_value(value).unwrap_or_default(),
-            _ => Self::default(),
+        let mut meta = Self::default();
+        if let serde_json::Value::Object(map) = value {
+            for (key, val) in map {
+                meta.absorb(key, val);
+            }
         }
+        meta
     }
 
     /// Parse a JSON-encoded metadata blob (e.g. across FFI). Unparseable input
@@ -367,9 +528,60 @@ mod tests {
     fn message_meta_legacy_name_dialect_resolves() {
         let meta = MessageMeta::from_value(json!({ "name": "web_search" }));
         assert_eq!(meta.tool_name(), Some("web_search"));
+        // The legacy key is normalized into the canonical field on read.
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),
-            json!({ "name": "web_search" })
+            json!({ "tool_name": "web_search" })
+        );
+    }
+
+    #[test]
+    fn message_meta_malformed_known_field_preserves_the_rest() {
+        let meta = MessageMeta::from_value(json!({
+            "call_id": 42,
+            "superseded": true,
+            "custom": "x",
+        }));
+        // One malformed field must not discard the whole metadata object.
+        assert!(meta.is_superseded());
+        assert_eq!(meta.extra("custom"), Some(&json!("x")));
+        // The malformed value itself is preserved verbatim, not dropped.
+        assert_eq!(meta.call_id(), None);
+        assert_eq!(meta.extra("call_id"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn message_meta_malformed_raw_tool_calls_preserved() {
+        let meta = MessageMeta::from_value(json!({
+            "raw_tool_calls": [{ "bogus": 1 }],
+            "tool_name": "web_search",
+        }));
+        assert_eq!(meta.tool_name(), Some("web_search"));
+        assert!(meta.raw_tool_calls().is_empty());
+        assert_eq!(meta.extra("raw_tool_calls"), Some(&json!([{ "bogus": 1 }])));
+    }
+
+    #[test]
+    fn message_meta_set_extra_routes_known_keys_to_typed_fields() {
+        let mut meta = MessageMeta::new();
+        meta.set_extra("call_id", json!("c9"));
+        assert_eq!(meta.call_id(), Some("c9"));
+        assert_eq!(meta.extra("call_id"), None);
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "call_id": "c9" })
+        );
+    }
+
+    #[test]
+    fn message_meta_typed_setter_clears_preserved_shadow() {
+        let mut meta = MessageMeta::from_value(json!({ "call_id": 42 }));
+        assert_eq!(meta.extra("call_id"), Some(&json!(42)));
+        meta.set_call_id("c1");
+        assert_eq!(meta.extra("call_id"), None);
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "call_id": "c1" })
         );
     }
 

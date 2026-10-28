@@ -37,16 +37,9 @@ pub fn render_runtime_tool_view(
     let filtered: Vec<&serde_json::Value> = arr
         .iter()
         .filter(|tool| {
-            // Catalog entries are schema objects ({"name": ..., ...}), not
-            // bare strings, so extract the tool name from the "name" field.
-            // A bare string entry is still honored for backward compatibility.
-            let name: &str = match tool {
-                serde_json::Value::String(s) => s.as_str(),
-                serde_json::Value::Object(_) => {
-                    tool.get("name").and_then(|n| n.as_str()).unwrap_or("")
-                }
-                _ => "",
-            };
+            // Catalog entries are schema objects ({"name": ..., ...}), so
+            // extract the tool name from the "name" field.
+            let name: &str = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
             // Remove patch_file and write_file when require_read_before_edit and no files read yet
             if config.require_read_before_edit
                 && metrics.files_read.is_empty()

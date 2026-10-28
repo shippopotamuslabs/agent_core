@@ -53,6 +53,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
+  # FRG-38: agent_core-side vendoring freshness self-test. Runs the
+  # --self-test mode (simulated vendored copy in a temp dir), so it needs no
+  # Enclave checkout. The real check against an Enclave checkout is
+  # documented in docs/vendoring.md for the Enclave side (ENC-294).
+  vendoring-self-test:
+    name: vendored freshness script self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-vendored-freshness.sh --self-test
+
   test-no-default-features:
     name: cargo test --no-default-features
     runs-on: ubuntu-latest
