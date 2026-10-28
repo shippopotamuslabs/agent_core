@@ -1,29 +1,12 @@
 //! TDD Red — context policy resolution tests (S20, S21, S22, E8, E10).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::compact::policy::build_compaction_plan;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::{AgentError, CompactionTier, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::events::{CompactionTier, CompactionTrigger};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::policy::{resolve_context_policy, ContextPolicyTier};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
 
 #[test]
 fn s20_hosted_mutable_policy_enables_all_features() {
@@ -88,11 +71,7 @@ fn s22_high_context_raises_thresholds() {
 
     // Spec S22 also requires that a prompt-cache-supported high-context
     // session emits exactly one cache hint covering the stable prefix.
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let stable_prefix = "stable ".repeat(2_500); // ~10k tokens by char/4 heuristic
     let handle = eng.create_session(
         vec![AgentMessage {

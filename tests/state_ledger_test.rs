@@ -1,28 +1,11 @@
 //! TDD Red — state ledger tests (S11, S12, S15, M4, M5).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::state_ledger::{ArtifactStateAnchor, StateLedger};
-use agent_core::turn_io::{ModelRequest, ModelResponse, SummaryResult};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
+use agent_core::turn_io::SummaryResult;
 
 fn user_msg(content: &str) -> AgentMessage {
     AgentMessage {
@@ -68,11 +51,7 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
         enable_state_ledger: true,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let big = "hello ".repeat(400);
     let handle = eng.create_session(
         vec![

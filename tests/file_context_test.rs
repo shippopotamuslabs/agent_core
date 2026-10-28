@@ -1,30 +1,11 @@
 //! TDD Red -- file context condensation tests (S17, E7, M7).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::context_store::ContextStore;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
 use agent_core::file_context::{condense_file_context, FileCondensationLevel};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
 
 #[test]
 fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
@@ -117,11 +98,7 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
             }
         ]
     });
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),

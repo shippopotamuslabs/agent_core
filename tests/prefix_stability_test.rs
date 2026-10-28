@@ -5,51 +5,16 @@
 //! `ModelRequest.session_messages` between turns — the exact pattern that
 //! breaks xAI/OpenAI prompt-cache prefix.
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use agent_core::lalr_harness::default_long_loop_io;
-use agent_core::message::{AgentMessage, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use agent_core::{AgentEngine, SessionHandle};
 
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport callback unused: tests drive the engine directly")
-    }
-}
-
-struct NoopExecutor;
-impl AgentToolExecutor for NoopExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, AgentError> {
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: r#"{"status":"ok","payload":"small"}"#.into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
-
 /// Drive N tool rounds and capture the `ModelRequest` from each `CallModel`.
 fn capture_call_model_requests(rounds: u32) -> Vec<ModelRequest> {
-    let engine = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(NoopExecutor),
-        Arc::new(NoOpSummarizer),
-    );
+    let engine = AgentEngine::new();
     let handle = engine.create_session(
         vec![AgentMessage {
             id: "u0".into(),

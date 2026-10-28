@@ -3,7 +3,6 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::sync::Arc;
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
@@ -18,23 +17,9 @@ use agent_core::compact::{
 use agent_core::context_store::ContextStore;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large() -> SessionIoParams {
     SessionIoParams {
@@ -94,11 +79,7 @@ fn s1_preflight_below_threshold_skips_compaction() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u1", "hi")],
         cfg,
@@ -135,11 +116,7 @@ fn s2_preflight_summary_request_carries_trigger_metadata() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         cfg,
@@ -174,11 +151,7 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let big = "hello ".repeat(400);
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
@@ -248,11 +221,7 @@ fn post_tool_small_result_on_large_window_skips_compaction() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", "research topic")],
         cfg,
@@ -308,11 +277,7 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", "hi")],
         cfg,
@@ -368,11 +333,7 @@ fn s5_artifact_squash_is_preferred_over_fifo() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", "make artifact")],
         cfg,
@@ -455,11 +416,7 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         cfg,
@@ -521,11 +478,7 @@ fn s7_summary_request_includes_history_reference_and_ledger_snapshot() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             user("u0", "Objective: Implement context manager"),
@@ -650,11 +603,7 @@ fn e2_submit_summary_rejects_a_mismatched_last_message_id() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         AgentConfig::default(),
@@ -688,11 +637,7 @@ fn submit_model_response_while_awaiting_summary_is_invalid_transition() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         AgentConfig::default(),
@@ -737,11 +682,7 @@ fn e3_over_threshold_pressure_with_no_eligible_tier_fails_loudly() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         cfg,
@@ -787,11 +728,7 @@ fn fixed_kv_without_history_rewrite_support_does_not_fifo_through_engine() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
         AgentConfig::default(),
@@ -831,11 +768,7 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![user("u0", "small")],
         cfg,
@@ -897,11 +830,7 @@ fn m2_fifo_before_summary_ordering_is_rejected() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             user("u0", &big),

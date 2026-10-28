@@ -1,39 +1,15 @@
 //! Extra kv_fixed assertions (AGENT-047). Run: `cargo test --test kv_fixed_test`
 
-use std::sync::Arc;
-
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
 use agent_core::events::AgentEvent;
-use agent_core::host::{AgentToolExecutor, AgentTransport};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
 
 #[test]
 fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     let big = "hello ".repeat(400);
-    let mk = || {
-        AgentEngine::new(
-            Arc::new(PanicTransport),
-            Arc::new(PanicExec),
-            Arc::new(agent_core::host::NoOpSummarizer),
-        )
-    };
+    let mk = || AgentEngine::new();
     let io = || SessionIoParams {
         provider: "anthropic".into(),
         context_window_tokens: 256,
@@ -108,11 +84,7 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
 #[test]
 fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
     let big = "hello ".repeat(600);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(agent_core::host::NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             AgentMessage {

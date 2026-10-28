@@ -1,31 +1,11 @@
 #![cfg(feature = "lalr-harness")]
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse};
 use serde_json::json;
-
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport callback is not used by submit-path tests");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("tool executor callback is not used by submit-path tests");
-    }
-}
 
 #[test]
 fn pending_work_reminder_filters_superseded_from_wire() {
@@ -80,12 +60,8 @@ fn pending_work_reminder_threads_provider_context_snapshot() {
     assert!(request.state_ledger_delta_json.is_some());
 }
 
-fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn pending_config() -> AgentConfig {
@@ -115,10 +91,7 @@ fn io() -> SessionIoParams {
     }
 }
 
-fn pending_request(
-    engine: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
-    handle: &agent_core::SessionHandle,
-) -> ModelRequest {
+fn pending_request(engine: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {
     assert!(matches!(
         engine.next_action(handle),
         AgentAction::CallModel(_)

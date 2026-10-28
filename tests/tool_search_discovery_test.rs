@@ -5,13 +5,10 @@ mod support;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
-use std::sync::Arc;
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
 // FRG-37: vendored snapshot of the Enclave production semantics file
@@ -42,28 +39,8 @@ const SEARCH_REGISTRY_JSON: &str = r#"[
   {"name":"append_blocks","parameters":{"properties":{"artifactId":{"type":"string"}}}}
 ]"#;
 
-struct PanicTransport;
-
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("transport is not used by engine-driven red tests");
-    }
-}
-
-struct PanicExecutor;
-
-impl AgentToolExecutor for PanicExecutor {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("executor is not used by engine-driven red tests");
-    }
-}
-
-fn engine() -> AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer> {
-    AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExecutor),
-        Arc::new(NoOpSummarizer),
-    )
+fn engine() -> AgentEngine {
+    AgentEngine::new()
 }
 
 fn search_discovery_config() -> AgentConfig {
@@ -95,9 +72,7 @@ fn capabilities() -> SessionCapabilities {
     }
 }
 
-fn create_session(
-    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
-) -> agent_core::SessionHandle {
+fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
     eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
@@ -119,10 +94,7 @@ fn create_session(
     )
 }
 
-fn model_request(
-    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
-    handle: &agent_core::SessionHandle,
-) -> ModelRequest {
+fn model_request(eng: &AgentEngine, handle: &agent_core::SessionHandle) -> ModelRequest {
     match eng.next_action(handle) {
         AgentAction::CallModel(request) => request,
         other => panic!("expected CallModel, got {other:?}"),
@@ -202,10 +174,7 @@ fn tsd_26_engine_rejects_append_blocks_before_search_activation() {
     );
 }
 
-fn enclave_discovery_session(
-    eng: &AgentEngine<PanicTransport, PanicExecutor, NoOpSummarizer>,
-    config: AgentConfig,
-) -> agent_core::SessionHandle {
+fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::SessionHandle {
     eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),

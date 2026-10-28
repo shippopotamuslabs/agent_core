@@ -5,50 +5,13 @@ mod support;
 
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
-use std::sync::{Arc, Mutex};
-
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::model_api_retry::{ModelApiErrorClass, ModelTurnFailureReport};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(
-        &self,
-        _: ModelRequest,
-    ) -> Result<ModelResponse, agent_core::events::AgentError> {
-        panic!("transport unused in submit-path tests")
-    }
-}
-
-struct RecordingExecutor {
-    results: Mutex<Vec<ToolCallRecord>>,
-}
-
-impl AgentToolExecutor for RecordingExecutor {
-    fn execute_tools(
-        &self,
-        calls: Vec<ToolCallRecord>,
-    ) -> Result<Vec<ToolResultRecord>, agent_core::events::AgentError> {
-        self.results.lock().unwrap().extend(calls.clone());
-        Ok(calls
-            .into_iter()
-            .map(|c| ToolResultRecord {
-                call_id: c.call_id,
-                result_json: r#"{"ok":true}"#.into(),
-                truncated: false,
-                soft_failure: false,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            })
-            .collect())
-    }
-}
 
 fn io() -> SessionIoParams {
     SessionIoParams {
@@ -70,10 +33,7 @@ fn user_msg() -> AgentMessage {
     }
 }
 
-fn new_session(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
-    config: AgentConfig,
-) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
         config,
@@ -113,7 +73,7 @@ fn permanent_failure() -> ModelTurnFailureReport {
 }
 
 fn expect_call_model(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+    eng: &AgentEngine,
     handle: &agent_core::engine::SessionHandle,
 ) -> ModelRequest {
     match eng.next_action(handle) {
@@ -123,7 +83,7 @@ fn expect_call_model(
 }
 
 fn drain_retry_events(
-    eng: &AgentEngine<PanicTransport, RecordingExecutor, NoOpSummarizer>,
+    eng: &AgentEngine,
     handle: &agent_core::engine::SessionHandle,
 ) -> Vec<AgentEvent> {
     eng.drain_events(handle)
@@ -134,13 +94,7 @@ fn drain_retry_events(
 
 #[test]
 fn mar_01_transient_failure_schedules_retry_call_model() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     let first = expect_call_model(&eng, &h);
     assert_eq!(first.system_prompt, "sys");
@@ -177,13 +131,7 @@ fn mar_01_transient_failure_schedules_retry_call_model() {
 fn mar_02_exhausted_transient_failures_terminal_guardrail() {
     let mut config = enclave_test_agent_config();
     config.model_api_retry_limit = 2;
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, config);
     expect_call_model(&eng, &h);
 
@@ -211,13 +159,7 @@ fn mar_02_exhausted_transient_failures_terminal_guardrail() {
 fn mar_02b_exhausted_rate_limit_preserves_provider_message() {
     let mut config = enclave_test_agent_config();
     config.model_api_retry_limit = 1;
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, config);
     expect_call_model(&eng, &h);
 
@@ -261,13 +203,7 @@ fn mar_02b_exhausted_rate_limit_preserves_provider_message() {
 
 #[test]
 fn mar_03_permanent_failure_fails_immediately() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     expect_call_model(&eng, &h);
     eng.submit_model_turn_failure(&h, permanent_failure());
@@ -285,13 +221,7 @@ fn mar_03_permanent_failure_fails_immediately() {
 fn mar_04_success_resets_consecutive_failure_counter() {
     let mut config = enclave_test_agent_config();
     config.model_api_retry_limit = 1;
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, config);
     expect_call_model(&eng, &h);
     eng.submit_model_turn_failure(&h, transient_failure("timeout"));
@@ -319,13 +249,7 @@ fn mar_04_success_resets_consecutive_failure_counter() {
 
 #[test]
 fn mar_05_retry_preserves_pending_request_shape() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     let first = expect_call_model(&eng, &h);
     eng.submit_model_turn_failure(&h, transient_failure("timeout"));
@@ -342,13 +266,7 @@ fn mar_05_retry_preserves_pending_request_shape() {
 
 #[test]
 fn mar_06_honors_retry_after_ms_from_report() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     expect_call_model(&eng, &h);
 
@@ -364,13 +282,7 @@ fn mar_06_honors_retry_after_ms_from_report() {
 
 #[test]
 fn mar_07_invalid_transition_when_not_awaiting_model() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(RecordingExecutor {
-            results: Mutex::new(Vec::new()),
-        }),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
     eng.submit_model_turn_failure(&h, transient_failure("timeout"));
     match eng.next_action(&h) {

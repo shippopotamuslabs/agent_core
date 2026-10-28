@@ -1,28 +1,12 @@
 //! TDD Red — manual compact tests (S18, S24, E9).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::{AgentError, AgentEvent, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
+use agent_core::events::{AgentEvent, CompactionTrigger};
 use agent_core::manual_compact::ManualCompactRequest;
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse, SummaryResult};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
+use agent_core::turn_io::{ModelResponse, SummaryResult};
 
 fn user_msg(id: &str, body: &str) -> AgentMessage {
     AgentMessage {
@@ -44,11 +28,7 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             user_msg("u0", "first"),
@@ -104,11 +84,7 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
         ..Default::default()
     };
     let big = "hello ".repeat(400);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             AgentMessage {
@@ -192,11 +168,7 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
         enable_manual_compact: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![],
         cfg,
@@ -247,11 +219,7 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
         kv_fixed: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             user_msg("u0", &"long context ".repeat(64)),

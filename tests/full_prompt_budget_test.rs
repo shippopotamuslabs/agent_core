@@ -11,27 +11,10 @@ use agent_core::compact::{
     CompactionTier as CompactionTierTrait,
 };
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::{AgentError, CompactionTier, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::events::{CompactionTier, CompactionTrigger};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::policy::{resolve_context_policy, ContextPolicyTier};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-use std::sync::Arc;
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unexpected model call")
-    }
-}
-
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unexpected tool execution")
-    }
-}
 
 fn msg(id: &str, role: AgentRole, content: &str) -> AgentMessage {
     AgentMessage {
@@ -81,11 +64,7 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
     };
     let system = "# ABOUT\n".to_string() + &"detail ".repeat(1_500);
     let history = "history ".repeat(500);
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![
             msg("u1", AgentRole::User, &history),

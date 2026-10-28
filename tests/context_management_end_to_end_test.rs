@@ -3,32 +3,16 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::sync::Arc;
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
 use agent_core::action::AgentAction;
 use agent_core::budget::TokenLedger;
 use agent_core::context_store::ContextReferenceKind;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::state_ledger::StateLedger;
-use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
+use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
 #[test]
 fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
@@ -73,11 +57,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
 
     // 3) Drive a tool spill and artifact squash through the engine so its owned
     //    store accrues ToolOutput, HistorySnapshot, ArtifactSnapshot, and file refs.
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![objective_msg.clone()],
         cfg,

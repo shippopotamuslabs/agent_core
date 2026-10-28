@@ -7,11 +7,13 @@ use, and per-session accounting of tokens, turns, and tool calls.
 
 Hosts drive it two ways:
 
-- **Native Rust hosts** use the traits in `agent_core::host`:
-  `AgentTransport` for model turns, `AgentToolExecutor` for repaired tool
-  calls, `AgentSummarizer` for summary-tier compaction. The smoke example in
-  `examples/mock_desktop_loop.rs` runs a three-turn tool loop through that
-  surface:
+- **Native Rust hosts** drive the polling surface directly
+  (`next_action` / `submit_model_response` / `submit_tool_results` /
+  `submit_summary`): `AgentEngine::new()` takes no host callbacks.
+  (ENC-285 removed the former `agent_core::host` port traits and the
+  UniFFI callback shims — they were stored but never invoked.)
+  The smoke example in `examples/mock_desktop_loop.rs` runs a three-turn
+  tool loop through that surface:
 
   ```bash
   cargo run --example mock_desktop_loop

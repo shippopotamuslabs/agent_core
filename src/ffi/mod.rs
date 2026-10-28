@@ -1,14 +1,12 @@
 //! UniFFI exports for Android / Kotlin (AGENT-021, AGENT-022).
 //!
-//! Callback traits are defined at the crate root (`lib.rs`) so UniFFI registers
-//! `FfiConverter` for `Arc<dyn …Callback>` correctly.
+//! ENC-285: hosts drive the engine through the polling surface only; there are
+//! no host callback parameters left on this bridge.
 
-mod callbacks;
 mod policy_bridge;
 mod stream_gate;
 mod types;
 
-pub use callbacks::{UniFfiExecutor, UniFfiSummarizer, UniFfiTransport};
 pub use policy_bridge::{
     coerce_provider_arguments, has_local_tool_contract, parse_tool_calls, repair_tool,
     result_json_looks_soft_failure, should_allow_tool, truncate_result, RepairResult,
@@ -29,30 +27,20 @@ pub use types::{
 use std::sync::Arc;
 
 use crate::engine::{AgentEngine, SessionHandle};
-use crate::{AgentSummarizerCallback, AgentToolExecutorCallback, AgentTransportCallback};
 
-pub type FfiEngineInner = AgentEngine<UniFfiTransport, UniFfiExecutor, UniFfiSummarizer>;
+pub type FfiEngineInner = AgentEngine;
 
-/// Construct an [`AgentEngine`] wired to Kotlin callback implementations.
+/// Construct an [`AgentEngine`].
 ///
-/// Callbacks are invoked on the **caller thread** (often a JNI worker thread). Kotlin must
-/// dispatch heavy work to `Dispatchers.IO` and never block the Android main thread.
+/// ENC-285: construction takes no host callbacks. The engine is driven exclusively
+/// through the polling surface (`create_session` / `next_action` / `submit_*`);
+/// the former `transport` / `executor` / `summarizer` callback parameters were
+/// decorative DI — stored but never invoked — and were removed with the
+/// `AgentEngine<T, E, S>` generics.
 #[uniffi::export]
-pub fn create_agent_engine(
-    transport: Box<dyn AgentTransportCallback>,
-    executor: Box<dyn AgentToolExecutorCallback>,
-    summarizer: Option<Box<dyn AgentSummarizerCallback>>,
-) -> Arc<FfiAgentEngine> {
-    let sum: UniFfiSummarizer = match summarizer {
-        Some(s) => UniFfiSummarizer::Callback(s),
-        None => UniFfiSummarizer::NoOp,
-    };
+pub fn create_agent_engine() -> Arc<FfiAgentEngine> {
     Arc::new(FfiAgentEngine {
-        inner: Arc::new(AgentEngine::new(
-            Arc::new(UniFfiTransport(transport)),
-            Arc::new(UniFfiExecutor(executor)),
-            Arc::new(sum),
-        )),
+        inner: Arc::new(AgentEngine::new()),
     })
 }
 

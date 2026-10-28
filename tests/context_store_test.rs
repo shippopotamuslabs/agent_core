@@ -1,7 +1,5 @@
 //! TDD Red — context store tests (S8, S9, S10, S23, E4, E5).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::compact::fifo::FifoCompactionTier;
 use agent_core::compact::history_snapshot::snapshot_history_range;
@@ -12,23 +10,8 @@ use agent_core::compact::{
 use agent_core::context_store::{is_browsable_context_kind, ContextReferenceKind, ContextStore};
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, CompactionTrigger};
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
 use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
 
 #[test]
 fn s8_oversized_tool_output_spills_to_context_reference() {
@@ -144,11 +127,7 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
         ..Default::default()
     };
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u0".into(),
@@ -255,11 +234,7 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
         tool_schema_deferral_supported: true,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
@@ -307,11 +282,7 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
 
 #[test]
 fn s23_terminal_output_references_share_retrieval_path() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![],
         AgentConfig::default(),
@@ -346,11 +317,7 @@ fn s23_terminal_output_references_share_retrieval_path() {
 
 #[test]
 fn e4_missing_context_reference_read_returns_not_found() {
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![],
         AgentConfig::default(),
@@ -472,11 +439,7 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
         metadata: serde_json::Value::Null,
     });
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         initial,
         cfg,

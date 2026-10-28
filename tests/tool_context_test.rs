@@ -1,29 +1,11 @@
 //! TDD Red — tool context index tests (S13, S14, E6, M6).
 
-use std::sync::Arc;
-
 use agent_core::action::AgentAction;
 use agent_core::context_store::ContextReferenceKind;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::events::AgentError;
-use agent_core::host::{AgentToolExecutor, AgentTransport, NoOpSummarizer};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
-use agent_core::turn_io::{ModelRequest, ModelResponse};
-
-struct PanicTransport;
-impl AgentTransport for PanicTransport {
-    fn complete_model_turn(&self, _: ModelRequest) -> Result<ModelResponse, AgentError> {
-        panic!("unused");
-    }
-}
-struct PanicExec;
-impl AgentToolExecutor for PanicExec {
-    fn execute_tools(&self, _: Vec<ToolCallRecord>) -> Result<Vec<ToolResultRecord>, AgentError> {
-        panic!("unused");
-    }
-}
 
 const SCHEMAS_JSON: &str = r#"[
   {"name":"web_search","description":"Search the web for information","parameters":{}},
@@ -41,11 +23,7 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
         context_policy_tier: ContextPolicyTier::HostedMutable,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
@@ -111,11 +89,7 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
         ..Default::default()
     };
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
@@ -166,11 +140,7 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
         tool_schema_deferral_supported: false,
         ..Default::default()
     };
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
@@ -213,11 +183,7 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
     };
     let schemas = r#"[{"name":"rare_tool","description":"A rare tool"}]"#;
 
-    let eng = AgentEngine::new(
-        Arc::new(PanicTransport),
-        Arc::new(PanicExec),
-        Arc::new(NoOpSummarizer),
-    );
+    let eng = AgentEngine::new();
     let handle = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),
