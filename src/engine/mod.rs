@@ -32,8 +32,9 @@ use crate::compact::{
     artifact_squash::extract_artifact_anchor,
     compaction_pipeline_for_plan, estimate_session_pressure,
     policy::{
-        build_compaction_plan, mid_turn_stall_error, ratio_threshold_tokens_for_plan,
-        should_enter_compaction, FireConditionInputs, MidTurnStallGate,
+        apply_confirmation_gate, build_compaction_plan, mid_turn_stall_error,
+        ratio_threshold_tokens_for_plan, should_enter_compaction, FireConditionInputs,
+        MidTurnStallGate,
     },
     tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
@@ -1172,7 +1173,8 @@ impl InnerSession {
                 &self.io.provider,
                 self.io.context_window_tokens,
             );
-            let plan = build_compaction_plan(
+            let pressure = self.estimate_pressure(trigger);
+            let mut plan = build_compaction_plan(
                 &self.config,
                 &self.capabilities,
                 &policy,
@@ -1180,10 +1182,15 @@ impl InnerSession {
                 self.io.context_window_tokens,
                 self.suppress_summary_tier,
             );
+            // ENC-303 Q2: ConfirmationGated tiers (Fifo, TextTruncate) stay
+            // in a ratio-triggered plan only on hard-ceiling pressure, a
+            // manual trigger, or (Fifo) an already-satisfied snapshot-first
+            // requirement. Pressure is plan-independent, so computing it
+            // first is a pure reorder.
+            apply_confirmation_gate(&mut plan, &pressure);
             let threshold_tokens = plan.threshold_tokens;
             let ratio_threshold_tokens =
                 ratio_threshold_tokens_for_plan(&self.config, self.io.context_window_tokens, &plan);
-            let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
             let session_has_tool_messages = self
