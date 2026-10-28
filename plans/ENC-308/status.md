@@ -5,14 +5,15 @@
       2026-10-28 morning + execution commission 11:29 EDT)
 - [x] Plan
 - [x] Implementation
-- [ ] Review — rounds: 1/3, result: 2 MINOR findings, no BLOCKER/MAJOR
+- [x] Review — rounds: 2/3, result: CLEAN (round 1's 2 MINOR findings
+      verified fixed in round 2; no new findings)
 - [ ] Ship — PR: none
 
 ## Current Gate
 none
 
 ## Next Phase
-Review round 2 — re-review of the R1/R2 fixes (implementer fix round 1 landed)
+Ship
 
 ## Notes
 - 2026-10-28 (A1): Compaction encapsulation trio done. (1) `attach_summary_staging` lost its redundant `trigger` param — both callers had already settled `req.trigger` (forced-fixup in the pipeline arm; Manual ctx in the manual path), so the snapshot stamps `req.trigger`. (2) `CompactionState::set_suppress_summary_tier` deleted; suppression is the begin/end pair `begin_summary_tier_suppression() -> bool` / `end_summary_tier_suppression(previous)` owned by CompactionState, and `retry_without_summary` just brackets the re-run (restores the previous value, not a hard-coded false — behavior identical at the only call site). Grep acceptance: no `set_suppress_summary_tier` hits remain anywhere. (3) `CompactionPassState`: `last_history_ref()` deleted — the `NotApplicable` arm now uses the single consuming read `take_history_ref()` like the early-exit branch; `message_count_before` is a plain `pub(super)` field fixed at construction (getter deleted). Verification: `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; targeted tests both configs — `cargo test --locked [--no-default-features] --test compaction_triggers_test --test manual_compact_test --test context_management_end_to_end_test` (22+1+4 passed, 0 failed each config), `--lib compaction` (6 passed, 0 failed each config); extra guard `cargo test --locked --features lalr-harness --test compaction_boundary_test` runs 6 tests: 3 passed / 3 FAILED — and the identical 3 failures (lalr_03_boundary_id_literal_format, lalr_09_post_compact_revision_matches_session, lalr_15_kv_fixed_emits_boundary_without_summary_tier) reproduce on the pre-A1 plan commit 4646395, verified in a scratch worktree. Pre-existing red on main, unrelated to A1; the target requires lalr-harness+ffi so it sits outside both gate configs and its redness was never gated. (Correction to this entry's first version, which misstated the suite as "3 passed" from truncated poll output; the gate-config results above were read in full and stand.) No existing tests changed. Note: plain `cargo test --test compaction_boundary_test` under gate configs errors on required-features — run it via the lalr-harness invocation.
@@ -209,3 +210,36 @@ Review round 2 — re-review of the R1/R2 fixes (implementer fix round 1 landed)
   targets → lib 273 / snapshot 9 / legacy 1, 0 failed (the snapshot
   target's 9-vs-14 is its ffi gating, baseline shape).
   Next: Review round 2 (re-review of the two fixes).
+
+- 2026-10-28 (Review round 2, fresh-context verification of fix
+  commit 14bfde6): verdict CLEAN — both round-1 findings verifiably
+  fixed, no new findings. R1: the absorb "name" arm (src/message.rs)
+  now lands the legacy value only while `tool_name` is unset; return
+  outcomes are byte-identical to the pre-fix arm (String → Landed,
+  non-string → Misfit), so the strict path gains no new error and a
+  set tool_name + legacy name is consumed silently, as before; a
+  legacy-only name still lands. The new unit test drives the REAL
+  absorb seam in both insertion orders — the explicit-first order is
+  the one from_value cannot produce in this tree (no preserve_order),
+  i.e. exactly the latent hazard R1 named — plus a both-keys
+  from_value case asserting normalization to the explicit name alone.
+  R2: tests/enc308_legacy_snapshot_test.rs blob is genuinely pre-308
+  in content shape (typed context wire keys + `legacy_host_junk`
+  extras key; `"spilled": true` + junk metadata key in BOTH the
+  history and pending message copies; populated ToolSchemaSet with
+  the noncanonical `1.50` raw channel; ledger content in the ledger
+  field, the pending request, and the sidecar last-ledger JSON;
+  skeleton ties to the A2 golden) and is driven through the real
+  `AgentEngine::import_snapshot`. Assertions cover the restored
+  state: all six typed context fields, `is_spilled()` true, seven
+  ledger fields intact, raw schema channel verbatim, and both junk
+  keys absent on re-export. Scope: diff 9733974..HEAD touches only
+  src/message.rs (guard + doc + test), the new test file, and
+  status.md — nothing beyond R1/R2. Reviewer's own gates (logs
+  ~/workspace/tmp/enc308-review2-*.log): `cargo fmt -- --check`
+  clean; `cargo clippy --locked --all-targets -- -D warnings`
+  clean; `cargo test --locked` — 723 passed / 0 failed (43
+  sections); `cargo test --locked --no-default-features` — 673
+  passed / 0 failed (41 sections). Residual risks: none beyond
+  round 1's disclosed immaterial list.
+  Next: Ship.
