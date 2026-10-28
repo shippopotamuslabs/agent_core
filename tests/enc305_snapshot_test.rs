@@ -228,9 +228,9 @@ fn enc305_snapshot_control_vs_restored_following_request_matches() {
         vec![tn("web_search"), tn("append_blocks"), tn("host_only_tool")]
     );
     let round_tripped = json_round_trip(&source_snapshot);
-    // Source engine + handle dropped at scope end: simulated death.
+    // Source handle dropped: simulated death (the engine is a
+    // stateless facade — the handle owns the session).
     drop(source);
-    drop(eng_source);
 
     // (c) Scalar asserts on the JSON-round-tripped snapshot itself.
     assert_eq!(round_tripped.version, source_snapshot.version);
@@ -325,8 +325,8 @@ fn enc305_snapshot_mid_turn_restart_replays_execute_batch_and_completes() {
     assert_eq!(source_snapshot.phase, EnginePhase::AwaitingTools);
 
     let round_tripped = json_round_trip(&source_snapshot);
+    // Source handle dropped: simulated death (see above).
     drop(source);
-    drop(eng_source);
 
     let eng_restored = AgentEngine::new();
     let restored = eng_restored

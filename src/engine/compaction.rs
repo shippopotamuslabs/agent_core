@@ -54,6 +54,22 @@ impl CompactionState {
         }
     }
 
+    /// Rebuild from a session snapshot's exported values (ENC-305
+    /// import): the ONLY construction besides `new` — snapshot restore
+    /// is the one path that legitimately resumes mid-turn counters
+    /// instead of starting a turn at zero.
+    pub(super) fn restore(
+        passes_this_turn: u32,
+        destructive_tiers_this_turn: u32,
+        suppress_summary_tier: bool,
+    ) -> Self {
+        Self {
+            passes_this_turn,
+            destructive_tiers_this_turn,
+            suppress_summary_tier,
+        }
+    }
+
     /// Start a new user turn: zeroes both counters. The suppression flag
     /// is NOT reset here — it is written only by `retry_without_summary`,
     /// which sets it for the duration of one re-run.

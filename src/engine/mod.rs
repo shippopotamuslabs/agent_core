@@ -249,6 +249,9 @@ impl AgentEngine {
         // - `universe`: consumed piecemeal as `schemas` +
         //   `active_tool_names` below (plus the effective config's tool
         //   fields above).
+        // - `compaction` (ENC-306 field): exported as its three
+        //   counter/flag values via the accessors; import rebuilds it
+        //   with `CompactionState::restore`.
         let InnerSession {
             session,
             config: _stored_config,
@@ -269,9 +272,7 @@ impl AgentEngine {
             tools_blocked_nudges_this_turn,
             universe,
             sidecar_builder,
-            compaction_passes_this_turn,
-            destructive_tiers_this_turn,
-            suppress_summary_tier,
+            compaction,
         } = &*g;
         SessionSnapshot {
             version: SNAPSHOT_VERSION,
@@ -297,9 +298,9 @@ impl AgentEngine {
             terminal_action: terminal_action.clone(),
             last_model_response_greedy_tool_names: last_model_response_greedy_tool_names.clone(),
             tools_blocked_nudges_this_turn: *tools_blocked_nudges_this_turn,
-            compaction_passes_this_turn: *compaction_passes_this_turn,
-            destructive_tiers_this_turn: *destructive_tiers_this_turn,
-            suppress_summary_tier: *suppress_summary_tier,
+            compaction_passes_this_turn: compaction.passes_this_turn(),
+            destructive_tiers_this_turn: compaction.destructive_tiers_this_turn(),
+            suppress_summary_tier: compaction.suppress_summary_tier(),
         }
     }
 
@@ -429,9 +430,11 @@ impl AgentEngine {
                 tools_blocked_nudges_this_turn,
                 universe,
                 sidecar_builder,
-                compaction_passes_this_turn,
-                destructive_tiers_this_turn,
-                suppress_summary_tier,
+                compaction: compaction::CompactionState::restore(
+                    compaction_passes_this_turn,
+                    destructive_tiers_this_turn,
+                    suppress_summary_tier,
+                ),
             })),
         })
     }
