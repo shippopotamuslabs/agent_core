@@ -102,7 +102,7 @@ pub fn ingest_model_response_envelopes(
                 error_json_for_model: envelope_failure_json(&failure, catalog),
                 visible_assistant_text: resolution.visible_assistant_text,
             },
-            native_tool_calls.to_vec(),
+            Vec::new(),
         );
     }
 
@@ -130,7 +130,7 @@ pub fn ingest_model_response_envelopes(
                 error_json_for_model: envelope_failure_json(failure, catalog),
                 visible_assistant_text: resolution.visible_assistant_text,
             },
-            native_tool_calls.to_vec(),
+            Vec::new(),
         );
     }
     let failure = ToolParseFailure {
@@ -143,6 +143,6 @@ pub fn ingest_model_response_envelopes(
             error_json_for_model: envelope_failure_json(&failure, catalog),
             visible_assistant_text: resolution.visible_assistant_text,
         },
-        native_tool_calls.to_vec(),
+        Vec::new(),
     )
 }

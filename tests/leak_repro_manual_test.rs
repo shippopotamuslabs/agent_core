@@ -5,9 +5,7 @@ mod support;
 
 use agent_core::engine::resolve_model_turn_text;
 use agent_core::tool_call_format::ToolCallFormat;
-use agent_core::tool_stream_gate::{
-    first_strong_tool_marker_start, normalize_spaced_dsml, ToolStreamGate,
-};
+use agent_core::tool_stream_gate::{declared_marker_start, normalize_spaced_dsml, ToolStreamGate};
 use support::enclave_test_semantics::parse_enclave_tool_calls;
 use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semantics};
 
@@ -25,7 +23,12 @@ fn double_pipe_dsml_is_normalized_recovered_and_hidden_from_stream() {
             "</|DSML|invoke></|DSML|tool_calls>"
         )
     );
-    assert!(first_strong_tool_marker_start(&normalize_spaced_dsml(LEAKED_DOUBLE_PIPE)).is_some());
+    assert!(declared_marker_start(
+        &normalize_spaced_dsml(LEAKED_DOUBLE_PIPE),
+        0,
+        ToolCallFormat::Dsml
+    )
+    .is_some());
 
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::Dsml);
     let emitted = gate.push(LEAKED_DOUBLE_PIPE).emitted_prefix;

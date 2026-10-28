@@ -156,7 +156,7 @@ fn th_sg_09_confirmed_tool_call_never_emitted() {
 }
 
 #[test]
-fn th_sg_10_litert_call_syntax_confirmed_and_hidden() {
+fn th_sg_10_call_brace_syntax_confirmed_and_hidden() {
     let raw = r#"call:append_blocks{artifactId:"art-1",blocks:[]}"#;
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let emitted = push_chunked(&mut gate, raw, 7);
@@ -229,7 +229,7 @@ fn th_sg_15_plain_text_flushes_during_stream() {
 }
 
 #[test]
-fn th_sg_16_mistral_tool_calls_bracket_holdback() {
+fn th_sg_16_bracket_array_holdback() {
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::BracketArray);
     let emitted = visible_after_push(&mut gate, "See [TOOL_CALLS][");
     assert_eq!(emitted, "See ", "TH-SG-16 emitted");

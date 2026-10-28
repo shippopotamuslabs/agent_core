@@ -108,6 +108,13 @@ pub fn result_json_looks_soft_failure(json: &str) -> bool {
     is_soft_failure_result_json(json)
 }
 
+/// Markerless-failure contract (ENC-300 m7, loud by design): only the
+/// declared `tool_call_format`'s parser runs on `raw`. Markerless text (no
+/// markers of the declared shape) is NOT silent success — it fails with a
+/// `MalformedEnvelope` failure naming the declared shape, and text in
+/// another shape's syntax fails the same way (no cross-shape fallback).
+/// [`ToolCallFormat::Structured`](crate::tool_call_format::ToolCallFormat::Structured)
+/// never mines text: it always returns an empty batch.
 #[uniffi::export]
 pub fn parse_tool_calls(
     raw: &str,

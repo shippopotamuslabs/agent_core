@@ -134,6 +134,14 @@ pub struct AgentConfig {
     /// Host-declared tool-call format (ENC-300 D2): `Structured` (native
     /// calls only; body text never mined) by default, or one envelope shape
     /// whose parser alone runs on model text. NOT inside `tool_semantics`.
+    ///
+    /// Host migration note (ENC-300, intended per ratified design — not a
+    /// defect): persisted configs that predate this field deserialize to
+    /// `Structured` (serde default) and therefore stop mining body text for
+    /// tool calls; hosts that relied on text envelopes must now declare
+    /// their shape explicitly. The FFI surface is breaking on purpose (new
+    /// field/params). Full migration note lives in the PR body + ENC-294
+    /// comment.
     #[serde(default)]
     pub tool_call_format: ToolCallFormat,
     /// Validated policy catalog derived from [`tool_semantics`](Self::tool_semantics)

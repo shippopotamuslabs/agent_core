@@ -917,6 +917,11 @@ impl From<LongLoopPolicy> for FfiLongLoopPolicy {
 /// Host-declared tool-call format (ENC-300 D2): the FFI mirror of
 /// [`crate::tool_call_format::ToolCallFormat`]. NOT inside `tool_semantics`;
 /// the provider string is untouched.
+///
+/// Host migration note (ENC-300, intended per ratified design — not a
+/// defect): hosts that never set this field get `Structured` and stop mining
+/// body text; text-envelope hosts must declare their shape. The FFI surface
+/// is breaking on purpose (new field/params).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiToolCallFormat {
     Structured,
@@ -974,6 +979,8 @@ pub struct FfiAgentConfig {
     pub tool_specs: Vec<super::semantics::FfiToolSpec>,
     /// Host-declared tool-call format (ENC-300 D2): `Structured` (default)
     /// mines no text; each envelope shape parses only its own markers.
+    /// Migration: unset means `Structured` (text mining stops); declare the
+    /// shape to keep parsing text envelopes.
     pub tool_call_format: FfiToolCallFormat,
     pub tool_result_budget_cloud_bytes: u64,
     pub tool_result_budget_relaxed_bytes: u64,

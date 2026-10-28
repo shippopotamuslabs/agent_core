@@ -242,7 +242,7 @@ fn cl_tr_08_spaced_dsml_prefix_offset_does_not_panic_on_multibyte_boundary() {
 }
 
 #[test]
-fn cl_tr_09_litert_call_syntax_recovers_and_is_hidden() {
+fn cl_tr_09_call_brace_syntax_recovers_and_is_hidden() {
     let buffered = r#"Before call:web_search{query="good news"}"#;
     let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
 
@@ -256,7 +256,7 @@ fn cl_tr_09_litert_call_syntax_recovers_and_is_hidden() {
 }
 
 #[test]
-fn cl_tr_10_litert_quote_sentinels_recover() {
+fn cl_tr_10_call_brace_quote_sentinels_recover() {
     let buffered = r#"call:web_search{query: <|"|>kotlin news<|"|>}"#;
     let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
 
@@ -299,10 +299,10 @@ fn cl_tr_11_tool_call_truncated_at_eos_recovers() {
     );
 }
 
-/// CL-TR-12: call: LiteRT envelope truncated at EOS (no closing brace) is
+/// CL-TR-12: call-brace envelope truncated at EOS (no closing brace) is
 /// recovered into a valid tool call.
 #[test]
-fn cl_tr_12_litert_call_truncated_at_eos_recovers() {
+fn cl_tr_12_call_brace_truncated_at_eos_recovers() {
     // Truncated mid-argument — no closing brace.
     let buffered = r#"call:tool_discovery_tool{capability="whats good"#;
     let resolution = resolve_enclave(buffered, &[], true, ToolCallFormat::CallBrace);
@@ -357,7 +357,7 @@ fn cl_tr_13_tool_call_unclosed_not_at_eos_does_not_recover() {
 
 #[test]
 fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
-    use agent_core::tool_stream_gate::{declared_marker_start, first_strong_tool_marker_start};
+    use agent_core::tool_stream_gate::declared_marker_start;
     use std::fs;
 
     let markers_path = concat!(
@@ -370,7 +370,7 @@ fn cl_md_03_weak_json_regex_absent_from_stream_gate() {
         "CL-MD-03 weak JSON regex must not be in stream gate markers"
     );
     assert_eq!(
-        first_strong_tool_marker_start(r#"Tips: {"name":"x"}"#),
+        declared_marker_start(r#"Tips: {"name":"x"}"#, 0, ToolCallFormat::XmlToolCall),
         None,
         "CL-MD-03 weak JSON prose must not match strong marker"
     );

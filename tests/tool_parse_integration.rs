@@ -376,7 +376,7 @@ fn r_17_markdown_fenced_tool_calls() {
 }
 
 #[test]
-fn r_18_mistral_tool_calls_single_element() {
+fn r_18_bracket_array_single_element() {
     let raw =
         r#"[TOOL_CALLS] [{"name": "web_search", "arguments": {"query": "kotlin coroutines"}}]"#;
     let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
@@ -389,7 +389,7 @@ fn r_18_mistral_tool_calls_single_element() {
 }
 
 #[test]
-fn r_19_mistral_tool_calls_multi_element() {
+fn r_19_bracket_array_multi_element() {
     let raw = r#"[TOOL_CALLS] [{"name":"web_search","arguments":{"query":"news"}},{"name":"search_chat_history","arguments":{"query":"old chats"}}]"#;
     let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.successes.len(), 2);
@@ -400,7 +400,7 @@ fn r_19_mistral_tool_calls_multi_element() {
 }
 
 #[test]
-fn r_20_mistral_sentinel_without_json_array() {
+fn r_20_bracket_array_sentinel_without_json_array() {
     let raw = "[TOOL_CALLS] not_json_here";
     let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.failures.len(), 1);
@@ -411,7 +411,7 @@ fn r_20_mistral_sentinel_without_json_array() {
 }
 
 #[test]
-fn r_21_mistral_with_visible_prefix() {
+fn r_21_bracket_array_with_visible_prefix() {
     let raw = "I will search now.\n[TOOL_CALLS] [{\"name\": \"web_search\", \"arguments\": {\"query\": \"android 15\"}}]";
     let batch = parse_tool_calls(raw, ToolCallFormat::BracketArray);
     assert_eq!(batch.successes.len(), 1);
@@ -448,7 +448,7 @@ fn r_23_tool_call_wrapping_json_array_two_elements() {
 }
 
 #[test]
-fn r_24_glm_arg_key_arg_value_form() {
+fn r_24_xml_tool_call_arg_key_arg_value_form() {
     let raw = r#"<tool_call> web_search <arg_key>query</arg_key> <arg_value>"weather in London"</arg_value> </tool_call>"#;
     let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
     assert_eq!(batch.successes.len(), 1);
@@ -970,7 +970,7 @@ fn frg45_duplicate_param_is_soft_failure_and_parse_continues() {
 #[test]
 fn frg45_truncated_tool_call_recovers_at_eos_with_repair_hint() {
     // Unclosed <tool_call> at end of output with no later open tag and no
-    // GLM markers recovers: the truncated payload parses and the batch
+    // arg-key markers recover: the truncated payload parses and the batch
     // records the recovery hint.
     let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"weather"#;
     let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);
@@ -984,8 +984,8 @@ fn frg45_truncated_tool_call_recovers_at_eos_with_repair_hint() {
 }
 
 #[test]
-fn frg45_truncated_glm_never_takes_recovery_path() {
-    // GLM form (<arg_key>) without a closing tag is a hard failure even at
+fn frg45_truncated_arg_key_value_never_takes_recovery_path() {
+    // Arg-key/arg-value form (<arg_key>) without a closing tag is a hard failure even at
     // end of output: it must NOT recover.
     let raw = r#"<tool_call> web_search <arg_key>query</arg_key> <arg_value>"weather"#;
     let batch = parse_tool_calls(raw, ToolCallFormat::XmlToolCall);

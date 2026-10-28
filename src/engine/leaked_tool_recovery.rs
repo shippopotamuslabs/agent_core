@@ -79,7 +79,13 @@ fn resolve_envelope(
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
 ) -> ModelTurnTextResolution {
-    let normalized = normalize_spaced_dsml(buffered_text);
+    // ENC-300 m5: spaced-DSML normalization runs only for Dsml-declared
+    // turns; every other shape scans its raw text untouched.
+    let normalized = if format == ToolCallFormat::Dsml {
+        normalize_spaced_dsml(buffered_text)
+    } else {
+        buffered_text.to_string()
+    };
     let declared_start = declared_marker_start(&normalized, 0, format);
     let other_start = if declared_start.is_none() {
         other_format_marker_start(&normalized, format)

@@ -102,16 +102,6 @@ pub enum HoldResolution {
     Disproved,
 }
 
-/// Strong sentinels only — used for turn-end visible-text truncation.
-pub fn first_strong_tool_marker_start(text: &str) -> Option<usize> {
-    earliest_confirmed_marker_start(text, 0)
-}
-
-/// Earliest confirmed (strong) marker at or after `search_from`.
-pub fn earliest_confirmed_marker_start(text: &str, search_from: usize) -> Option<usize> {
-    earliest_marker_start(text, search_from, |_| true)
-}
-
 /// Earliest strong marker of the DECLARED envelope format at or after
 /// `search_from` (ENC-300 D4 shared marker fn). [`ToolCallFormat::Structured`]
 /// has no markers: always `None`.
@@ -123,7 +113,12 @@ pub fn declared_marker_start(
     if format.is_structured() {
         return None;
     }
-    earliest_marker_start(text, search_from, |candidate| candidate == format)
+    earliest_marker_start(
+        text,
+        search_from,
+        |candidate| candidate == format,
+        format == ToolCallFormat::Dsml,
+    )
 }
 
 /// Earliest strong marker of any envelope format OTHER than `declared`
@@ -133,22 +128,31 @@ pub fn other_format_marker_start(text: &str, declared: ToolCallFormat) -> Option
     if declared.is_structured() {
         return None;
     }
-    earliest_marker_start(text, 0, |candidate| candidate != declared)
+    earliest_marker_start(
+        text,
+        0,
+        |candidate| candidate != declared,
+        declared != ToolCallFormat::Dsml,
+    )
 }
 
-/// Core strong-marker scan filtered by `allow`: the union behavior is
-/// `allow = |_| true`; declared-format callers pass an equality filter.
+/// Core strong-marker scan filtered by `allow`: declared-format callers
+/// pass an equality filter. Spaced-DSML normalization runs only when
+/// `normalize_spaced` is set (ENC-300 m5) — callers set it exactly when the
+/// declared format is [`ToolCallFormat::Dsml`], so other shapes never pay
+/// for (or match through) the DSML-space collapse.
 fn earliest_marker_start(
     text: &str,
     search_from: usize,
     allow: impl Fn(ToolCallFormat) -> bool,
+    normalize_spaced: bool,
 ) -> Option<usize> {
     if search_from >= text.len() {
         return None;
     }
     let search_from = super::gate_state::char_boundary_truncate(text, search_from);
     let slice = &text[search_from..];
-    let normalized = normalize_spaced_dsml(slice);
+    let normalized = normalize_spaced.then(|| normalize_spaced_dsml(slice));
     let mut best: Option<usize> = None;
     for (format, regex) in STRONG_TOOL_MARKERS.iter() {
         if !allow(*format) {
@@ -156,9 +160,12 @@ fn earliest_marker_start(
         }
         if let Some(found) = regex.find(slice) {
             consider_marker_start(text, search_from + found.start(), &mut best);
-        } else if let Some(found) = regex.find(normalized.as_str()) {
-            if let Some(orig_off) = original_offset_for_normalized_offset(slice, found.start()) {
-                consider_marker_start(text, search_from + orig_off, &mut best);
+        } else if let Some(normalized) = &normalized {
+            if let Some(found) = regex.find(normalized.as_str()) {
+                if let Some(orig_off) = original_offset_for_normalized_offset(slice, found.start())
+                {
+                    consider_marker_start(text, search_from + orig_off, &mut best);
+                }
             }
         }
     }
@@ -199,18 +206,6 @@ pub(crate) fn original_offset_for_normalized_offset(
     }
 }
 
-/// Strong + partial sentinels — legacy helper for tests and external callers.
-pub fn first_stream_holdback_marker_start(text: &str) -> Option<usize> {
-    earliest_tentative_trigger(text, 0)
-        .map(|(start, _)| start)
-        .or_else(|| earliest_confirmed_marker_start(text, 0))
-}
-
-/// All stream-gate markers (strong + partial).
-pub fn first_tool_marker_start(text: &str) -> Option<usize> {
-    first_stream_holdback_marker_start(text)
-}
-
 /// Owning declared format of a tentative-hold kind (ENC-300 D5).
 /// `None` for [`TentativeKind::AngleBracket`], which is shared by every
 /// `<`-starting shape (Dsml, XmlToolCall, Cdata).
@@ -244,17 +239,10 @@ fn partial_kind(name: &str) -> TentativeKind {
     }
 }
 
-/// Earliest tentative trigger at or after `search_from`.
-pub fn earliest_tentative_trigger(
-    text: &str,
-    search_from: usize,
-) -> Option<(usize, TentativeKind)> {
-    earliest_tentative_trigger_inner(text, search_from, |_| true, AngleScope::Union)
-}
-
 /// Earliest tentative trigger of the DECLARED format's set at or after
 /// `search_from` (ENC-300 D5). [`ToolCallFormat::Structured`] never holds:
-/// always `None`.
+/// always `None`. The ambiguous-angle-bracket scan uses the declared
+/// format's prefixes (none for non-`<` shapes, which never hold on `<`).
 pub fn earliest_tentative_trigger_for(
     text: &str,
     search_from: usize,
@@ -263,28 +251,13 @@ pub fn earliest_tentative_trigger_for(
     if format.is_structured() {
         return None;
     }
-    earliest_tentative_trigger_inner(
-        text,
-        search_from,
-        |kind| tentative_kind_format(kind).map_or(true, |owner| owner == format),
-        AngleScope::Declared(format),
-    )
-}
-
-/// Which ambiguous-angle-bracket scan the tentative trigger uses: the legacy
-/// union prefixes, or the declared format's prefixes (none for non-`<`
-/// shapes, which never hold on `<`).
-#[derive(Debug, Clone, Copy)]
-enum AngleScope {
-    Union,
-    Declared(ToolCallFormat),
+    earliest_tentative_trigger_inner(text, search_from, format)
 }
 
 fn earliest_tentative_trigger_inner(
     text: &str,
     search_from: usize,
-    allow_kind: impl Fn(TentativeKind) -> bool,
-    angle_scope: AngleScope,
+    format: ToolCallFormat,
 ) -> Option<(usize, TentativeKind)> {
     if search_from >= text.len() {
         return None;
@@ -294,6 +267,7 @@ fn earliest_tentative_trigger_inner(
     let search_from = super::gate_state::char_boundary_truncate(text, search_from);
     let slice = &text[search_from..];
     let mut best: Option<(usize, TentativeKind)> = None;
+    let allow_kind = |kind| tentative_kind_format(kind).map_or(true, |owner| owner == format);
 
     let object_start = text.len() - text.trim_start().len();
     if object_start >= search_from
@@ -316,10 +290,7 @@ fn earliest_tentative_trigger_inner(
         }
     }
 
-    let ambiguous_angle = match angle_scope {
-        AngleScope::Union => last_ambiguous_angle_bracket(text),
-        AngleScope::Declared(format) => last_ambiguous_angle_bracket_for(text, format),
-    };
+    let ambiguous_angle = last_ambiguous_angle_bracket_for(text, format);
     let better_angle = ambiguous_angle
         .filter(|angle| *angle >= search_from)
         .filter(|angle| best.map(|(b, _)| *angle < b).unwrap_or(true));
@@ -328,28 +299,6 @@ fn earliest_tentative_trigger_inner(
     }
 
     best
-}
-
-/// Resolve whether a tentative hold region is confirmed tool syntax, disproved prose, or pending.
-pub fn resolve_tentative_hold(suffix: &str, kind: TentativeKind) -> HoldResolution {
-    if earliest_confirmed_marker_start(suffix, 0).is_some() {
-        return HoldResolution::Confirmed;
-    }
-
-    match kind {
-        TentativeKind::CallColon => resolve_call_colon(suffix),
-        TentativeKind::BareJsonTool => resolve_bare_json_tool(suffix),
-        TentativeKind::AngleBracket => resolve_angle_bracket(suffix),
-        TentativeKind::ToolCallPartial => resolve_tool_partial(suffix),
-        TentativeKind::DsmlPartial => resolve_dsml_partial(suffix),
-        TentativeKind::ToolCallsBracket => {
-            if suffix.contains("[TOOL_CALLS]") {
-                HoldResolution::Confirmed
-            } else {
-                HoldResolution::StillTentative
-            }
-        }
-    }
 }
 
 /// Resolve a tentative hold against the DECLARED format's marker set only
@@ -438,16 +387,6 @@ fn resolve_call_colon(suffix: &str) -> HoldResolution {
     HoldResolution::StillTentative
 }
 
-fn resolve_angle_bracket(suffix: &str) -> HoldResolution {
-    if !suffix.starts_with('<') {
-        return HoldResolution::Disproved;
-    }
-    if !might_be_tool_marker_prefix(suffix) {
-        return HoldResolution::Disproved;
-    }
-    HoldResolution::StillTentative
-}
-
 fn resolve_angle_bracket_for(suffix: &str, format: ToolCallFormat) -> HoldResolution {
     if !suffix.starts_with('<') {
         return HoldResolution::Disproved;
@@ -466,9 +405,11 @@ fn resolve_tool_partial(suffix: &str) -> HoldResolution {
 }
 
 fn resolve_dsml_partial(suffix: &str) -> HoldResolution {
+    // Declared-only confirmation (ENC-300 J1): a Dsml hold is confirmed by
+    // Dsml markers alone — never by another shape's text (e.g. `<tool_call>`).
     let normalized = normalize_spaced_dsml(suffix);
-    if earliest_confirmed_marker_start(suffix, 0).is_some()
-        || earliest_confirmed_marker_start(&normalized, 0).is_some()
+    if declared_marker_start(suffix, 0, ToolCallFormat::Dsml).is_some()
+        || declared_marker_start(&normalized, 0, ToolCallFormat::Dsml).is_some()
     {
         return HoldResolution::Confirmed;
     }
@@ -493,24 +434,9 @@ pub fn safe_emit_end(buffered: &str, format: ToolCallFormat) -> usize {
     result.emit_exclusive_end
 }
 
-pub fn last_ambiguous_angle_bracket(text: &str) -> Option<usize> {
-    let search_start = text.len().saturating_sub(TOOL_MARKER_HOLDBACK_CHARS);
-    for (byte_index, _) in text.char_indices().rev() {
-        if byte_index < search_start {
-            break;
-        }
-        if text.as_bytes().get(byte_index) == Some(&b'<')
-            && might_be_tool_marker_prefix(&text[byte_index..])
-        {
-            return Some(byte_index);
-        }
-    }
-    None
-}
-
-/// Declared-format version of [`last_ambiguous_angle_bracket`] (ENC-300 D5):
-/// `None` for shapes whose markers never start with `<` — other-format text
-/// streams through unheld.
+/// Latest `<` in the holdback tail that may open the DECLARED format's
+/// marker (ENC-300 D5): `None` for shapes whose markers never start with
+/// `<` — other-format text streams through unheld.
 pub fn last_ambiguous_angle_bracket_for(text: &str, format: ToolCallFormat) -> Option<usize> {
     if !is_angle_bracket_format(format) {
         return None;
@@ -529,9 +455,8 @@ pub fn last_ambiguous_angle_bracket_for(text: &str, format: ToolCallFormat) -> O
     None
 }
 
-/// Declared-format version of [`might_be_tool_marker_prefix`] (ENC-300 D5):
-/// the tail is checked against the declared shape's opening prefix only, so
-/// other-format text is never treated as a partial marker.
+/// The tail is checked against the declared shape's opening prefix only
+/// (ENC-300 D5), so other-format text is never treated as a partial marker.
 pub fn might_be_tool_marker_prefix_for(suffix: &str, format: ToolCallFormat) -> bool {
     if !suffix.starts_with('<') {
         return false;
@@ -560,27 +485,6 @@ pub fn might_be_tool_marker_prefix_for(suffix: &str, format: ToolCallFormat) -> 
     })
 }
 
-pub fn might_be_tool_marker_prefix(suffix: &str) -> bool {
-    if !suffix.starts_with('<') {
-        return false;
-    }
-    let tail = &suffix[1..];
-    if tail.is_empty() {
-        return true;
-    }
-    if tail
-        .chars()
-        .all(|c| c == '|' || c == '｜' || c.is_whitespace())
-    {
-        return true;
-    }
-    const PREFIXES: &[&str] = &["DSML", "tool_call", "tool_calls", "![CDATA[<tool", "tool>"];
-    PREFIXES.iter().any(|prefix| {
-        prefix.len() >= tail.len() && prefix[..tail.len()].eq_ignore_ascii_case(tail)
-            || tail.len() >= prefix.len() && tail[..prefix.len()].eq_ignore_ascii_case(prefix)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,7 +506,11 @@ mod tests {
     #[test]
     fn call_colon_prose_disproved() {
         assert_eq!(
-            resolve_tentative_hold("call: the API", TentativeKind::CallColon),
+            resolve_tentative_hold_for(
+                "call: the API",
+                TentativeKind::CallColon,
+                ToolCallFormat::CallBrace
+            ),
             HoldResolution::Disproved
         );
     }
@@ -610,8 +518,34 @@ mod tests {
     #[test]
     fn call_colon_ident_without_brace_stays_tentative() {
         assert_eq!(
-            resolve_tentative_hold("call: append_blocks", TentativeKind::CallColon),
+            resolve_tentative_hold_for(
+                "call: append_blocks",
+                TentativeKind::CallColon,
+                ToolCallFormat::CallBrace
+            ),
             HoldResolution::StillTentative
+        );
+    }
+
+    #[test]
+    fn dsml_partial_confirms_only_against_dsml_markers() {
+        // ENC-300 J1: another shape's confirmed text must not confirm a
+        // Dsml hold.
+        assert_eq!(
+            resolve_tentative_hold_for(
+                "<tool_call>",
+                TentativeKind::DsmlPartial,
+                ToolCallFormat::Dsml
+            ),
+            HoldResolution::StillTentative
+        );
+        assert_eq!(
+            resolve_tentative_hold_for(
+                "<|DSML|tool_calls>",
+                TentativeKind::DsmlPartial,
+                ToolCallFormat::Dsml
+            ),
+            HoldResolution::Confirmed
         );
     }
 }

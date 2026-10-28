@@ -174,7 +174,7 @@ fn sg_07_buffered_text_is_raw() {
 }
 
 #[test]
-fn sg_08_mistral_tool_calls_holdback() {
+fn sg_08_bracket_array_holdback() {
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::BracketArray);
     let push = gate.push("See [TOOL_CALLS][");
     assert_eq!(push.emitted_prefix, "See ", "SG-08 emitted_prefix");
@@ -183,7 +183,23 @@ fn sg_08_mistral_tool_calls_holdback() {
 }
 
 #[test]
-fn sg_09_litert_native_call_never_emitted() {
+fn sg_09b_bracket_array_gate_streams_xml_tool_call_text_unheld() {
+    // ENC-300 m6: a non-Structured gate never holds another shape's text —
+    // `<tool_call>` streams straight through a BracketArray gate.
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::BracketArray);
+    let raw = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
+    let emitted = push_chunked(&mut gate, raw, 7);
+    assert_eq!(emitted, raw, "SG-09b wrong-format text streams unheld");
+    let finish = gate.finish(false);
+    assert_eq!(finish.trailing_flush, "", "SG-09b trailing_flush");
+    assert!(
+        !finish.has_tool_marker,
+        "SG-09b no BracketArray marker at finish"
+    );
+}
+
+#[test]
+fn sg_09_call_brace_native_call_never_emitted() {
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let emitted = push_chunked(
         &mut gate,
@@ -366,7 +382,7 @@ fn callbrace_gate_streams_tool_call_unheld() {
 fn multibyte_char_at_holdback_tail_boundary_does_not_panic() {
     // Regression: the tail search window starts at len - TOOL_MARKER_HOLDBACK_CHARS,
     // raw byte arithmetic that can land inside a multi-byte char (e.g. an en dash).
-    // This used to panic in earliest_tentative_trigger's slice.
+    // This used to panic in earliest_tentative_trigger_for's slice.
     let mut gate = ToolStreamGate::new(true, ToolCallFormat::Structured);
     // 100 ASCII bytes, then a 3-byte en dash at bytes 100..103, then 62 ASCII bytes:
     // total 165 bytes, so the 64-byte tail window starts at byte 101 — inside the dash.

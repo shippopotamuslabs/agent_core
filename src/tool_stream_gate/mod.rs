@@ -9,12 +9,10 @@ use crate::tool_call_format::ToolCallFormat;
 pub use gate_state::{has_tool_marker_at_finish, native_tool_flush_end, ActiveHold, HoldKind};
 pub(crate) use markers::original_offset_for_normalized_offset;
 pub use markers::{
-    declared_marker_start, earliest_confirmed_marker_start, earliest_tentative_trigger,
-    earliest_tentative_trigger_for, first_stream_holdback_marker_start,
-    first_strong_tool_marker_start, first_tool_marker_start, last_ambiguous_angle_bracket_for,
-    might_be_tool_marker_prefix, might_be_tool_marker_prefix_for, normalize_spaced_dsml,
-    other_format_marker_start, resolve_tentative_hold, resolve_tentative_hold_for, safe_emit_end,
-    HoldResolution, TentativeKind, TOOL_MARKER_HOLDBACK_CHARS,
+    declared_marker_start, earliest_tentative_trigger_for, last_ambiguous_angle_bracket_for,
+    might_be_tool_marker_prefix_for, normalize_spaced_dsml, other_format_marker_start,
+    resolve_tentative_hold_for, safe_emit_end, HoldResolution, TentativeKind,
+    TOOL_MARKER_HOLDBACK_CHARS,
 };
 pub use result::{PushResult, StreamGateFinish};
 
