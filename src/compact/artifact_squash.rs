@@ -50,10 +50,6 @@ fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
         .any(|call| call.name == tool_name)
 }
 
-fn is_semantic_success_payload(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
-    semantic_success_total_blocks(content, semantics).is_some()
-}
-
 /// ENC-288: single ingress parse of a result payload; typed accessors only.
 /// Returns the total-blocks value (`0` when the field is present but not an
 /// integer, matching the previous `unwrap_or(0)` behavior).
@@ -106,7 +102,7 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
             || metadata_has_tool(msg, &semantics.append_tool_name);
     }
     if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
-        return is_semantic_success_payload(&msg.content, semantics);
+        return semantic_success_total_blocks(&msg.content, semantics).is_some();
     }
     false
 }
@@ -124,43 +120,85 @@ fn artifact_id_from_assistant_metadata(
     })
 }
 
+/// The assistant message immediately preceding `result_idx`, if it exists
+/// and is an assistant message. The one definition of "the message before
+/// the result" shared by the last-block and artifact-id lookups.
+fn prev_assistant_before(messages: &[AgentMessage], result_idx: usize) -> Option<&AgentMessage> {
+    if result_idx == 0 {
+        return None;
+    }
+    let prev = &messages[result_idx - 1];
+    (prev.role == AgentRole::Assistant).then_some(prev)
+}
+
+/// Last-block text comes from the assistant message immediately preceding the
+/// append result, when present.
+fn last_block_text_before(
+    messages: &[AgentMessage],
+    result_idx: usize,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<String> {
+    let prev = prev_assistant_before(messages, result_idx)?;
+    extract_last_block_text_with_field(&prev.content, &semantics.blocks_field)
+        .or_else(|| Some(prev.content.clone()).filter(|s| !s.is_empty()))
+}
+
+/// Newest assistant tool call at or after the result wins; otherwise the
+/// assistant message just before the result. Mirrors the pre-refactor
+/// reverse latch order.
+fn anchor_artifact_id(
+    messages: &[AgentMessage],
+    result_idx: usize,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<String> {
+    if let Some(id) = messages[result_idx..]
+        .iter()
+        .rev()
+        .filter(|msg| msg.role == AgentRole::Assistant)
+        .find_map(|msg| artifact_id_from_assistant_metadata(msg, semantics))
+    {
+        return Some(id);
+    }
+    let prev = prev_assistant_before(messages, result_idx)?;
+    artifact_id_from_assistant_metadata(prev, semantics)
+}
+
+/// The most recent successful append, resolved once: the result message
+/// index, its total-block count, and the preceding assistant's last-block
+/// text, if any. The one canonical definition of "most recent successful
+/// append" shared by the anchor extraction and the squash scan.
+///
+/// ENC-288 fusion, kept inside the FRG-43 structure: the reverse scan calls
+/// the single-parse `semantic_success_total_blocks` once per message, so the
+/// success check and the total-block extraction share one parse — the found
+/// payload is never parsed a second time.
+fn last_append_lookup(
+    messages: &[AgentMessage],
+    semantics: &ArtifactSquashSemantics,
+) -> Option<(usize, i64, Option<String>)> {
+    let (result_idx, total_blocks) = messages.iter().enumerate().rev().find_map(|(i, msg)| {
+        semantic_success_total_blocks(&msg.content, semantics).map(|t| (i, t))
+    })?;
+    Some((
+        result_idx,
+        total_blocks,
+        last_block_text_before(messages, result_idx, semantics),
+    ))
+}
+
 pub fn extract_artifact_anchor(
     messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
 ) -> Option<ArtifactStateAnchor> {
-    let mut artifact_id: Option<String> = None;
-    let mut total_blocks: i64 = 0;
-    let mut last_block_text: Option<String> = None;
-
-    for i in (0..messages.len()).rev() {
-        let msg = &messages[i];
-        if artifact_id.is_none() && msg.role == AgentRole::Assistant {
-            artifact_id = artifact_id_from_assistant_metadata(msg, semantics);
-        }
-        let Some(total) = semantic_success_total_blocks(&msg.content, semantics) else {
-            continue;
-        };
-        total_blocks = total;
-        if i > 0 {
-            let prev = &messages[i - 1];
-            if prev.role == AgentRole::Assistant {
-                if artifact_id.is_none() {
-                    artifact_id = artifact_id_from_assistant_metadata(prev, semantics);
-                }
-                last_block_text =
-                    extract_last_block_text_with_field(&prev.content, &semantics.blocks_field)
-                        .or_else(|| Some(prev.content.clone()).filter(|s| !s.is_empty()));
-            }
-        }
-        break;
-    }
+    let (result_idx, total_blocks, last_block_text) = last_append_lookup(messages, semantics)?;
 
     if total_blocks <= 0 {
         return None;
     }
 
     Some(ArtifactStateAnchor {
-        artifact_id: artifact_id.unwrap_or_else(|| "unknown-artifact".to_string()),
+        artifact_id: anchor_artifact_id(messages, result_idx, semantics)
+            .unwrap_or_else(|| "unknown-artifact".to_string()),
         total_blocks: total_blocks as u32,
         last_block_preview: last_block_text
             .map(|text| tail_chars(&text, semantics.snippet_max_chars))
@@ -193,55 +231,27 @@ impl CompactionTier for ArtifactSquashCompactionTier {
     }
 }
 
-fn apply_semantic_artifact_squash(
-    mut session: AgentSession,
-    config: &AgentConfig,
-    ctx: &CompactionContext,
-    tokens_before: u32,
+/// Reverse scan for the most recent successful append result: its total-block
+/// count plus the assistant's last-block text, if any.
+fn find_last_append_block(
+    messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
-) -> CompactionOutcome {
-    if !session
-        .messages
-        .iter()
-        .any(|msg| is_semantic_append_message(msg, semantics))
-    {
-        return CompactionOutcome::NotApplicable;
-    }
+) -> Option<(i64, Option<String>)> {
+    let (_, total_blocks, last_block_text) = last_append_lookup(messages, semantics)?;
+    Some((total_blocks, last_block_text))
+}
 
-    let mut append_found = false;
-    let mut total_blocks: i64 = 0;
-    let mut last_block_text: Option<String> = None;
-
-    for i in (0..session.messages.len()).rev() {
-        let msg = &session.messages[i];
-        let Some(total) = semantic_success_total_blocks(&msg.content, semantics) else {
-            continue;
-        };
-        if append_found {
-            continue;
-        }
-        append_found = true;
-        total_blocks = total;
-        if i > 0 {
-            let prev = &session.messages[i - 1];
-            if prev.role == AgentRole::Assistant {
-                last_block_text =
-                    extract_last_block_text_with_field(&prev.content, &semantics.blocks_field)
-                        .or_else(|| Some(prev.content.clone()).filter(|s| !s.is_empty()));
-            }
-        }
-    }
-
-    if !append_found {
-        return CompactionOutcome::NotApplicable;
-    }
-
-    let summary_text =
-        build_semantic_summary_line(semantics, total_blocks, last_block_text.as_deref());
-    let mut out: Vec<AgentMessage> = Vec::with_capacity(session.messages.len());
+/// Second pass: drop every append-loop message, emitting one summary line
+/// where each loop ends — including at the tail edge.
+fn squash_appends(
+    messages: Vec<AgentMessage>,
+    semantics: &ArtifactSquashSemantics,
+    summary_text: String,
+) -> Vec<AgentMessage> {
+    let mut out: Vec<AgentMessage> = Vec::with_capacity(messages.len());
     let mut in_append_loop = false;
 
-    for msg in session.messages.drain(..) {
+    for msg in messages {
         let is_append = is_semantic_append_message(&msg, semantics);
         if is_append {
             in_append_loop = true;
@@ -266,6 +276,38 @@ fn apply_semantic_artifact_squash(
             metadata: MessageMeta::new(),
         });
     }
+
+    out
+}
+
+fn apply_semantic_artifact_squash(
+    mut session: AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+    tokens_before: u32,
+    semantics: &ArtifactSquashSemantics,
+) -> CompactionOutcome {
+    if !session
+        .messages
+        .iter()
+        .any(|msg| is_semantic_append_message(msg, semantics))
+    {
+        return CompactionOutcome::NotApplicable;
+    }
+
+    let Some((total_blocks, last_block_text)) =
+        find_last_append_block(&session.messages, semantics)
+    else {
+        return CompactionOutcome::NotApplicable;
+    };
+
+    let summary_text =
+        build_semantic_summary_line(semantics, total_blocks, last_block_text.as_deref());
+    let out = squash_appends(
+        std::mem::take(&mut session.messages),
+        semantics,
+        summary_text,
+    );
 
     session.messages = out;
     let tokens_after = estimate_session_pressure(&session, config, ctx).total_tokens;
@@ -408,6 +450,58 @@ mod tests {
             ArtifactSquashCompactionTier.apply(session, &AgentConfig::default(), &ctx()),
             CompactionOutcome::NotApplicable
         ));
+    }
+
+    /// Characterization (FRG-43): when the append loop runs to the very end of
+    /// history, the summary must be appended at the tail (id prefix
+    /// `artifact-squash-tail-`), not dropped.
+    #[test]
+    fn squash_appends_summary_at_tail_when_loop_runs_to_end() {
+        let session = AgentSession::new(
+            vec![
+                AgentMessage {
+                    id: "m0".into(),
+                    role: AgentRole::User,
+                    content: "Start a report".into(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "m1".into(),
+                    role: AgentRole::Assistant,
+                    content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
+                        .into(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "m2".into(),
+                    role: AgentRole::Tool,
+                    content: r#"{"status":"success","totalBlocks":1}"#.into(),
+                    metadata: MessageMeta::new().with_tool_name("append_blocks"),
+                },
+            ],
+            serde_json::Value::Null,
+        );
+
+        let tier = ArtifactSquashCompactionTier;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            ..Default::default()
+        };
+        match tier.apply(session, &cfg, &ctx()) {
+            CompactionOutcome::Applied(s, _) => {
+                assert_eq!(s.messages.len(), 2);
+                assert_eq!(s.messages[0].content, "Start a report");
+                assert_eq!(s.messages[1].role, AgentRole::System);
+                assert!(s.messages[1].content.contains("1 blocks"));
+                assert!(s.messages[1].content.contains("Part 1"));
+                assert!(
+                    s.messages[1].id.starts_with("artifact-squash-tail-"),
+                    "tail summary id, got {}",
+                    s.messages[1].id
+                );
+            }
+            o => panic!("expected Applied, got {o:?}"),
+        }
     }
 
     #[test]

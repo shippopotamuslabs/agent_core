@@ -136,7 +136,7 @@ pub fn build_synthetic_budget_message(
         id: format!("tool-agent-budget-{turn_index}-{seq}"),
         role: AgentRole::Tool,
         content: build_budget_prose_content(meta),
-        metadata: MessageMeta::new().with_extra("agent_tool_budget", json!(true)),
+        metadata: MessageMeta::new().with_agent_tool_budget(),
     }
 }
 
@@ -160,12 +160,7 @@ pub fn inject_tool_budget_into_session(
     let seq = session
         .messages
         .iter()
-        .filter(|m| {
-            m.metadata
-                .extra("agent_tool_budget")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|m| m.metadata.agent_tool_budget())
         .count() as u32;
     let synthetic = build_synthetic_budget_message(turn_index, seq, meta);
     let message_id = synthetic.id.clone();

@@ -17,7 +17,11 @@ fn pending_work_reminder_filters_superseded_from_wire() {
                 id: "old-tool".into(),
                 role: AgentRole::Tool,
                 content: "superseded payload".into(),
-                metadata: json!({"superseded": true}),
+                metadata: {
+                    let mut meta = MessageMeta::new();
+                    meta.mark_superseded();
+                    meta
+                },
             },
         ],
         pending_config(),
