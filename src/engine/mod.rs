@@ -414,8 +414,7 @@ impl AgentEngine {
                         id: assistant_id,
                         role: AgentRole::Assistant,
                         content: user_fallback_text.clone(),
-                        metadata: MessageMeta::new()
-                            .with_tools_blocked_fallback(),
+                        metadata: MessageMeta::new().with_tools_blocked_fallback(),
                     });
                     if g.config.enable_state_ledger {
                         if let Some(message) = g.session.messages.last().cloned() {
@@ -438,8 +437,7 @@ impl AgentEngine {
                     id: assistant_id,
                     role: AgentRole::Assistant,
                     content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new()
-                        .with_envelope_ingest("tools_blocked"),
+                    metadata: MessageMeta::new().with_envelope_ingest("tools_blocked"),
                 });
                 if g.config.enable_state_ledger {
                     if let Some(message) = g.session.messages.last().cloned() {

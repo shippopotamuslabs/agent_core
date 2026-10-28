@@ -45,9 +45,7 @@ pub fn truncate_message_content_to_tokens_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::{
-        count_tokens, truncate_budget_per_result, PromptBudgetParts, TokenLedger,
-    };
+    use crate::budget::{count_tokens, truncate_budget_per_result, PromptBudgetParts, TokenLedger};
     use crate::message::{AgentMessage, AgentRole, MessageMeta};
     use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 

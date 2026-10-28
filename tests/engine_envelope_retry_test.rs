@@ -344,9 +344,10 @@ fn cl_tr_05_engine_allow_false_nudges_then_fallback() {
         "CL-TR-05 stripped assistant content before nudge"
     );
     assert!(
-        snapshot.messages.iter().any(|m| {
-            m.role == AgentRole::Tool && m.metadata.tools_blocked_nudge()
-        }),
+        snapshot
+            .messages
+            .iter()
+            .any(|m| { m.role == AgentRole::Tool && m.metadata.tools_blocked_nudge() }),
         "CL-TR-05 must insert tools_blocked nudge"
     );
 

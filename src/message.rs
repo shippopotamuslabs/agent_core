@@ -49,7 +49,9 @@ impl<'de> Deserialize<'de> for MessageMeta {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::from_value(serde_json::Value::deserialize(deserializer)?))
+        Ok(Self::from_value(serde_json::Value::deserialize(
+            deserializer,
+        )?))
     }
 }
 
@@ -203,15 +205,13 @@ impl MessageMeta {
                 }
                 _ => {}
             },
-            "raw_tool_calls" => {
-                match serde_json::from_value::<Vec<RawToolCall>>(value.clone()) {
-                    Ok(calls) => self.set_raw_tool_calls(calls),
-                    Err(_) if self.raw_tool_calls.is_empty() => {
-                        self.extra.insert(key, value);
-                    }
-                    Err(_) => {}
+            "raw_tool_calls" => match serde_json::from_value::<Vec<RawToolCall>>(value.clone()) {
+                Ok(calls) => self.set_raw_tool_calls(calls),
+                Err(_) if self.raw_tool_calls.is_empty() => {
+                    self.extra.insert(key, value);
                 }
-            }
+                Err(_) => {}
+            },
             "superseded" => match value {
                 serde_json::Value::Bool(b) => {
                     self.superseded = Some(b);
