@@ -3,7 +3,7 @@
 use agent_core::action::AgentAction;
 use agent_core::lalr_harness::{
     config_with_long_loop, default_long_loop_io, inject_semantic_fact_enclave,
-    test_engine, run_twenty_five_tool_turn_loop,
+    run_twenty_five_tool_turn_loop, test_engine,
 };
 use agent_core::long_loop_policy::LongLoopPolicy;
 use agent_core::session::SessionCapabilities;

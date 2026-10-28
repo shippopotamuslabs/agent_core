@@ -46,10 +46,7 @@ fn default_caps() -> SessionCapabilities {
     }
 }
 
-fn new_session(
-    eng: &AgentEngine,
-    config: AgentConfig,
-) -> agent_core::engine::SessionHandle {
+fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::SessionHandle {
     eng.create_session(
         vec![user_msg()],
         config,
