@@ -5,7 +5,7 @@ use agent_core::compact::{
 };
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::CompactionTrigger;
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::tool_semantics::ToolSemanticsConfig;
@@ -26,7 +26,7 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
             id: "u1".to_string(),
             role: AgentRole::User,
             content: "write".to_string(),
-            metadata: Value::Null,
+            metadata: MessageMeta::new(),
         }],
         AgentConfig {
             tool_semantics: semantics,
@@ -75,7 +75,7 @@ fn tool_msg(id: &str, name: &str, content: &str) -> AgentMessage {
         id: id.to_string(),
         role: AgentRole::Tool,
         content: content.to_string(),
-        metadata: json!({ "tool_name": name }),
+        metadata: MessageMeta::new().with_tool_name(name),
     }
 }
 
@@ -134,7 +134,7 @@ fn ts_018_deferred_custom_tool_rejection_names_configured_disclosure_tool() {
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == AgentRole::Tool && m.metadata["call_id"] == "call-write")
+        .find(|m| m.role == AgentRole::Tool && m.metadata.call_id() == Some("call-write"))
         .unwrap();
     let payload: Value = serde_json::from_str(&rejection.content).unwrap();
 
@@ -175,7 +175,7 @@ fn ts_019_missing_disclosure_semantics_fails_closed() {
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == AgentRole::Tool && m.metadata["call_id"] == "call-write")
+        .find(|m| m.role == AgentRole::Tool && m.metadata.call_id() == Some("call-write"))
         .unwrap();
     let payload: Value = serde_json::from_str(&rejection.content).unwrap();
 
@@ -225,13 +225,13 @@ fn ts_024_custom_append_result_skips_truncation() {
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == AgentRole::Tool && m.metadata["call_id"] == "call-write")
+        .find(|m| m.role == AgentRole::Tool && m.metadata.call_id() == Some("call-write"))
         .unwrap();
 
     assert_eq!(tool.content, result_json);
     let result: Value = serde_json::from_str(&tool.content).unwrap();
     assert_eq!(result["data"].as_str().unwrap().len(), 2048);
-    assert_eq!(tool.metadata["truncated"].as_bool(), Some(false));
+    assert!(!tool.metadata.truncated());
 }
 
 #[test]
@@ -275,11 +275,11 @@ fn ts_025_non_exempt_large_result_is_truncated() {
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == AgentRole::Tool && m.metadata["call_id"] == "call-lookup")
+        .find(|m| m.role == AgentRole::Tool && m.metadata.call_id() == Some("call-lookup"))
         .unwrap();
 
     assert!(tool.content.contains("truncated"));
-    assert_eq!(tool.metadata["truncated"].as_bool(), Some(true));
+    assert!(tool.metadata.truncated());
 }
 
 #[test]
@@ -308,7 +308,11 @@ fn ts_029_custom_artifact_squash_collapses_configured_append_loop() {
                 role: AgentRole::Assistant,
                 content: r#"call:write_doc {"docId":"doc-1","chunks":[{"text":"Part 1"}]}"#
                     .to_string(),
-                metadata: json!({"raw_tool_calls":[{"name":"write_doc"}]}),
+                metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                    id: None,
+                    name: "write_doc".into(),
+                    arguments_json: "{}".into(),
+                }]),
             },
             tool_msg("t1", "write_doc", r#"{"status":"success","chunkCount":1}"#),
             AgentMessage {
@@ -316,7 +320,11 @@ fn ts_029_custom_artifact_squash_collapses_configured_append_loop() {
                 role: AgentRole::Assistant,
                 content: r#"call:write_doc {"docId":"doc-1","chunks":[{"text":"Part 2"}]}"#
                     .to_string(),
-                metadata: json!({"raw_tool_calls":[{"name":"write_doc"}]}),
+                metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                    id: None,
+                    name: "write_doc".into(),
+                    arguments_json: "{}".into(),
+                }]),
             },
             tool_msg("t2", "write_doc", r#"{"status":"success","chunkCount":2}"#),
         ],
@@ -389,7 +397,11 @@ fn ts_034_hard_coded_artifact_squash_misses_custom_append_tool() {
                 role: AgentRole::Assistant,
                 content: r#"call:write_doc {"docId":"doc-1","chunks":[{"text":"Only block"}]}"#
                     .to_string(),
-                metadata: json!({"raw_tool_calls":[{"name":"write_doc"}]}),
+                metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                    id: None,
+                    name: "write_doc".into(),
+                    arguments_json: "{}".into(),
+                }]),
             },
             tool_msg("t1", "write_doc", r#"{"status":"success","chunkCount":1}"#),
         ],

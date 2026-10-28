@@ -11,7 +11,7 @@ use super::{estimate_session_pressure, CompactionContext, CompactionOutcome, Com
 use crate::budget::effective_micro_keep_recent;
 use crate::catalog::ToolCatalog;
 use crate::events::{AgentError, CompactionEvent, CompactionTier as TierEnum};
-use crate::message::{AgentMessage, AgentRole};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 use crate::tool_semantics::result_policy_for;
 use crate::transcript_revision::replace_message_content;
@@ -27,11 +27,8 @@ impl Default for MicroCompactionTier {
     }
 }
 
-fn tool_name_from_message(meta: &serde_json::Value) -> Option<String> {
-    meta.get("tool_name")
-        .or_else(|| meta.get("name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+fn tool_name_from_message(meta: &MessageMeta) -> Option<String> {
+    meta.tool_name().map(|s| s.to_string())
 }
 
 /// A micro-compaction candidate: the canonical tool name and the message index.
@@ -45,12 +42,7 @@ fn micro_candidate(
     if msg.role != AgentRole::Tool {
         return None;
     }
-    if msg
-        .metadata
-        .get("superseded")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if msg.metadata.is_superseded() {
         return None;
     }
     let raw_name = tool_name_from_message(&msg.metadata)?;
@@ -157,7 +149,6 @@ mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
     use crate::message::AgentMessage;
-    use serde_json::json;
 
     fn ctx(trigger: CompactionTrigger) -> CompactionContext {
         CompactionContext {
@@ -182,7 +173,7 @@ mod tests {
             id: id.into(),
             role: AgentRole::Tool,
             content: content.into(),
-            metadata: json!({ "tool_name": name }),
+            metadata: MessageMeta::new().with_tool_name(name),
         }
     }
 
@@ -220,17 +211,12 @@ mod tests {
                 assert!(s
                     .messages
                     .iter()
-                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
-                assert_eq!(s.messages[0].metadata["superseded"], json!(true));
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.rewrite_of().is_some()));
+                assert!(s.messages[0].metadata.is_superseded());
                 assert!(
                     s.messages
                         .iter()
-                        .filter(|m| {
-                            !m.metadata
-                                .get("superseded")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                        })
+                        .filter(|m| { !m.metadata.is_superseded() })
                         .filter(|m| m.content.contains(PLACEHOLDER))
                         .count()
                         == 1
@@ -326,17 +312,12 @@ mod tests {
                 // exactly 3 live placeholders remain.
                 for id in ["t1", "t2", "t3"] {
                     let original = s.messages.iter().find(|m| m.id == id).unwrap();
-                    assert_eq!(original.metadata["superseded"], json!(true));
+                    assert!(original.metadata.is_superseded());
                 }
                 assert_eq!(
                     s.messages
                         .iter()
-                        .filter(|m| {
-                            !m.metadata
-                                .get("superseded")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                        })
+                        .filter(|m| !m.metadata.is_superseded())
                         .filter(|m| m.content == PLACEHOLDER)
                         .count(),
                     3
@@ -369,7 +350,7 @@ mod tests {
                 assert!(s
                     .messages
                     .iter()
-                    .any(|m| m.content == PLACEHOLDER && m.metadata.get("rewrite_of").is_some()));
+                    .any(|m| m.content == PLACEHOLDER && m.metadata.rewrite_of().is_some()));
                 assert!(s.messages.iter().any(|m| m.content == "new"));
             }
             o => panic!("expected Applied, got {o:?}"),

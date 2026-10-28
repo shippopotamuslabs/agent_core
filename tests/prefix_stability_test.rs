@@ -7,7 +7,7 @@
 
 use agent_core::action::AgentAction;
 use agent_core::lalr_harness::default_long_loop_io;
-use agent_core::message::{AgentMessage, ToolResultRecord};
+use agent_core::message::{AgentMessage, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use agent_core::{AgentEngine, SessionHandle};
@@ -20,7 +20,7 @@ fn capture_call_model_requests(rounds: u32) -> Vec<ModelRequest> {
             id: "u0".into(),
             role: agent_core::message::AgentRole::User,
             content: "Objective: ship long-loop v1. Decision: keep transcript stable.".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cache_friendly_config(),
         SessionCapabilities {

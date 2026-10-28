@@ -4,7 +4,7 @@ use agent_core::action::AgentAction;
 use agent_core::compact::policy::build_compaction_plan;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{CompactionTier, CompactionTrigger};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::{resolve_context_policy, ContextPolicyTier};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 
@@ -78,7 +78,7 @@ fn s22_high_context_raises_thresholds() {
             id: "u0".into(),
             role: AgentRole::User,
             content: stable_prefix,
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg.clone(),
         caps.clone(),

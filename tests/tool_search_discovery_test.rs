@@ -5,7 +5,7 @@ mod support;
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
@@ -78,7 +78,7 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
             id: "u1".into(),
             role: AgentRole::User,
             content: "write".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         search_discovery_config(),
         capabilities(),
@@ -156,7 +156,7 @@ fn tsd_26_engine_rejects_append_blocks_before_search_activation() {
             message.role == AgentRole::Tool
                 && !message
                     .metadata
-                    .get("agent_tool_budget")
+                    .extra("agent_tool_budget")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         })
@@ -180,7 +180,7 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
             id: "u1".into(),
             role: AgentRole::User,
             content: "research".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         config,
         capabilities(),

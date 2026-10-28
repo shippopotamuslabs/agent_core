@@ -281,7 +281,7 @@ impl CompactionTier for FifoCompactionTier {
 mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
-    use crate::message::AgentMessage;
+    use crate::message::{AgentMessage, MessageMeta};
     use serde_json::Value::Null;
 
     fn ctx(cw: u32) -> CompactionContext {
@@ -307,7 +307,7 @@ mod tests {
             id: id.into(),
             role,
             content: content.into(),
-            metadata: Null,
+            metadata: MessageMeta::new(),
         }
     }
 

@@ -112,7 +112,7 @@ impl TokenCounter for TiktokenTokenCounter {
 mod tests {
     use super::*;
     use crate::budget::{PromptBudgetParts, TokenLedger};
-    use crate::message::{AgentMessage, AgentRole};
+    use crate::message::{AgentMessage, AgentRole, MessageMeta};
     use crate::policy::ContextPolicyTier;
     use crate::session::{AgentConfig, AgentSession};
     use crate::truncate::truncate_message_content_to_tokens;
@@ -167,7 +167,7 @@ mod tests {
                     id: format!("m{i}"),
                     role: AgentRole::User,
                     content: t.to_string(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 })
                 .collect(),
             serde_json::Value::Null,

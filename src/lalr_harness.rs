@@ -10,13 +10,12 @@ use crate::context_store::ContextStore;
 use crate::engine::{AgentEngine, SessionHandle, SessionIoParams};
 use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
 use crate::long_loop_policy::{effective_max_tool_turns, should_stop_tool_rounds, LongLoopPolicy};
-use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::ProviderContextSnapshot;
 use crate::state_ledger::StateLedger;
 use crate::transcript_revision::transcript_revision_of;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
-use serde_json::json;
 use std::sync::Arc;
 
 /// Outcome of a simulated multi-tool user turn (LALR-01, LALR-11, LALR-20).
@@ -53,7 +52,7 @@ fn tool_message(id: &str, name: &str, content: &str) -> AgentMessage {
         id: id.into(),
         role: AgentRole::Tool,
         content: content.into(),
-        metadata: json!({ "tool_name": name }),
+        metadata: MessageMeta::new().with_tool_name(name),
     }
 }
 
@@ -211,8 +210,8 @@ pub fn run_destructive_micro_preflight_pass(
         vec![tool_message("tool-msg-1", "web_search", &"x".repeat(500))]
     } else {
         for message in &mut session.messages {
-            if message.role == AgentRole::Tool && message.metadata.get("tool_name").is_none() {
-                message.metadata = json!({ "tool_name": "web_search" });
+            if message.role == AgentRole::Tool && message.metadata.tool_name().is_none() {
+                message.metadata.set_tool_name("web_search");
             }
         }
         session.messages.clone()
@@ -365,13 +364,13 @@ pub fn run_history_snapshot_only_prelude(session: &mut AgentSession) -> (u64, Ve
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: "hello".into(),
-                metadata: json!({}),
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: "world".into(),
-                metadata: json!({}),
+                metadata: MessageMeta::new(),
             },
         ],
         serde_json::Value::Null,
@@ -405,19 +404,19 @@ pub fn run_summary_compaction_with_objective(ledger: &mut StateLedger, session: 
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: "start".into(),
-                metadata: json!({}),
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: "working".into(),
-                metadata: json!({}),
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: "tail".into(),
-                metadata: json!({}),
+                metadata: MessageMeta::new(),
             },
         ],
         serde_json::Value::Null,

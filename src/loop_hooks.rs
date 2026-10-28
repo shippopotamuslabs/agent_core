@@ -1,6 +1,6 @@
 use crate::events::{AgentError, AgentEvent};
 use crate::loop_metrics::LoopMetrics;
-use crate::message::{AgentMessage, AgentRole};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::AgentSession;
 use crate::state_ledger::StateLedger;
 
@@ -55,7 +55,7 @@ impl AgentLoopHook for DoomLoopReminderHook {
                     id: "doom-loop-reminder".into(),
                     role: AgentRole::User,
                     content: "You are repeating the same tool pattern. Change approach before the next tool call.".into(),
-                    metadata: serde_json::Value::Null,
+                    metadata: MessageMeta::new(),
                 }],
                 emitted_events: vec![],
                 finish_blocked: false,
@@ -98,7 +98,7 @@ impl AgentLoopHook for PendingWorkReminderHook {
                 id: "pending-work-reminder".into(),
                 role: AgentRole::User,
                 content,
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             emitted_events: vec![],
             finish_blocked: true,

@@ -17,7 +17,7 @@ use agent_core::compact::{
 use agent_core::context_store::ContextStore;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
-use agent_core::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
@@ -46,7 +46,7 @@ fn user(id: &str, content: &str) -> AgentMessage {
         id: id.into(),
         role: AgentRole::User,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 fn asst(id: &str, content: &str) -> AgentMessage {
@@ -54,7 +54,7 @@ fn asst(id: &str, content: &str) -> AgentMessage {
         id: id.into(),
         role: AgentRole::Assistant,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 fn system(id: &str, content: &str) -> AgentMessage {
@@ -62,7 +62,7 @@ fn system(id: &str, content: &str) -> AgentMessage {
         id: id.into(),
         role: AgentRole::System,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 

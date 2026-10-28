@@ -9,7 +9,7 @@ use agent_core::action::AgentAction;
 use agent_core::budget::TokenLedger;
 use agent_core::context_store::ContextReferenceKind;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::state_ledger::StateLedger;
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
@@ -22,7 +22,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         id: "u0".into(),
         role: AgentRole::User,
         content: "Objective: ship context manager".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     };
     ledger.observe_user_message(&objective_msg);
     assert_eq!(

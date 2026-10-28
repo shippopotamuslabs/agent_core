@@ -2,7 +2,7 @@
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse};
 use serde_json::json;
@@ -17,7 +17,11 @@ fn pending_work_reminder_filters_superseded_from_wire() {
                 id: "old-tool".into(),
                 role: AgentRole::Tool,
                 content: "superseded payload".into(),
-                metadata: json!({"superseded": true}),
+                metadata: {
+                    let mut meta = MessageMeta::new();
+                    meta.mark_superseded();
+                    meta
+                },
             },
         ],
         pending_config(),
@@ -116,6 +120,6 @@ fn message(id: &str, role: AgentRole, content: &str) -> AgentMessage {
         id: id.into(),
         role,
         content: content.into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }

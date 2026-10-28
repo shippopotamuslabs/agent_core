@@ -3,7 +3,7 @@
 use agent_core::action::AgentAction;
 use agent_core::context_store::ContextReferenceKind;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
 
@@ -29,7 +29,7 @@ fn s13_tool_schemas_are_deferred_into_compact_tool_context_index() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,
@@ -95,7 +95,7 @@ fn s14_deferred_tool_schema_metadata_can_be_searched_and_loaded() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,
@@ -146,7 +146,7 @@ fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,
@@ -189,7 +189,7 @@ fn m6_tool_deferral_cannot_drop_retrievability_for_omitted_schemas() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         cfg,
         caps,

@@ -92,11 +92,7 @@ pub fn spill_tool_result_if_needed(
 }
 
 fn tool_message_reference_id(message: &AgentMessage) -> String {
-    let call_id = message
-        .metadata
-        .get("call_id")
-        .and_then(|value| value.as_str())
-        .unwrap_or(&message.id);
+    let call_id = message.metadata.call_id().unwrap_or(message.id.as_str());
     tool_output_reference_id(call_id)
 }
 
@@ -188,6 +184,7 @@ impl CompactionTier for ToolSpillCompactionTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageMeta;
     use crate::tool_semantics::ArtifactSquashSemantics;
 
     fn frg14_squash(append_tool_name: &str, total_field: &str) -> ArtifactSquashSemantics {
@@ -210,7 +207,7 @@ mod tests {
                 id: "t1".into(),
                 role: AgentRole::Tool,
                 content: content.into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             }],
             serde_json::Value::Null,
         )

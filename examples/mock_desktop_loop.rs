@@ -2,7 +2,7 @@
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
@@ -13,7 +13,7 @@ fn main() {
             id: "u1".into(),
             role: AgentRole::User,
             content: "hi".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         }],
         AgentConfig::default(),
         SessionCapabilities {

@@ -1,10 +1,9 @@
 //! Append-only transcript revision and compaction boundaries.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::events::{AgentError, CompactionTier, CompactionTrigger};
-use crate::message::AgentMessage;
+use crate::message::{AgentMessage, MessageMeta};
 use crate::session::AgentSession;
 
 fn next_rewrite_message_id() -> String {
@@ -66,17 +65,13 @@ pub fn assert_append_only_transcript_invariant(
         if prior_content == &message.content {
             continue;
         }
-        let superseded = message
-            .metadata
-            .get("superseded")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if superseded {
+        if message.metadata.is_superseded() {
             continue;
         }
-        let has_replacement = session.messages.iter().any(|m| {
-            m.metadata.get("rewrite_of").and_then(|v| v.as_str()) == Some(message.id.as_str())
-        });
+        let has_replacement = session
+            .messages
+            .iter()
+            .any(|m| m.metadata.rewrite_of() == Some(message.id.as_str()));
         if has_replacement {
             continue;
         }
@@ -110,22 +105,16 @@ pub fn replace_message_content(
         })?;
 
     if let Some(original) = session.messages.get_mut(position) {
-        if !original.metadata.is_object() {
-            original.metadata = json!({});
-        }
-        if let Some(obj) = original.metadata.as_object_mut() {
-            obj.insert("superseded".into(), json!(true));
-        }
+        original.metadata.mark_superseded();
     }
 
     let replacement = AgentMessage {
         id: next_rewrite_message_id(),
         role: session.messages[position].role.clone(),
         content: new_content,
-        metadata: json!({
-            "rewrite_of": message_id,
-            "compaction_tier": tier_label,
-        }),
+        metadata: MessageMeta::new()
+            .with_rewrite_of(message_id)
+            .with_compaction_tier(tier_label),
     };
 
     session.messages.insert(position + 1, replacement.clone());

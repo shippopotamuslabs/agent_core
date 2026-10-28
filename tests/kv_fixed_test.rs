@@ -3,7 +3,7 @@
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
 use agent_core::events::AgentEvent;
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 
 #[test]
@@ -23,19 +23,19 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
             id: "u0".into(),
             role: AgentRole::User,
             content: big.clone(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
         AgentMessage {
             id: "a0".into(),
             role: AgentRole::Assistant,
             content: big,
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
         AgentMessage {
             id: "u1".into(),
             role: AgentRole::User,
             content: "tail".into(),
-            metadata: serde_json::Value::Null,
+            metadata: MessageMeta::new(),
         },
     ];
 
@@ -91,31 +91,31 @@ fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
                 id: "u0".into(),
                 role: AgentRole::User,
                 content: big.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a0".into(),
                 role: AgentRole::Assistant,
                 content: big.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u1".into(),
                 role: AgentRole::User,
                 content: big.clone(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "a1".into(),
                 role: AgentRole::Assistant,
                 content: big,
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
             AgentMessage {
                 id: "u2".into(),
                 role: AgentRole::User,
                 content: "tail".into(),
-                metadata: serde_json::Value::Null,
+                metadata: MessageMeta::new(),
             },
         ],
         AgentConfig::default(),

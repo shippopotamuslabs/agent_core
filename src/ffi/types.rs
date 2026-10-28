@@ -3,7 +3,7 @@
 use crate::context_store::{ContextReference, ContextReferenceKind};
 use crate::long_loop_policy::LongLoopPolicy;
 use crate::manual_compact::{ManualCompactRequest, ManualCompactResult};
-use crate::message::{AgentMessage, AgentRole, RepairRecord, ToolCallRecord};
+use crate::message::{AgentMessage, AgentRole, MessageMeta, RepairRecord, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
 use crate::session::{AgentConfig, SessionCapabilities};
 use crate::sidecar_builder::ProviderContextSnapshot;
@@ -58,12 +58,11 @@ pub struct FfiAgentMessage {
 
 impl From<FfiAgentMessage> for AgentMessage {
     fn from(m: FfiAgentMessage) -> Self {
-        let metadata = serde_json::from_str(&m.metadata_json).unwrap_or(serde_json::Value::Null);
         Self {
             id: m.id,
             role: m.role.into(),
             content: m.content,
-            metadata,
+            metadata: MessageMeta::from_json_str(&m.metadata_json),
         }
     }
 }
@@ -74,7 +73,7 @@ impl From<AgentMessage> for FfiAgentMessage {
             id: m.id,
             role: m.role.into(),
             content: m.content,
-            metadata_json: serde_json::to_string(&m.metadata).unwrap_or_else(|_| "null".into()),
+            metadata_json: m.metadata.to_json_string(),
         }
     }
 }

@@ -12,7 +12,7 @@ use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semanti
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
-use agent_core::message::{AgentMessage, AgentRole, ToolResultRecord};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::Value;
@@ -33,7 +33,7 @@ fn user_msg() -> AgentMessage {
         id: "u1".into(),
         role: AgentRole::User,
         content: "hi".into(),
-        metadata: serde_json::Value::Null,
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -104,7 +104,7 @@ fn tool_msg_by_call_id<'a>(messages: &'a [AgentMessage], call_id: &str) -> &'a A
     messages
         .iter()
         .filter(|m| m.role == AgentRole::Tool)
-        .find(|m| m.metadata.get("call_id").and_then(|v| v.as_str()) == Some(call_id))
+        .find(|m| m.metadata.call_id() == Some(call_id))
         .unwrap_or_else(|| panic!("tool message for call_id {call_id}"))
 }
 
@@ -116,7 +116,7 @@ fn is_agent_tool_budget_message(message: &AgentMessage) -> bool {
     message.role == AgentRole::Tool
         && message
             .metadata
-            .get("agent_tool_budget")
+            .extra("agent_tool_budget")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
 }
@@ -233,8 +233,7 @@ fn tb_02_parallel_batch_injects_once_on_last_tool_message() {
         .filter(|m| {
             m.role == AgentRole::Tool
                 && m.metadata
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
+                    .call_id()
                     .is_some_and(|id| ["c1", "c2", "c3"].contains(&id))
         })
         .collect();

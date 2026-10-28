@@ -3,7 +3,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::guardrails::GuardrailState;
-use crate::message::{AgentMessage, AgentRole};
+use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +136,7 @@ pub fn build_synthetic_budget_message(
         id: format!("tool-agent-budget-{turn_index}-{seq}"),
         role: AgentRole::Tool,
         content: build_budget_prose_content(meta),
-        metadata: json!({ "agent_tool_budget": true }),
+        metadata: MessageMeta::new().with_agent_tool_budget(),
     }
 }
 
@@ -160,12 +160,7 @@ pub fn inject_tool_budget_into_session(
     let seq = session
         .messages
         .iter()
-        .filter(|m| {
-            m.metadata
-                .get("agent_tool_budget")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|m| m.metadata.agent_tool_budget())
         .count() as u32;
     let synthetic = build_synthetic_budget_message(turn_index, seq, meta);
     let message_id = synthetic.id.clone();
