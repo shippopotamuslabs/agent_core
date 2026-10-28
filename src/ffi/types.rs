@@ -279,9 +279,9 @@ impl FfiModelRequest {
         let mut tool_schemas = Vec::with_capacity(self.active_tools.len());
         // m3: dedupe first-seen on the canonical ToolName (post-m2
         // canonicalization), mirroring the activate + outbound-projection
-        // precedent.
-        let mut seen_tools: std::collections::HashSet<crate::tool_name::ToolName> =
-            std::collections::HashSet::new();
+        // precedent, through the crate's one first-seen implementation
+        // (`push_first_seen`, ENC-308 item 6).
+        let mut seen_tools: Vec<crate::tool_name::ToolName> = Vec::new();
         for raw_name in &self.active_tools {
             let name = crate::tool_name::ToolName::new(raw_name).map_err(|_| {
                 AgentException::Internal {
@@ -295,7 +295,7 @@ impl FfiModelRequest {
                 Some(spec) => spec.name.clone(),
                 None => name.clone(),
             };
-            if !seen_tools.insert(canonical.clone()) {
+            if !crate::tool_universe::push_first_seen(&mut seen_tools, canonical.clone()) {
                 continue;
             }
             let entry = universe.entry(&canonical);
@@ -319,10 +319,11 @@ impl FfiModelRequest {
         }
 
         let mut context_references = Vec::with_capacity(self.context_reference_ids.len());
-        // m3: dedupe first-seen on the ID.
-        let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // m3: dedupe first-seen on the ID, through `push_first_seen`
+        // (ENC-308 item 6).
+        let mut seen_ids: Vec<&str> = Vec::new();
         for id in &self.context_reference_ids {
-            if !seen_ids.insert(id.as_str()) {
+            if !crate::tool_universe::push_first_seen(&mut seen_ids, id.as_str()) {
                 continue;
             }
             match context_store.get(id) {
@@ -371,10 +372,10 @@ impl From<ModelRequest> for FfiModelRequest {
         // first-seen; context references project to their IDs in order.
         let mut active_tools: Vec<String> = Vec::new();
         for entry in m.tool_schemas.iter().chain(m.rendered_runtime_tools.iter()) {
-            let name = entry.name.as_str().to_string();
-            if !active_tools.contains(&name) {
-                active_tools.push(name);
-            }
+            crate::tool_universe::push_first_seen(
+                &mut active_tools,
+                entry.name.as_str().to_string(),
+            );
         }
         Self {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
