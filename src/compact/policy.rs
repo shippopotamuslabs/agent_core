@@ -112,14 +112,26 @@ pub fn apply_confirmation_gate(plan: &mut CompactionPlan, pressure: &Pressure) {
             .ordered_tiers
             .contains(&CompactionTier::HistorySnapshot);
     plan.ordered_tiers.retain(|tier| {
-        if tier_pressure_class(tier) != PressureClass::ConfirmationGated {
-            return true;
-        }
-        if *tier == CompactionTier::Fifo {
-            return hard_ceiling_exceeded || snapshot_first_satisfied;
-        }
-        hard_ceiling_exceeded
+        confirmation_gate_allows(tier, hard_ceiling_exceeded, snapshot_first_satisfied)
     });
+}
+
+/// The confirmation gate as ONE predicate over (tier, conditions) — the
+/// gate does not re-discriminate tiers by class and then by identity.
+/// [`tier_pressure_class`] remains the documentary classification; this
+/// predicate is the behavior.
+fn confirmation_gate_allows(
+    tier: &CompactionTier,
+    hard_ceiling_exceeded: bool,
+    snapshot_first_satisfied: bool,
+) -> bool {
+    match tier {
+        // Fifo may also ride an already-satisfied snapshot-first
+        // requirement; TextTruncate has no such proxy.
+        CompactionTier::Fifo => hard_ceiling_exceeded || snapshot_first_satisfied,
+        CompactionTier::TextTruncate => hard_ceiling_exceeded,
+        _ => true,
+    }
 }
 
 /// Returns the configured pressure threshold for a given trigger.
