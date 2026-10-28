@@ -196,20 +196,31 @@ fn enc305_into_core_happy_path_resolves_tools_and_context_ids() {
         "web_search".to_string(),
         // Catalog-only (spec, no entry).
         "generate_image".to_string(),
-        // Catalog alias of web_extract (spec resolves, no entry).
+        // Catalog alias: web_fetch is web_extract's alias (spec
+        // resolves, no entry) — m2 canonicalizes it to web_extract
+        // before lookup/stub, so the stub carries the canonical name.
+        "web_fetch".to_string(),
+        // websearch is web_search's alias: m2 canonicalizes it to
+        // web_search, and m3 dedupes it against the first entry.
         "websearch".to_string(),
         // Host-activated entry-less.
         "host_only_tool".to_string(),
     ];
-    // Request order, not store (BTree) order.
-    request.context_reference_ids = vec!["ctx-2".to_string(), "ctx-1".to_string()];
+    // Request order, not store (BTree) order; the repeated ctx-2 is
+    // deduped first-seen (m3).
+    request.context_reference_ids = vec![
+        "ctx-2".to_string(),
+        "ctx-1".to_string(),
+        "ctx-2".to_string(),
+    ];
 
     let core = request
         .into_core(&universe, &store)
         .expect("all references must resolve");
 
     // Tool schemas: full entry for the entry-bearing name, stub shape
-    // ({"name": ...} only) for every name without an entry.
+    // ({"name": ...} only, canonical name) for every name without an
+    // entry; the alias-to-web_search duplicate is gone.
     let names: Vec<&str> = core
         .tool_schemas
         .iter()
@@ -220,7 +231,7 @@ fn enc305_into_core_happy_path_resolves_tools_and_context_ids() {
         vec![
             "web_search",
             "generate_image",
-            "websearch",
+            "web_extract",
             "host_only_tool"
         ]
     );
@@ -304,6 +315,34 @@ fn enc305_into_core_malformed_metadata_json_is_agent_exception() {
             );
         }
         other => panic!("expected Internal, got {other:?}"),
+    }
+}
+
+#[test]
+fn enc305_into_core_non_object_metadata_json_is_agent_exception() {
+    // m1: valid JSON that is neither an object nor null ("42", "[1,2]")
+    // must fail the strict metadata path, not silently empty the meta.
+    let universe = fixture_universe();
+    let store = fixture_store();
+    for metadata_json in ["42", "[1,2]"] {
+        let mut request = base_request();
+        request.session_messages = vec![ffi_message("u1", metadata_json)];
+        let error = request
+            .into_core(&universe, &store)
+            .expect_err("non-object metadata_json must fail");
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("session_messages[0]"),
+                    "detail must name the message index: {detail}"
+                );
+                assert!(
+                    detail.contains("metadata_json"),
+                    "detail must name the metadata_json field: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 }
 

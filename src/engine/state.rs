@@ -79,7 +79,10 @@ pub enum EnginePhase {
 /// Tool-turn transient state, written by model-response intake and consumed by
 /// tool-results submission (ENC-286 slice 7). Grouped so the rest of
 /// `InnerSession` is the stable machine state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// No `Debug` derive (ENC-305 fix pass, m7): this embeds full pending
+/// model requests; `Clone` stays.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PendingToolTurn {
     pub(super) call_model: Option<ModelRequest>,
     pub(super) execute: Option<Vec<ToolCallRecord>>,

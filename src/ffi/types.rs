@@ -239,18 +239,29 @@ impl FfiModelRequest {
     /// Resolution rules:
     /// - `active_tools`: each name builds a `ToolName` (blank ->
     ///   `AgentException::Internal` naming the field, following the
-    ///   `tool_name_from_ffi` precedent in `ffi/semantics.rs`); a name
-    ///   resolves iff the universe carries an entry for it, or a catalog
-    ///   spec for it (canonical or alias), or it is in the universe's
-    ///   active names (host-activated entry-less tools are legitimate
-    ///   tracked state). Resolved schemas are the entry cloned, else
-    ///   `SchemaEntry::stub(name)`. A name resolving none of the three is
-    ///   an `AgentException::Internal` embedding the
+    ///   `tool_name_from_ffi` precedent in `ffi/semantics.rs`). When a
+    ///   catalog spec resolves for the name (canonical or alias), the
+    ///   name is canonicalized to `spec.name` FIRST (ENC-305 fix pass,
+    ///   m2) — entry lookup, stub identity, and active-membership all
+    ///   use the canonical name, because the canonical name is what
+    ///   the entry index and the active set hold; the original name is
+    ///   additionally accepted for active membership if it is itself
+    ///   in the active set (nothing more: host-activated aliases are
+    ///   not a thing). A name resolves iff the universe carries an
+    ///   entry for the canonical name, or a catalog spec for it, or
+    ///   either form is in the universe's active names (host-activated
+    ///   entry-less tools are legitimate tracked state). Resolved
+    ///   schemas are the entry cloned, else
+    ///   `SchemaEntry::stub(canonical_name)`. A name resolving none of
+    ///   these is an `AgentException::Internal` embedding the
     ///   `UnknownToolReference` debug form (the `create_session`
-    ///   precedent in `ffi/mod.rs`).
+    ///   precedent in `ffi/mod.rs`). The resolved list is deduped
+    ///   first-seen on the canonical `ToolName` (m3), so an alias and
+    ///   its canonical name in one request yield one schema.
     /// - `context_reference_ids`: each id must exist in `context_store`;
     ///   the store entry's reference populates `context_references`. A
-    ///   miss is `AgentException::ContextReferenceNotFound`.
+    ///   miss is `AgentException::ContextReferenceNotFound`. IDs are
+    ///   deduped first-seen (m3).
     /// - `session_messages`: converted strictly (see
     ///   [`agent_message_strict`]); malformed `metadata_json` is an
     ///   `AgentException::Internal` naming the message index.
@@ -266,20 +277,36 @@ impl FfiModelRequest {
         context_store: &crate::context_store::ContextStore,
     ) -> Result<crate::turn_io::ModelRequest, AgentException> {
         let mut tool_schemas = Vec::with_capacity(self.active_tools.len());
+        // m3: dedupe first-seen on the canonical ToolName (post-m2
+        // canonicalization), mirroring the activate + outbound-projection
+        // precedent.
+        let mut seen_tools: std::collections::HashSet<crate::tool_name::ToolName> =
+            std::collections::HashSet::new();
         for raw_name in &self.active_tools {
             let name = crate::tool_name::ToolName::new(raw_name).map_err(|_| {
                 AgentException::Internal {
                     detail: "active_tools[] must not be blank".to_string(),
                 }
             })?;
-            let entry = universe.entry(&name);
+            // m2: a resolving spec canonicalizes the name before entry
+            // lookup / stub / active-membership logic.
+            let spec = universe.spec(&name);
+            let canonical = match spec {
+                Some(spec) => spec.name.clone(),
+                None => name.clone(),
+            };
+            if !seen_tools.insert(canonical.clone()) {
+                continue;
+            }
+            let entry = universe.entry(&canonical);
             let resolves = entry.is_some()
-                || universe.spec(&name).is_some()
+                || spec.is_some()
+                || universe.active_names().contains(&canonical)
                 || universe.active_names().contains(&name);
             if !resolves {
                 let error = crate::tool_semantics::ToolSemanticsError::UnknownToolReference {
                     section: "request".to_string(),
-                    name: name.as_str().to_string(),
+                    name: canonical.as_str().to_string(),
                 };
                 return Err(AgentException::Internal {
                     detail: format!("invalid tool semantics: {error:?}"),
@@ -287,12 +314,17 @@ impl FfiModelRequest {
             }
             tool_schemas.push(match entry {
                 Some(entry) => entry.clone(),
-                None => crate::tool_schema::SchemaEntry::stub(&name),
+                None => crate::tool_schema::SchemaEntry::stub(&canonical),
             });
         }
 
         let mut context_references = Vec::with_capacity(self.context_reference_ids.len());
+        // m3: dedupe first-seen on the ID.
+        let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for id in &self.context_reference_ids {
+            if !seen_ids.insert(id.as_str()) {
+                continue;
+            }
             match context_store.get(id) {
                 Some(entry) => context_references.push(entry.reference.clone()),
                 None => {

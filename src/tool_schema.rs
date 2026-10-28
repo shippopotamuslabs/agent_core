@@ -151,22 +151,30 @@ pub struct ToolSchemaSet {
     raw_active: String,
 }
 
-/// Serde for [`ToolSchemaSet`] (ENC-305 snapshot support): only the
-/// entries cross the wire. `raw_active` is derived state and is NOT
-/// serialized; on deserialize it is rebuilt exactly as
-/// [`ToolSchemaSet::from_entries`] builds it (`raw_active =
-/// entries_json(entries)`), so a round-tripped set's `active_json()` is
-/// the canonical synthesized channel text — the same text the typed
-/// `from_entries` construction produces, not necessarily the raw text a
-/// `parse`d set carried.
+/// The ONE wire form for [`ToolSchemaSet`] serde (ENC-305, raw_active
+/// fidelity restored by the fix pass, M2), shared by both impls below:
+/// `{ "active": [SchemaEntry...], "raw_active": String }`.
+///
+/// `raw_active` crosses the wire verbatim: it is NOT derived state. A
+/// string-path (`parse`d) set's raw channel text — whitespace, key
+/// order, number lexemes — backs the pressure/budget paths via
+/// `active_json()` and feeds token counting, so replacing it with the
+/// canonical `entries_json` text on a round trip would drift
+/// compaction behavior across a restart. Deserialize therefore
+/// constructs `Self { active, raw_active }` DIRECTLY from the wire
+/// fields, never via [`ToolSchemaSet::from_entries`] (which synthesizes
+/// `raw_active` for sets that never had host text).
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    active: Vec<SchemaEntry>,
+    raw_active: String,
+}
+
 impl Serialize for ToolSchemaSet {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Wire<'a> {
-            active: &'a [SchemaEntry],
-        }
         Wire {
-            active: &self.active,
+            active: self.active.clone(),
+            raw_active: self.raw_active.clone(),
         }
         .serialize(serializer)
     }
@@ -174,12 +182,11 @@ impl Serialize for ToolSchemaSet {
 
 impl<'de> Deserialize<'de> for ToolSchemaSet {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Wire {
-            active: Vec<SchemaEntry>,
-        }
         let wire = Wire::deserialize(deserializer)?;
-        Ok(Self::from_entries(wire.active))
+        Ok(Self {
+            active: wire.active,
+            raw_active: wire.raw_active,
+        })
     }
 }
 

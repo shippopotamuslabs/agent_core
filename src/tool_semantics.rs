@@ -397,6 +397,15 @@ pub enum ToolSemanticsError {
     InvalidSchemaEntry {
         message: String,
     },
+    /// A session snapshot offered at import is internally incoherent:
+    /// an unsupported format version, a (phase, pending) pair the live
+    /// machine could never produce, or a context store violating its
+    /// restore invariants (ENC-305 fix pass, M1/M3/m5). Follows the
+    /// family's `Invalid* { message }` convention; import NEVER coerces
+    /// or repairs the snapshot to make it pass.
+    InvalidSnapshot {
+        message: String,
+    },
     /// A semantics section references a tool that is neither a catalog tool
     /// (canonical name or alias) nor an active schema name (ENC-299 D4).
     UnknownToolReference {
