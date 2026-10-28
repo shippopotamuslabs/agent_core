@@ -80,14 +80,17 @@ pub(super) fn merge_active_tool_names(
     }
 }
 
-pub(super) fn is_companion_callable_tool(
+/// Single decider for the discovery gate (ENC-303): whether `tool_name`
+/// carries a gate exemption, and if so whether it activates (merges into
+/// the active set). `None` means no exemption — plain active-set gating.
+pub(super) fn gate_exemption_for(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
     tool_name: &ToolName,
-) -> bool {
+) -> Option<bool> {
     discovery
         .as_ref()
-        .map(|d| d.companion_callable_tools.iter().any(|n| n == tool_name))
-        .unwrap_or(false)
+        .and_then(|d| d.gate_exemption_for(tool_name))
+        .map(|exemption| exemption.activates)
 }
 
 pub(super) fn activate_tools_for_spill_reference(

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use super::{is_companion_callable_tool, merge_active_tool_names};
+use super::{gate_exemption_for, merge_active_tool_names};
 use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::catalog::ToolCatalog;
 use crate::events::AgentEvent;
@@ -150,10 +150,6 @@ pub(super) fn repair_tool_turn(
     // Hoisted out of the per-call loop (was cloned + rebuilt per call).
     let discovery = semantics.discovery.clone();
     let discovery_name = discovery.as_ref().map(|d| d.tool_name.clone());
-    let discovery_always_callable = discovery
-        .as_ref()
-        .map(|d| d.always_callable)
-        .unwrap_or(false);
 
     let mut repaired: Vec<ToolCallRecord> = Vec::new();
     let mut reject_by_call_id: HashMap<String, AgentMessage> = HashMap::new();
@@ -168,10 +164,13 @@ pub(super) fn repair_tool_turn(
         // active set means the host has not opted into the new contract yet.
         // Both sides are canonical identities, so this is plain equality.
         let tool_name = gate_tool_name(&raw.name);
-        let companion_callable = tool_name
+        // ENC-303: one exemption list drives both halves. `activates == true`
+        // merges into the active set (companion style); either value makes
+        // the tool callable now without prior discovery activation.
+        let exemption = tool_name
             .as_ref()
-            .is_some_and(|name| is_companion_callable_tool(&discovery, name));
-        if companion_callable {
+            .and_then(|name| gate_exemption_for(&discovery, name));
+        if exemption == Some(true) {
             if let Some(name) = tool_name.clone() {
                 merge_active_tool_names(active_tool_names, [name]);
             }
@@ -180,8 +179,7 @@ pub(super) fn repair_tool_turn(
             && (tool_name
                 .as_ref()
                 .is_some_and(|name| active_tool_names.iter().any(|active| active == name))
-                || (discovery_always_callable && tool_name.as_ref() == discovery_name.as_ref())
-                || companion_callable);
+                || exemption.is_some());
         if !active_tool_names.is_empty() && !callable_now {
             events.push(AgentEvent::ToolSoftFailure {
                 tool_name: raw.name.clone(),

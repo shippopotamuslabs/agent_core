@@ -75,7 +75,7 @@ fn tool_msg(id: &str, name: &str, content: &str) -> AgentMessage {
 }
 
 #[test]
-fn ts_017_custom_disclosure_tool_is_always_callable() {
+fn ts_017_custom_disclosure_tool_is_gate_exempt() {
     let eng = engine();
     let handle = session_with(
         r#"[{"name":"open_tools","parameters":{}},{"name":"search_web","parameters":{}}]"#,

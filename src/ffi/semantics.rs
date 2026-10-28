@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use crate::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
 use crate::tool_name::ToolName;
 use crate::tool_semantics::{
-    ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
-    ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
+    ArtifactSquashSemantics, ArtifactToolSemantics, DiscoveryGateExemption, ParameterAlias,
+    SpecialValueRepair, ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics,
+    ToolDiscoverySemantics, ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
 };
 
 use super::types::AgentException;
@@ -317,11 +317,40 @@ impl FfiToolResultPolicy {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiDiscoveryGateExemption {
+    pub tool_name: String,
+    pub activates: bool,
+    pub reason: String,
+}
+
+impl From<DiscoveryGateExemption> for FfiDiscoveryGateExemption {
+    fn from(exemption: DiscoveryGateExemption) -> Self {
+        Self {
+            tool_name: exemption.tool_name.as_str().to_string(),
+            activates: exemption.activates,
+            reason: exemption.reason,
+        }
+    }
+}
+
+impl FfiDiscoveryGateExemption {
+    fn into_core(self) -> Result<DiscoveryGateExemption, AgentException> {
+        Ok(DiscoveryGateExemption {
+            tool_name: tool_name_from_ffi(
+                "discovery.gate_exemptions[].tool_name",
+                &self.tool_name,
+            )?,
+            activates: self.activates,
+            reason: self.reason,
+        })
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiToolDiscoverySemantics {
     pub tool_name: String,
     pub request_field_name: String,
-    pub always_callable: bool,
-    pub companion_callable_tools: Vec<String>,
+    pub gate_exemptions: Vec<FfiDiscoveryGateExemption>,
 }
 
 impl From<ToolDiscoverySemantics> for FfiToolDiscoverySemantics {
@@ -329,11 +358,10 @@ impl From<ToolDiscoverySemantics> for FfiToolDiscoverySemantics {
         Self {
             tool_name: semantics.tool_name.as_str().to_string(),
             request_field_name: semantics.request_field_name,
-            always_callable: semantics.always_callable,
-            companion_callable_tools: semantics
-                .companion_callable_tools
-                .iter()
-                .map(|tool| tool.as_str().to_string())
+            gate_exemptions: semantics
+                .gate_exemptions
+                .into_iter()
+                .map(Into::into)
                 .collect(),
         }
     }
@@ -344,11 +372,11 @@ impl FfiToolDiscoverySemantics {
         Ok(ToolDiscoverySemantics {
             tool_name: tool_name_from_ffi("discovery.tool_name", &self.tool_name)?,
             request_field_name: self.request_field_name,
-            always_callable: self.always_callable,
-            companion_callable_tools: tool_names_from_ffi(
-                "discovery.companion_callable_tools[]",
-                self.companion_callable_tools,
-            )?,
+            gate_exemptions: self
+                .gate_exemptions
+                .into_iter()
+                .map(FfiDiscoveryGateExemption::into_core)
+                .collect::<Result<_, _>>()?,
         })
     }
 }

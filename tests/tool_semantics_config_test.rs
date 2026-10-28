@@ -21,9 +21,10 @@ use agent_core::session::AgentConfig;
 use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_parse::parse_tool_calls_with_semantics;
 use agent_core::tool_semantics::{
-    ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
-    ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig, ToolSemanticsError,
+    ArtifactSquashSemantics, ArtifactToolSemantics, DiscoveryGateExemption, ParameterAlias,
+    SpecialValueRepair, ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics,
+    ToolDiscoverySemantics, ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
+    ToolSemanticsError,
 };
 use agent_core::turn_io::RawToolCall;
 use serde_json::{json, Value};
@@ -79,8 +80,11 @@ fn custom_semantics() -> ToolSemanticsConfig {
         discovery: Some(ToolDiscoverySemantics {
             tool_name: tn("open_tools"),
             request_field_name: "names".to_string(),
-            always_callable: true,
-            companion_callable_tools: Vec::new(),
+            gate_exemptions: vec![agent_core::tool_semantics::DiscoveryGateExemption {
+                tool_name: tn("open_tools"),
+                activates: false,
+                reason: "discovery entry point".to_string(),
+            }],
         }),
         artifact: Some(ArtifactToolSemantics {
             start_tool_name: tn("begin_doc"),
@@ -235,6 +239,53 @@ fn ts_005_alias_collisions_are_rejected() {
             alias: "writer".to_string(),
             first_tool: "write_doc".to_string(),
             second_tool: "compose_doc".to_string(),
+        }),
+    );
+}
+
+fn exemption(tool: &str, activates: bool, reason: &str) -> DiscoveryGateExemption {
+    DiscoveryGateExemption {
+        tool_name: tn(tool),
+        activates,
+        reason: reason.to_string(),
+    }
+}
+
+fn discovery_with(exemptions: Vec<DiscoveryGateExemption>) -> ToolSemanticsConfig {
+    let mut semantics = ToolSemanticsConfig::agnostic();
+    semantics.discovery = Some(ToolDiscoverySemantics {
+        tool_name: tn("open_tools"),
+        request_field_name: "names".to_string(),
+        gate_exemptions: exemptions,
+    });
+    semantics
+}
+
+#[test]
+fn ts_033_blank_gate_exemption_reason_is_rejected() {
+    let semantics = discovery_with(vec![exemption("open_tools", false, "   ")]);
+
+    assert_eq!(
+        semantics.validate(),
+        Err(ToolSemanticsError::InvalidDiscoveryConfig {
+            message:
+                "discovery gate_exemptions entry for 'open_tools' must carry a non-blank reason"
+                    .to_string(),
+        }),
+    );
+}
+
+#[test]
+fn ts_034_duplicate_gate_exemption_is_rejected() {
+    let semantics = discovery_with(vec![
+        exemption("open_tools", false, "discovery entry point"),
+        exemption("open_tools", true, "second claim"),
+    ]);
+
+    assert_eq!(
+        semantics.validate(),
+        Err(ToolSemanticsError::InvalidDiscoveryConfig {
+            message: "duplicate discovery gate_exemptions entry for 'open_tools'".to_string(),
         }),
     );
 }

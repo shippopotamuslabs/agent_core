@@ -1,4 +1,11 @@
 //! Tool-loop guardrails: max turn count, soft-failure streak, configurable greedy extension.
+//!
+//! Greedy extension is a **budget mechanism, not a gate bypass**: when the
+//! last model response names a tool on the host-declared relevance list
+//! ([`ToolGreedyExtensionSemantics`](crate::tool_semantics::ToolGreedyExtensionSemantics),
+//! matched by exact [`ToolName`](crate::tool_name::ToolName)), the tool-call
+//! cap grows by `extra_turns`. It never makes a tool callable — the
+//! discovery gate decides that independently.
 
 use crate::agent_tool_budget::AgentToolBudgetMeta;
 use crate::parsed_tool_args::ParsedToolResult;

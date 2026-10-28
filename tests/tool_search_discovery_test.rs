@@ -48,7 +48,13 @@ fn search_discovery_config() -> AgentConfig {
           "discovery": {
             "tool_name": "tool_discovery_tool",
             "request_field_name": "capability",
-            "always_callable": true
+            "gate_exemptions": [
+              {
+                "tool_name": "tool_discovery_tool",
+                "activates": false,
+                "reason": "discovery entry point"
+              }
+            ]
           },
           "argument_repairs": [],
           "canonical_shapes": [],
@@ -111,10 +117,19 @@ fn tsd_26_default_semantics_reference_search_tools() {
         .expect("enclave default semantics must configure discovery");
     assert_eq!(discovery.tool_name.as_str(), "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
-    assert!(discovery.always_callable);
-    assert!(discovery.companion_callable_tools.contains(
-        &agent_core::tool_name::ToolName::new("read_context_reference").expect("valid test name")
-    ));
+    let entry_point = discovery
+        .gate_exemption_for(
+            &agent_core::tool_name::ToolName::new("tool_discovery_tool").expect("valid test name"),
+        )
+        .expect("discovery tool must carry a gate exemption");
+    assert!(!entry_point.activates);
+    let companion = discovery
+        .gate_exemption_for(
+            &agent_core::tool_name::ToolName::new("read_context_reference")
+                .expect("valid test name"),
+        )
+        .expect("read_context_reference must carry a gate exemption");
+    assert!(companion.activates);
 }
 
 #[test]
@@ -327,4 +342,195 @@ fn tsd_spill_retrieval_hint_activates_read_context_reference() {
         }
         other => panic!("expected ExecuteTools after spill hint activation, got {other:?}"),
     }
+}
+
+#[test]
+fn tsd_activating_exemption_merges_into_active_set() {
+    // ENC-303: `activates == true` merges the companion into the active set,
+    // so a later rejection lists it in `available_tools`.
+    let eng = engine();
+    let handle = enclave_discovery_session(&eng, enclave_test_agent_config());
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![
+                RawToolCall {
+                    id: Some("call-read".into()),
+                    name: "read_context_reference".into(),
+                    arguments_json: r#"{"reference_id":"tool-output-call-1"}"#.into(),
+                },
+                RawToolCall {
+                    id: Some("call-append".into()),
+                    name: "append_blocks".into(),
+                    arguments_json: r#"{"artifactId":"a1","blocks":[]}"#.into(),
+                },
+            ],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "read_context_reference");
+        }
+        other => panic!("expected ExecuteTools for companion tool, got {other:?}"),
+    }
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-read".into(),
+            result_json: r#"{"ok":true}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = handle.integration_test_snapshot();
+    let rejection = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == AgentRole::Tool && message.metadata.call_id() == Some("call-append")
+        })
+        .expect("append_blocks rejection must be stored as a tool message");
+    let payload: serde_json::Value =
+        serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
+    let available = payload["available_tools"]
+        .as_array()
+        .expect("rejection must list available_tools");
+    assert!(
+        available
+            .iter()
+            .any(|name| name == "read_context_reference"),
+        "activating companion must merge into the active set, got {available:?}"
+    );
+}
+
+fn non_activating_probe_config() -> AgentConfig {
+    let mut semantics = agent_core::tool_semantics::ToolSemanticsConfig::from_json(
+        r#"{
+          "catalog": { "tools": [] },
+          "discovery": {
+            "tool_name": "tool_discovery_tool",
+            "request_field_name": "capability",
+            "gate_exemptions": [
+              {
+                "tool_name": "probe_a",
+                "activates": false,
+                "reason": "non-activating probe"
+              }
+            ]
+          },
+          "argument_repairs": [],
+          "canonical_shapes": [],
+          "result_policies": [],
+          "compaction": {},
+          "greedy_extension_tools": []
+        }"#,
+    )
+    .expect("probe semantics json must parse");
+    semantics.catalog.tools = serde_json::from_str(
+        r#"[
+          {"name":"tool_discovery_tool","aliases":[],"reproducible":true},
+          {"name":"probe_a","aliases":[],"reproducible":true},
+          {"name":"probe_b","aliases":[],"reproducible":true}
+        ]"#,
+    )
+    .expect("probe catalog json must parse as tool specs");
+    let mut config = enclave_test_agent_config();
+    config.tool_semantics = semantics;
+    config
+}
+
+#[test]
+fn tsd_non_activating_exemption_is_callable_without_merging() {
+    // ENC-303: `activates == false` makes the tool callable now but does NOT
+    // merge it into the active set — a later rejection omits it.
+    let eng = engine();
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "probe".into(),
+                metadata: MessageMeta::new(),
+            }],
+            non_activating_probe_config(),
+            capabilities(),
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                r#"[{"name":"tool_discovery_tool","parameters":{}}]"#.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![
+                RawToolCall {
+                    id: Some("call-a".into()),
+                    name: "probe_a".into(),
+                    arguments_json: r#"{}"#.into(),
+                },
+                RawToolCall {
+                    id: Some("call-b".into()),
+                    name: "probe_b".into(),
+                    arguments_json: r#"{}"#.into(),
+                },
+            ],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "probe_a");
+        }
+        other => panic!("expected ExecuteTools for exempt tool, got {other:?}"),
+    }
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-a".into(),
+            result_json: r#"{"ok":true}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = handle.integration_test_snapshot();
+    let rejection = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == AgentRole::Tool && message.metadata.call_id() == Some("call-b")
+        })
+        .expect("probe_b rejection must be stored as a tool message");
+    let payload: serde_json::Value =
+        serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
+    assert_eq!(
+        payload["available_tools"],
+        serde_json::json!(["tool_discovery_tool"]),
+        "non-activating exemption must not merge into the active set"
+    );
 }

@@ -7,9 +7,9 @@ pub fn tn(name: &str) -> ToolName {
     ToolName::new(name).expect("test tool name must be valid")
 }
 use agent_core::tool_semantics::{
-    ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
-    ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
+    ArtifactSquashSemantics, ArtifactToolSemantics, DiscoveryGateExemption, ParameterAlias,
+    SpecialValueRepair, ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics,
+    ToolDiscoverySemantics, ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
 };
 use serde_json::json;
 
@@ -63,8 +63,11 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
         discovery: Some(ToolDiscoverySemantics {
             tool_name: tn("open_tools"),
             request_field_name: "names".to_string(),
-            always_callable: true,
-            companion_callable_tools: Vec::new(),
+            gate_exemptions: vec![DiscoveryGateExemption {
+                tool_name: tn("open_tools"),
+                activates: false,
+                reason: "discovery entry point".to_string(),
+            }],
         }),
         artifact: Some(ArtifactToolSemantics {
             start_tool_name: tn("begin_doc"),
