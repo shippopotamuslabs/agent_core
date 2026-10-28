@@ -260,9 +260,10 @@ impl MessageMeta {
 
     /// Single entry point for host-provided keys. A known key whose value
     /// fits its typed field lands there; the legacy `name` dialect key
-    /// normalizes into `tool_name` (for JSON objects the two keys iterate
-    /// in sorted order, so an explicit `tool_name` still wins, as it did
-    /// when `name` was guarded on the field being unset). Reports the
+    /// normalizes into `tool_name`, landing only while `tool_name` is
+    /// unset — an explicit `tool_name` wins in every key order (the
+    /// pre-ENC-308 guard: precedence is a property of the guard, not of
+    /// map iteration order). Reports the
     /// outcome so callers choose their seam: the tolerant stored-state
     /// path ([`MessageMeta::from_value`]) drops `Misfit`/`Unknown` keys;
     /// the strict FFI path ([`MessageMeta::from_json_str_strict`])
@@ -323,7 +324,13 @@ impl MessageMeta {
             },
             "name" => match value {
                 serde_json::Value::String(s) => {
-                    self.set_tool_name(s);
+                    // Legacy dialect of `tool_name` (the pre-ENC-308
+                    // guard): land only while the explicit field is
+                    // unset, so an explicit `tool_name` wins regardless
+                    // of the order the two keys are absorbed in.
+                    if self.tool_name.is_none() {
+                        self.set_tool_name(s);
+                    }
                     Landed
                 }
                 _ => Misfit,
@@ -833,6 +840,37 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),
             json!({ "tool_name": "web_search" })
+        );
+    }
+
+    #[test]
+    fn message_meta_explicit_tool_name_beats_legacy_name_in_any_order() {
+        // R1 (ENC-308 review): the pre-ENC-308 `name` arm was guarded on
+        // `tool_name` being unset, so the explicit key won in ALL
+        // orderings. The guard is what carries that precedence — not
+        // serde_json's sorted-key iteration (the only order `from_value`
+        // can feed the keys in this tree). Drive the same absorb seam
+        // `from_value` uses, in both insertion orders:
+        let mut explicit_first = MessageMeta::new();
+        explicit_first.absorb("tool_name".into(), json!("explicit_tool"));
+        explicit_first.absorb("name".into(), json!("legacy_tool"));
+        assert_eq!(explicit_first.tool_name(), Some("explicit_tool"));
+
+        let mut legacy_first = MessageMeta::new();
+        legacy_first.absorb("name".into(), json!("legacy_tool"));
+        legacy_first.absorb("tool_name".into(), json!("explicit_tool"));
+        assert_eq!(legacy_first.tool_name(), Some("explicit_tool"));
+
+        // And at the from_value level, an object carrying both keys
+        // resolves to the explicit name and normalizes to it alone.
+        let meta = MessageMeta::from_value(json!({
+            "name": "legacy_tool",
+            "tool_name": "explicit_tool",
+        }));
+        assert_eq!(meta.tool_name(), Some("explicit_tool"));
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "tool_name": "explicit_tool" })
         );
     }
 

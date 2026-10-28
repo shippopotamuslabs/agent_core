@@ -12,7 +12,7 @@
 none
 
 ## Next Phase
-Review round 2 — implementer fixes for findings R1/R2, then re-review
+Review round 2 — re-review of the R1/R2 fixes (implementer fix round 1 landed)
 
 ## Notes
 - 2026-10-28 (A1): Compaction encapsulation trio done. (1) `attach_summary_staging` lost its redundant `trigger` param — both callers had already settled `req.trigger` (forced-fixup in the pipeline arm; Manual ctx in the manual path), so the snapshot stamps `req.trigger`. (2) `CompactionState::set_suppress_summary_tier` deleted; suppression is the begin/end pair `begin_summary_tier_suppression() -> bool` / `end_summary_tier_suppression(previous)` owned by CompactionState, and `retry_without_summary` just brackets the re-run (restores the previous value, not a hard-coded false — behavior identical at the only call site). Grep acceptance: no `set_suppress_summary_tier` hits remain anywhere. (3) `CompactionPassState`: `last_history_ref()` deleted — the `NotApplicable` arm now uses the single consuming read `take_history_ref()` like the early-exit branch; `message_count_before` is a plain `pub(super)` field fixed at construction (getter deleted). Verification: `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; targeted tests both configs — `cargo test --locked [--no-default-features] --test compaction_triggers_test --test manual_compact_test --test context_management_end_to_end_test` (22+1+4 passed, 0 failed each config), `--lib compaction` (6 passed, 0 failed each config); extra guard `cargo test --locked --features lalr-harness --test compaction_boundary_test` runs 6 tests: 3 passed / 3 FAILED — and the identical 3 failures (lalr_03_boundary_id_literal_format, lalr_09_post_compact_revision_matches_session, lalr_15_kv_fixed_emits_boundary_without_summary_tier) reproduce on the pre-A1 plan commit 4646395, verified in a scratch worktree. Pre-existing red on main, unrelated to A1; the target requires lalr-harness+ffi so it sits outside both gate configs and its redness was never gated. (Correction to this entry's first version, which misstated the suite as "3 passed" from truncated poll output; the gate-config results above were read in full and stand.) No existing tests changed. Note: plain `cargo test --test compaction_boundary_test` under gate configs errors on required-features — run it via the lalr-harness invocation.
@@ -177,3 +177,35 @@ Review round 2 — implementer fixes for findings R1/R2, then re-review
   disclosed in B1 note, confined to a degenerate state) and
   content:"" re-serializing without the key (semantically lossless
   normalization).
+
+- 2026-10-28 (Review fix round 1 — R1/R2 addressed):
+  R1: the absorb "name" arm (src/message.rs) again lands into
+  `tool_name` only while the field is unset — the pre-ENC-308 guard
+  restored verbatim in effect, so an explicit `tool_name` wins in
+  every key order by construction rather than by serde_json's
+  sorted-key iteration. The absorb doc comment no longer claims
+  ordering is load-bearing; it credits the guard. New unit test
+  `message_meta_explicit_tool_name_beats_legacy_name_in_any_order`
+  drives the absorb seam in both insertion orders plus a both-keys
+  `from_value` object; all resolve to the explicit name.
+  R2: new `tests/enc308_legacy_snapshot_test.rs` — one composite
+  legacy blob (the A2 golden snapshot's shape at SNAPSHOT_VERSION 1,
+  mutated to pre-308 content: session context with typed wire keys
+  PLUS a `legacy_host_junk` extras key; message metadata with
+  `"spilled": true` PLUS a junk key, in both the history and pending
+  copies; the A2 golden's populated ToolSchemaSet; a state ledger
+  with content in the ledger field, the pending request, and the
+  sidecar last-ledger JSON) driven through the real `import_snapshot`
+  path. Asserts: typed context fields intact, `is_spilled()` true,
+  ledger content intact, raw schema channel verbatim, and both junk
+  keys absent on re-export (field-level asserts, no whole-blob byte
+  pin, per the A2 lesson). No existing tests changed.
+  Verification (results read off complete on-disk logs in
+  ~/workspace/tmp/enc308-rfix-logs/): `cargo fmt --check` clean;
+  `cargo clippy --locked --all-targets -- -D warnings` clean;
+  default config `cargo test --locked --lib --test
+  enc305_snapshot_test --test enc308_legacy_snapshot_test` → lib 297
+  / snapshot 14 / legacy 1, 0 failed; `--no-default-features` same
+  targets → lib 273 / snapshot 9 / legacy 1, 0 failed (the snapshot
+  target's 9-vs-14 is its ffi gating, baseline shape).
+  Next: Review round 2 (re-review of the two fixes).
