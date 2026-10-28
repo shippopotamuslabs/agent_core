@@ -44,12 +44,12 @@ fn build_semantic_summary_line(
         .unwrap_or_default();
     // ENC-302: the cached count is display-only; an unobserved count renders
     // as the literal `unknown`. The template's continuation text is untouched.
-    let total = observed_total_blocks
+    let observed = observed_total_blocks
         .map(|t| t.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     semantics
         .summary_template
-        .replace("{total}", &total)
+        .replace("{total}", &observed)
         .replace("{snippet}", &snippet)
 }
 
@@ -60,80 +60,81 @@ pub(crate) fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
         .any(|call| call.name == tool_name)
 }
 
-/// ENC-293: shared typed probe for squash-claimed tool payloads. Both the
-/// squash tier and the spill exemption use this parse — never a field-name
-/// substring sniff — so large semantic results still reach the squash tier.
+/// ENC-293/ENC-302: the one message-level append classification shared by
+/// the squash engagement scan, the anchor extraction, and the spill
+/// exemption. One parse per message — never a field-name substring sniff —
+/// so large semantic results still reach the squash tier.
 ///
-/// ENC-302 split: success detection (status field only) is shared by the
-/// squash engagement scan and the spill exemption; the observed-count parse
-/// (`parse_observed_total_blocks`) is used only where a count is recorded or
-/// rendered (anchor extraction, summary line). A successful result with a
-/// missing/non-integer total field still engages the squash scan — its
-/// observed count is simply `None` (rendered `unknown`).
-pub(crate) fn is_semantic_success_payload(
-    content: &str,
-    semantics: &ArtifactSquashSemantics,
-) -> bool {
-    is_semantic_success_result(content, semantics)
-}
-
-/// ENC-302: success is the status field alone, regardless of whether the
-/// total-blocks field is present. The total field names where observations
-/// come from; it never gates existence.
-fn is_semantic_success_result(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
-    semantic_success_total_blocks(content, semantics).is_some()
+/// Engagement rule (BASE-identical for the metadata-less path):
+/// - Assistant messages are never classified here (assistant append calls
+///   engage the drop scan via `metadata_has_tool` only; they carry no
+///   observed count).
+/// - Tool/User results scoped to the configured append tool via `tool_name`
+///   metadata (e.g. a `start_artifact` success result is never an append
+///   result) engage on success alone; a missing total field yields an
+///   unknown count.
+/// - Metadata-less Tool/User results keep the BASE total-field-presence
+///   guard: success alone does NOT engage — the total field must be present
+///   (any value, including non-integer/`null`/`0`), with the observed count
+///   parsed-or-`None`.
+/// - Any other tool's metadata never engages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedAppend {
+    NotAppend,
+    Success { observed_total_blocks: Option<u32> },
 }
 
 /// ENC-302: observed-count parse over an already-parsed result value.
-/// `Some(v)` when the total field is present, an integer, and `>= 0`
-/// (a host-reported `0` after success is contradictory but recorded
-/// verbatim); absent/non-integer/negative/unrepresentable values map to
-/// `None` instead of a `0` stand-in.
+/// `Some(v)` when the total field is present, an integer (or an
+/// integer-valued float such as `3.0`), and `>= 0` (a host-reported `0`
+/// after success is contradictory but recorded verbatim);
+/// absent/non-integer/negative/unrepresentable values map to `None` instead
+/// of a `0` stand-in.
 fn parse_observed_total_blocks(v: &Value, semantics: &ArtifactSquashSemantics) -> Option<u32> {
     match v.get(&semantics.total_blocks_result_field)? {
         Value::Number(n) => n
             .as_u64()
             .and_then(|u| u32::try_from(u).ok())
-            .or_else(|| n.as_i64().and_then(|i| u32::try_from(i).ok())),
+            .or_else(|| n.as_i64().and_then(|i| u32::try_from(i).ok()))
+            .or_else(|| {
+                n.as_f64().and_then(|f| {
+                    (f.fract() == 0.0 && f >= 0.0 && f <= u32::MAX as f64).then_some(f as u32)
+                })
+            }),
         Value::String(s) => s.parse::<i64>().ok().and_then(|i| u32::try_from(i).ok()),
         _ => None,
     }
 }
 
-/// ENC-288: single ingress parse of a result payload; typed accessors only.
-/// Returns the observed total-blocks value, or `None` for a non-success
-/// payload; a successful payload with no integer total still returns
-/// `Some(None)` so the append is observed with an unknown count.
-fn semantic_success_total_blocks(
-    content: &str,
+/// The single shared predicate: classifies one Tool/User result message.
+/// Assistant and non-Tool/User roles are never append results here.
+pub(crate) fn classify_append_message(
+    msg: &AgentMessage,
     semantics: &ArtifactSquashSemantics,
-) -> Option<Option<u32>> {
-    let parsed = ParsedToolResult::parse(content);
+) -> ObservedAppend {
+    if !matches!(msg.role, AgentRole::Tool | AgentRole::User) {
+        return ObservedAppend::NotAppend;
+    }
+    // ENC-288: single ingress parse; typed accessors only.
+    let parsed = ParsedToolResult::parse(&msg.content);
     let v = parsed.value();
     if v.get(&semantics.status_field).and_then(|s| s.as_str())
         != Some(semantics.success_status_value.as_str())
     {
-        return None;
+        return ObservedAppend::NotAppend;
     }
-    Some(parse_observed_total_blocks(v, semantics))
-}
-
-/// Message-level append-result probe shared by the squash engagement scan
-/// and the anchor extraction (ENC-302 D2 shared-helper split): content
-/// success sniff, scoped to the configured append tool whenever the message
-/// carries `tool_name` metadata (e.g. a `start_artifact` success result is
-/// never an append result). Messages without tool-name metadata keep the
-/// legacy content-only sniff, so role coverage is unchanged.
-fn observed_append_result(
-    msg: &AgentMessage,
-    semantics: &ArtifactSquashSemantics,
-) -> Option<Option<u32>> {
-    if let Some(name) = msg.metadata.tool_name() {
-        if name != semantics.append_tool_name.as_str() {
-            return None;
-        }
+    match msg.metadata.tool_name() {
+        Some(name) if name == semantics.append_tool_name.as_str() => ObservedAppend::Success {
+            observed_total_blocks: parse_observed_total_blocks(v, semantics),
+        },
+        Some(_) => ObservedAppend::NotAppend,
+        // Metadata-less: BASE guard — the total field must be present (any
+        // value); success alone does not engage.
+        None if v.get(&semantics.total_blocks_result_field).is_none() => ObservedAppend::NotAppend,
+        None => ObservedAppend::Success {
+            observed_total_blocks: parse_observed_total_blocks(v, semantics),
+        },
     }
-    semantic_success_total_blocks(&msg.content, semantics)
 }
 
 fn extract_last_block_text_with_field(content: &str, field: &str) -> Option<String> {
@@ -163,10 +164,10 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
     if msg.role == AgentRole::Assistant {
         return metadata_has_tool(msg, semantics.append_tool_name.as_str());
     }
-    if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
-        return observed_append_result(msg, semantics).is_some();
-    }
-    false
+    matches!(
+        classify_append_message(msg, semantics),
+        ObservedAppend::Success { .. }
+    )
 }
 
 fn artifact_id_from_assistant_metadata(
@@ -232,9 +233,9 @@ fn anchor_artifact_id(
 /// the anchor extraction and the squash scan.
 ///
 /// ENC-288 fusion, kept inside the FRG-43 structure: the reverse scan calls
-/// the single-parse `semantic_success_total_blocks` once per message, so the
-/// success check and the total-block extraction share one parse — the found
-/// payload is never parsed a second time.
+/// the single-parse `classify_append_message` once per message, so the
+/// success check and the observed-count extraction share one parse — the
+/// found payload is never parsed a second time.
 ///
 /// ENC-302: existence is the newest observed successful append result alone;
 /// there is no total<=0 kill. The cached count may be stale (out-of-band
@@ -244,11 +245,14 @@ fn last_append_lookup(
     messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
 ) -> Option<(usize, Option<u32>, Option<String>)> {
-    let (result_idx, observed) = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, msg)| observed_append_result(msg, semantics).map(|t| (i, t)))?;
+    let (result_idx, observed) = messages.iter().enumerate().rev().find_map(|(i, msg)| {
+        match classify_append_message(msg, semantics) {
+            ObservedAppend::Success {
+                observed_total_blocks,
+            } => Some((i, observed_total_blocks)),
+            ObservedAppend::NotAppend => None,
+        }
+    })?;
     Some((
         result_idx,
         observed,
@@ -362,14 +366,14 @@ fn apply_semantic_artifact_squash(
         return CompactionOutcome::NotApplicable;
     }
 
-    let Some((total_blocks, last_block_text)) =
+    let Some((observed_total_blocks, last_block_text)) =
         find_last_append_block(&session.messages, semantics)
     else {
         return CompactionOutcome::NotApplicable;
     };
 
     let summary_text =
-        build_semantic_summary_line(semantics, total_blocks, last_block_text.as_deref());
+        build_semantic_summary_line(semantics, observed_total_blocks, last_block_text.as_deref());
     let out = squash_appends(
         std::mem::take(&mut session.messages),
         semantics,
@@ -587,9 +591,11 @@ mod tests {
         }
     }
 
-    /// ENC-302: a successful append result with no integer total still
-    /// engages the squash scan; the summary renders `unknown` and the
-    /// continuation instruction is emitted verbatim.
+    /// ENC-302: an append-tool-metadata success result with no total field
+    /// still engages the squash scan; the summary renders `unknown` and the
+    /// continuation instruction is emitted verbatim. (A metadata-less
+    /// success without a total field does NOT engage — BASE guard; see the
+    /// regression test below.)
     #[test]
     fn enc302_squash_summary_renders_unknown_when_total_unobserved() {
         let session = AgentSession::new(
@@ -676,6 +682,127 @@ mod tests {
             .expect("fixture must configure artifact_squash");
         let anchor = extract_artifact_anchor(&anchor_messages, squash).expect("anchor must exist");
         assert_eq!(anchor.observed_total_blocks, None);
+    }
+
+    /// ENC-302 J1 regression: a metadata-less `{"status":"success"}` with
+    /// no total field is NOT squash-engaged (BASE total-field-presence
+    /// guard) — nothing is dropped and the tier does not apply.
+    #[test]
+    fn enc302_metadata_less_success_without_total_not_engaged() {
+        let session = AgentSession::new(
+            vec![
+                AgentMessage {
+                    id: "m0".into(),
+                    role: AgentRole::User,
+                    content: "Start a report".into(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "m1".into(),
+                    role: AgentRole::Tool,
+                    content: r#"{"status":"success"}"#.into(),
+                    metadata: MessageMeta::new(),
+                },
+            ],
+            serde_json::Value::Null,
+        );
+
+        let tier = ArtifactSquashCompactionTier;
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            ..Default::default()
+        };
+        match tier.apply(session, &cfg, &ctx()) {
+            CompactionOutcome::NotApplicable => {}
+            o => panic!("expected NotApplicable, got {o:?}"),
+        }
+
+        let squash = cfg
+            .tool_semantics
+            .compaction
+            .artifact_squash
+            .as_ref()
+            .expect("fixture must configure artifact_squash");
+        let lone = AgentMessage {
+            id: "m1".into(),
+            role: AgentRole::Tool,
+            content: r#"{"status":"success"}"#.into(),
+            metadata: MessageMeta::new(),
+        };
+        assert_eq!(
+            classify_append_message(&lone, squash),
+            ObservedAppend::NotAppend
+        );
+        assert!(extract_artifact_anchor(std::slice::from_ref(&lone), squash).is_none());
+    }
+
+    /// ENC-302 m1: integer-valued float totals (`3.0`) observe as integers;
+    /// genuinely fractional totals (`3.5`) engage (field present) but observe
+    /// as unknown.
+    #[test]
+    fn enc302_integer_valued_float_total_observed() {
+        let cfg = AgentConfig {
+            tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+            ..Default::default()
+        };
+        let squash = cfg
+            .tool_semantics
+            .compaction
+            .artifact_squash
+            .as_ref()
+            .expect("fixture must configure artifact_squash");
+        let result = |payload: &str| AgentMessage {
+            id: "r".into(),
+            role: AgentRole::Tool,
+            content: payload.into(),
+            metadata: MessageMeta::new().with_tool_name("append_blocks"),
+        };
+        assert_eq!(
+            classify_append_message(&result(r#"{"status":"success","totalBlocks":3.0}"#), squash),
+            ObservedAppend::Success {
+                observed_total_blocks: Some(3)
+            }
+        );
+        assert_eq!(
+            classify_append_message(&result(r#"{"status":"success","totalBlocks":3.5}"#), squash),
+            ObservedAppend::Success {
+                observed_total_blocks: None
+            }
+        );
+
+        let session = AgentSession::new(
+            vec![
+                AgentMessage {
+                    id: "m0".into(),
+                    role: AgentRole::User,
+                    content: "Start a report".into(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "m1".into(),
+                    role: AgentRole::Assistant,
+                    content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
+                        .into(),
+                    metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                        id: None,
+                        name: "append_blocks".into(),
+                        arguments_json: r#"{"artifactId":"123"}"#.into(),
+                    }]),
+                },
+                result(r#"{"status":"success","totalBlocks":3.0}"#),
+            ],
+            serde_json::Value::Null,
+        );
+        match ArtifactSquashCompactionTier.apply(session, &cfg, &ctx()) {
+            CompactionOutcome::Applied(s, _) => {
+                assert!(
+                    s.messages[1].content.contains("3 blocks"),
+                    "{}",
+                    s.messages[1].content
+                );
+            }
+            o => panic!("expected Applied, got {o:?}"),
+        }
     }
 
     #[test]

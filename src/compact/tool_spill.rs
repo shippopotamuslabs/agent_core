@@ -99,31 +99,23 @@ fn tool_message_reference_id(message: &AgentMessage) -> String {
 /// ENC-293: the spill exemption no longer sniffs content for the
 /// `context_ref` envelope marker or the configured total-blocks field.
 /// Already-spilled messages are exempt via the `MessageMeta::is_spilled` flag
-/// set at spill time; squash-claimed success payloads are exempt via the same
-/// typed parse the squash tier itself uses
-/// (`artifact_squash::is_semantic_success_payload`), so large semantic
-/// results still reach `ArtifactSquashCompactionTier` instead of being
-/// spilled out from under it (see `s5_artifact_squash_is_preferred_over_fifo`).
+/// set at spill time; squash-claimed success payloads are exempt via the one
+/// shared squash-tier classification
+/// (`artifact_squash::classify_append_message`), so large semantic results
+/// still reach `ArtifactSquashCompactionTier` instead of being spilled out
+/// from under it (see `s5_artifact_squash_is_preferred_over_fifo`).
+/// ENC-302: the exemption IS the squash engagement set, including the BASE
+/// total-field-presence guard for metadata-less results.
 fn is_squash_claimed_payload(
     message: &AgentMessage,
     squash: Option<&ArtifactSquashSemantics>,
 ) -> bool {
+    use super::artifact_squash::{classify_append_message, ObservedAppend};
     squash.is_some_and(|semantics| {
-        // ENC-302: scope the exemption to results of the configured append
-        // tool; other tools' success payloads (e.g. start_artifact) spill
-        // normally. Metadata-less messages keep the content-only sniff.
-        match message.metadata.tool_name() {
-            Some(name) => {
-                name == semantics.append_tool_name.as_str()
-                    && super::artifact_squash::is_semantic_success_payload(
-                        &message.content,
-                        semantics,
-                    )
-            }
-            None => {
-                super::artifact_squash::is_semantic_success_payload(&message.content, semantics)
-            }
-        }
+        matches!(
+            classify_append_message(message, semantics),
+            ObservedAppend::Success { .. }
+        )
     })
 }
 
@@ -267,6 +259,34 @@ mod tests {
         let squash = frg14_squash("write_doc", "chunkCount");
         let content =
             r#"{"status":"success","chunkCount":3,"extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = frg14_spill(&mut session, &mut store, Some(&squash));
+        assert!(event.is_none());
+        assert_eq!(session.messages[0].content, content);
+    }
+
+    // ENC-302 J1: a metadata-less success WITHOUT a total field is not
+    // squash-engaged (BASE guard), so it is not spill-exempt either.
+    #[test]
+    fn enc302_spill_metadata_less_success_without_total_not_exempt() {
+        let squash = frg14_squash("append_blocks", "totalBlocks");
+        let content = r#"{"status":"success","extra_padding":"0123456789"}"#.to_string();
+        let mut session = frg14_tool_session(&content);
+        let mut store = ContextStore::default();
+        let event = frg14_spill(&mut session, &mut store, Some(&squash));
+        assert!(event.is_some());
+        assert!(session.messages[0].content.contains("context_ref"));
+        assert!(session.messages[0].metadata.is_spilled());
+    }
+
+    // ENC-302 J1: a metadata-less success WITH a total field (even a
+    // non-integer one) stays BASE-engaged, hence spill-exempt.
+    #[test]
+    fn enc302_spill_metadata_less_non_integer_total_exempt() {
+        let squash = frg14_squash("append_blocks", "totalBlocks");
+        let content =
+            r#"{"status":"success","totalBlocks":"many","extra_padding":"0123456789"}"#.to_string();
         let mut session = frg14_tool_session(&content);
         let mut store = ContextStore::default();
         let event = frg14_spill(&mut session, &mut store, Some(&squash));

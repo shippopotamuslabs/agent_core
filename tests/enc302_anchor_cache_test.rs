@@ -46,6 +46,17 @@ fn append_result(id: &str, payload: &str) -> AgentMessage {
     }
 }
 
+/// Metadata-less Tool result: no `tool_name` metadata, so the BASE
+/// total-field-presence guard applies.
+fn bare_result(payload: &str) -> AgentMessage {
+    AgentMessage {
+        id: format!("r-bare-{payload}"),
+        role: AgentRole::Tool,
+        content: payload.into(),
+        metadata: MessageMeta::new(),
+    }
+}
+
 #[test]
 fn enc302_count_disagreement_newest_observation_wins() {
     let semantics = squash_semantics();
@@ -62,6 +73,20 @@ fn enc302_count_disagreement_newest_observation_wins() {
 
     let mut ledger = StateLedger::default();
     ledger.observe_artifact_anchor(anchor);
+
+    // Stale-intermediate: before the 9-observation supersedes it, the ledger
+    // anchor renders the stale 3 with the continuation intact.
+    let interim = ledger
+        .as_anchor_message()
+        .expect("non-empty ledger must render an anchor");
+    assert!(
+        interim.content.contains("3 blocks"),
+        "stale count must render before supersede: {interim:?}"
+    );
+    assert!(
+        interim.content.contains("Continue appending."),
+        "continuation must survive the stale render: {interim:?}"
+    );
 
     let mut both = first;
     both.push(append_call("art-9", "Part 9"));
@@ -86,6 +111,8 @@ fn enc302_count_disagreement_newest_observation_wins() {
 #[test]
 fn enc302_missing_and_non_integer_total_anchor_exists_unknown() {
     let semantics = squash_semantics();
+    // Production (metadata) shape: an append-tool success without a total
+    // field still anchors, with an unknown count.
     for payload in [
         r#"{"status":"success"}"#,
         r#"{"status":"success","totalBlocks":"many"}"#,
@@ -103,6 +130,34 @@ fn enc302_missing_and_non_integer_total_anchor_exists_unknown() {
         );
         assert_eq!(anchor.continuation_instruction, "Continue appending.");
     }
+
+    // Metadata-less shape: BASE total-field-presence guard — a total field
+    // present in any form (even non-integer) still anchors as base, with a
+    // parsed-or-unknown count; a bare success without the field does not.
+    for (payload, expected) in [
+        (r#"{"status":"success","totalBlocks":"many"}"#, None),
+        (r#"{"status":"success","totalBlocks":null}"#, None),
+        (r#"{"status":"success","totalBlocks":-2}"#, None),
+        (r#"{"status":"success","totalBlocks":0}"#, Some(0)),
+        (r#"{"status":"success","totalBlocks":3}"#, Some(3)),
+    ] {
+        let messages = vec![append_call("art-1", "Part 1"), bare_result(payload)];
+        let anchor = extract_artifact_anchor(&messages, &semantics)
+            .expect("metadata-less payload with a total field must anchor as base");
+        assert_eq!(
+            anchor.observed_total_blocks, expected,
+            "metadata-less payload {payload} must observe {expected:?}"
+        );
+        assert_eq!(anchor.continuation_instruction, "Continue appending.");
+    }
+    let unengaged = vec![
+        append_call("art-1", "Part 1"),
+        bare_result(r#"{"status":"success"}"#),
+    ];
+    assert!(
+        extract_artifact_anchor(&unengaged, &semantics).is_none(),
+        "metadata-less success without a total field must not anchor (BASE guard)"
+    );
 
     // A host-reported 0 after success is contradictory but recorded verbatim.
     let messages = vec![
@@ -166,9 +221,21 @@ fn enc302_old_json_total_blocks_deserializes_via_alias() {
 
 #[test]
 fn enc302_semantics_config_shape_unchanged() {
-    // D4: no semantics-config/FFI changes; the total field still names
-    // where observations come from.
-    let cfg = ToolSemanticsConfig::agnostic();
-    let _ = cfg.compaction.artifact_squash;
-    assert_eq!(squash_semantics().total_blocks_result_field, "totalBlocks");
+    // D4: no semantics-config/FFI changes; assert the REAL
+    // ToolSemanticsConfig squash section (not just the local helper) still
+    // names the total field observations come from.
+    let raw = include_str!("support/enclave_tool_semantics.json");
+    let cfg: ToolSemanticsConfig = serde_json::from_str(raw).expect("enclave_tool_semantics.json");
+    let squash = cfg
+        .compaction
+        .artifact_squash
+        .expect("enclave config must configure artifact_squash");
+    assert_eq!(squash.append_tool_name.as_str(), "append_blocks");
+    assert_eq!(squash.total_blocks_result_field, "totalBlocks");
+    assert_eq!(squash.status_field, "status");
+    // The local helper must agree with the real config shape.
+    assert_eq!(
+        squash_semantics().total_blocks_result_field,
+        squash.total_blocks_result_field
+    );
 }
