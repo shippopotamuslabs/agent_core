@@ -299,6 +299,32 @@ impl ToolSchemaSet {
         }
     }
 
+    /// Build a set from already-parsed schema entries (the FFI typed
+    /// boundary, ENC-295): the active/registry channels arrive as typed
+    /// records, so no JSON text is produced or re-parsed for them; only
+    /// the catalog channel still arrives as text and is parsed here,
+    /// under the same strict contract as [`ToolSchemaSet::parse`] — a
+    /// malformed catalog is a typed error, never a silent empty channel.
+    /// The raw text backing the entry channels is synthesized with
+    /// [`entries_json`], byte-identical to the text the string path
+    /// carried (same values, same serialization).
+    pub fn from_entries(
+        active: Vec<SchemaEntry>,
+        registry: Vec<SchemaEntry>,
+        catalog_json: &str,
+    ) -> Result<Self, ToolSchemaError> {
+        let raw_active = entries_json(&active);
+        let raw_registry = entries_json(&registry);
+        Ok(Self {
+            active,
+            registry,
+            catalog: parse_catalog_channel(catalog_json)?,
+            raw_active,
+            raw_registry,
+            raw_catalog: catalog_json.to_string(),
+        })
+    }
+
     /// Session-level raw text of the active channel (pressure/budget/stash).
     pub fn active_json(&self) -> &str {
         &self.raw_active

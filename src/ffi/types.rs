@@ -759,34 +759,129 @@ impl From<SummaryResult> for FfiSummaryResult {
     }
 }
 
+/// One tool-schema entry at the FFI session boundary (ENC-295).
+///
+/// The six typed fields ARE the contract: the host builds these records in
+/// its own language, so a malformed entry (missing name, non-object
+/// parameters) is unrepresentable or rejected at conversion — unlike the
+/// legacy raw JSON strings, whose shape was only assumed. Keys outside
+/// these fields are not carried across the boundary. `parameters_json` is
+/// the tool's parameter schema as a JSON string; it must parse to a JSON
+/// object (enforced in [`session_io_params`]).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiToolSchemaEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters_json: Option<String>,
+    pub reproducible: Option<bool>,
+    pub deferrable: Option<bool>,
+    pub max_result_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiSessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
     pub tool_catalog_json: String,
-    pub tool_schema_registry_json: String,
-    pub tools_schema_json: String,
+    pub tool_schema_registry: Vec<FfiToolSchemaEntry>,
+    pub tool_schemas: Vec<FfiToolSchemaEntry>,
     pub system_prompt: String,
 }
 
-impl TryFrom<FfiSessionIoParams> for crate::engine::SessionIoParams {
-    type Error = AgentError;
-
-    fn try_from(p: FfiSessionIoParams) -> Result<Self, Self::Error> {
-        // FFI session edge: the single construction-time parse lives in
-        // `new`, and its contract errors surface as `AgentError` here so
-        // `create_session` can return them through `AgentException`. The
-        // FFI DTO strings themselves are unchanged (ENC-289).
-        Self::new(
-            p.provider,
-            p.context_window_tokens,
-            p.tool_catalog_json,
-            p.tool_schema_registry_json,
-            p.tools_schema_json,
-            p.system_prompt,
-        )
-        .map_err(|error| AgentError::Internal(error.to_string()))
+/// Rebuild one entry's schema object: the parsed `parameters_json` value
+/// becomes the object's `parameters` field; the remaining typed fields are
+/// set when present. Key order normalizes sorted on serialization,
+/// matching the legacy host-string renders.
+fn tool_schema_entry_value(
+    entry: &FfiToolSchemaEntry,
+) -> Result<serde_json::Value, AgentException> {
+    let mut object = serde_json::Map::new();
+    if let Some(parameters_json) = &entry.parameters_json {
+        let parameters: serde_json::Value =
+            serde_json::from_str(parameters_json).map_err(|error| AgentException::Internal {
+                detail: format!(
+                    "tool schema entry '{}': parameters_json is not valid JSON: {error}",
+                    entry.name
+                ),
+            })?;
+        if !parameters.is_object() {
+            return Err(AgentException::Internal {
+                detail: format!(
+                    "tool schema entry '{}': parameters_json must be a JSON object",
+                    entry.name
+                ),
+            });
+        }
+        object.insert("parameters".to_string(), parameters);
     }
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(entry.name.clone()),
+    );
+    if let Some(description) = &entry.description {
+        object.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
+    if let Some(reproducible) = entry.reproducible {
+        object.insert(
+            "reproducible".to_string(),
+            serde_json::Value::Bool(reproducible),
+        );
+    }
+    if let Some(deferrable) = entry.deferrable {
+        object.insert(
+            "deferrable".to_string(),
+            serde_json::Value::Bool(deferrable),
+        );
+    }
+    if let Some(max_result_bytes) = entry.max_result_bytes {
+        object.insert(
+            "max_result_bytes".to_string(),
+            serde_json::Value::Number(max_result_bytes.into()),
+        );
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+/// Convert typed boundary entries into parsed [`SchemaEntry`]s in one
+/// pass: each entry's schema object is built (and its `parameters_json`
+/// validated) by [`tool_schema_entry_value`], then wrapped directly —
+/// no serialize-to-string / re-parse round-trip.
+fn tool_schema_entries(
+    entries: &[FfiToolSchemaEntry],
+) -> Result<Vec<crate::tool_schema::SchemaEntry>, AgentException> {
+    let mut converted = Vec::with_capacity(entries.len());
+    for entry in entries {
+        converted.push(crate::tool_schema::SchemaEntry::from(
+            tool_schema_entry_value(entry)?,
+        ));
+    }
+    Ok(converted)
+}
+
+/// FFI session edge: convert the typed params into `SessionIoParams`,
+/// constructing the parsed schema set directly from the typed entries
+/// (only the catalog channel still arrives as JSON text). Fallible
+/// (never panics): a malformed entry is an `AgentException` the caller
+/// must handle.
+pub(crate) fn session_io_params(
+    p: FfiSessionIoParams,
+) -> Result<crate::engine::SessionIoParams, AgentException> {
+    let registry = tool_schema_entries(&p.tool_schema_registry)?;
+    let active = tool_schema_entries(&p.tool_schemas)?;
+    let schemas =
+        crate::tool_schema::ToolSchemaSet::from_entries(active, registry, &p.tool_catalog_json)
+            .map_err(|error| AgentException::Internal {
+                detail: error.to_string(),
+            })?;
+    Ok(crate::engine::SessionIoParams {
+        provider: p.provider,
+        context_window_tokens: p.context_window_tokens,
+        schemas,
+        system_prompt: p.system_prompt,
+    })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1491,5 +1586,78 @@ mod tests {
         let ffi = FfiContextReferenceKind::from(ContextReferenceKind::ArtifactSnapshot);
         let core = ContextReferenceKind::from(ffi);
         assert_eq!(core, ContextReferenceKind::ArtifactSnapshot);
+    }
+
+    fn io_with_active(entries: Vec<FfiToolSchemaEntry>) -> FfiSessionIoParams {
+        FfiSessionIoParams {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tool_catalog_json: "[]".into(),
+            tool_schema_registry: vec![],
+            tool_schemas: entries,
+            system_prompt: "sys".into(),
+        }
+    }
+
+    fn bare_entry(name: &str) -> FfiToolSchemaEntry {
+        FfiToolSchemaEntry {
+            name: name.into(),
+            description: None,
+            parameters_json: None,
+            reproducible: None,
+            deferrable: None,
+            max_result_bytes: None,
+        }
+    }
+
+    #[test]
+    fn session_io_params_full_entry_round_trips_to_schema_object() {
+        let mut entry = bare_entry("read_file");
+        entry.description = Some("Read a file".into());
+        entry.parameters_json =
+            Some(r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into());
+        entry.reproducible = Some(false);
+        entry.deferrable = Some(true);
+        entry.max_result_bytes = Some(4096);
+
+        let params = session_io_params(io_with_active(vec![entry])).expect("valid entry converts");
+        let active: serde_json::Value =
+            serde_json::from_str(params.schemas.active_json()).expect("active channel is JSON");
+        assert_eq!(
+            active,
+            serde_json::json!([{
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                "reproducible": false,
+                "deferrable": true,
+                "max_result_bytes": 4096,
+            }])
+        );
+    }
+
+    #[test]
+    fn session_io_params_name_only_entry_yields_name_only_object() {
+        let params =
+            session_io_params(io_with_active(vec![bare_entry("web_search")])).expect("converts");
+        let active: serde_json::Value =
+            serde_json::from_str(params.schemas.active_json()).expect("active channel is JSON");
+        assert_eq!(active, serde_json::json!([{"name": "web_search"}]));
+    }
+
+    #[test]
+    fn session_io_params_rejects_malformed_parameters_json() {
+        let mut entry = bare_entry("read_file");
+        entry.parameters_json = Some("not json".into());
+        let error = session_io_params(io_with_active(vec![entry])).err();
+        assert!(matches!(error, Some(AgentException::Internal { .. })));
+    }
+
+    #[test]
+    fn session_io_params_rejects_non_object_parameters_json() {
+        let mut entry = bare_entry("read_file");
+        entry.parameters_json = Some(r#"["not","an","object"]"#.into());
+        let error = session_io_params(io_with_active(vec![entry])).err();
+        assert!(matches!(error, Some(AgentException::Internal { .. })));
     }
 }

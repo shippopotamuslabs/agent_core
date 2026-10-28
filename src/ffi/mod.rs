@@ -21,7 +21,7 @@ pub use types::{
     FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
     FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams,
     FfiSummaryRequest, FfiSummaryResult, FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure,
-    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
+    FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord, FfiToolSchemaEntry,
 };
 
 use std::sync::Arc;
@@ -68,10 +68,7 @@ impl FfiAgentEngine {
             serde_json::from_str(&session_context_json).unwrap_or(serde_json::Value::Null);
         let msgs: Vec<crate::message::AgentMessage> =
             initial_messages.into_iter().map(Into::into).collect();
-        // Schema-contract violations reject session construction here:
-        // `TryFrom` yields `AgentError`, converted to `AgentException` by
-        // the `?` (the same error path as `read_context_reference`).
-        let io = crate::engine::SessionIoParams::try_from(io)?;
+        let io = types::session_io_params(io)?;
         let handle = self
             .inner
             .create_session(msgs, config.into(), capabilities.into(), ctx, io);
