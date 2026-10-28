@@ -199,3 +199,295 @@ fn m5_artifact_continuation_cannot_rely_only_on_synthetic_system_text() {
     assert_eq!(ledger.artifact_states[0].artifact_id, "art-2");
     assert_eq!(ledger.artifact_states[0].last_block_preview, "omega");
 }
+
+// ── ENC-301 state-ledger precedence ─────────────────────────────────────────
+
+#[test]
+fn enc301_decision_reversal_compaction_render_pin() {
+    // Decision -> live reversal -> summary compaction tier -> next ModelRequest
+    // (and its ledger anchor) carries only the surviving decision. The summary
+    // text re-mentions the retired decision through the real engine
+    // `merge_summary` path and must NOT resurrect it; the summary must not
+    // clobber the live objective either.
+    let cfg = AgentConfig {
+        enable_state_ledger: true,
+        ..Default::default()
+    };
+    let eng = AgentEngine::new();
+    let big = "hello ".repeat(400);
+    let handle = eng
+        .create_session(
+            vec![
+                AgentMessage {
+                    id: "u0".into(),
+                    role: AgentRole::User,
+                    content: format!("Objective: ship ledger v1. {big}"),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: format!("Decision: use FIFO. Decision: keep cache. {big}"),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "Reversal: use FIFO".into(),
+                    metadata: MessageMeta::new(),
+                },
+            ],
+            cfg,
+            SessionCapabilities {
+                summarization_allowed: true,
+                kv_fixed: false,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
+    match eng.next_action(&handle) {
+        AgentAction::RequestSummary(req) => {
+            eng.submit_summary(
+                &handle,
+                SummaryResult {
+                    summary_text: "Decision: use FIFO. Decision: keep cache. \
+                        Objective: hijacked objective"
+                        .into(),
+                    last_message_id: req.last_message_id,
+                },
+            );
+        }
+        other => panic!("expected RequestSummary, got {other:?}"),
+    }
+
+    match eng.next_action(&handle) {
+        AgentAction::CallModel(req) => {
+            let ledger = req
+                .state_ledger
+                .as_ref()
+                .expect("ModelRequest must carry state_ledger after compaction");
+            assert_eq!(
+                ledger.decisions,
+                vec!["keep cache".to_string()],
+                "only the surviving decision may render; the retired one stays tombstoned"
+            );
+            assert_eq!(ledger.retired, vec!["use fifo".to_string()]);
+            assert_eq!(
+                ledger.objective.as_deref(),
+                Some("ship ledger v1"),
+                "summary (older than the log tail) must not clobber the live objective"
+            );
+            let anchor = ledger
+                .as_anchor_message()
+                .expect("non-empty ledger must render an anchor");
+            assert!(
+                anchor.content.contains("keep cache"),
+                "anchor must carry the surviving decision: {anchor:?}"
+            );
+            assert!(
+                !anchor.content.contains("use FIFO"),
+                "anchor must not resurrect the retired decision: {anchor:?}"
+            );
+        }
+        other => panic!("expected CallModel, got {other:?}"),
+    }
+}
+
+#[test]
+fn enc301_objective_last_wins_live_summary_fills_only_when_empty() {
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Objective: first goal."));
+    assert_eq!(l.objective.as_deref(), Some("first goal"));
+    // Live is newest: last-write-wins.
+    l.observe_assistant_message(&assistant_msg("Objective: revised goal."));
+    assert_eq!(l.objective.as_deref(), Some("revised goal"));
+    // Summary is older than the log tail: never clobbers a live objective.
+    l.merge_summary("Objective: stale summary goal.", Some("s-1"));
+    assert_eq!(l.objective.as_deref(), Some("revised goal"));
+    // ... but fills an empty ledger.
+    let mut empty = StateLedger::default();
+    empty.merge_summary("Objective: summary seed.", Some("s-1"));
+    assert_eq!(empty.objective.as_deref(), Some("summary seed"));
+}
+
+#[test]
+fn enc301_set_semantics_dedupe_and_retirement_tags() {
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: keep cache. Decision: keep cache."));
+    // Exact normalized-text dedupe (case/whitespace-insensitive), first kept.
+    l.observe_assistant_message(&assistant_msg("Decision:  KEEP   cache."));
+    assert_eq!(l.decisions, vec!["keep cache".to_string()]);
+    // merge_summary duplicates dedupe too.
+    l.merge_summary("Decision: keep cache.", Some("s-1"));
+    l.merge_summary("Decision: keep cache.", Some("s-1"));
+    assert_eq!(l.decisions, vec!["keep cache".to_string()]);
+    assert_eq!(l.summary_refs, vec!["s-1".to_string()]);
+    // resolved: retires the matching open question.
+    l.observe_user_message(&user_msg("Open question: retention policy?"));
+    assert_eq!(l.open_questions.len(), 1);
+    l.observe_user_message(&user_msg("Resolved: retention policy?"));
+    assert!(l.open_questions.is_empty());
+    assert_eq!(l.retired, vec!["retention policy".to_string()]);
+    // supersedes: retires a matching constraint.
+    l.observe_user_message(&user_msg("Constraint: do not edit contracts."));
+    l.observe_user_message(&user_msg("Supersedes: do not edit contracts."));
+    assert!(l.constraints.is_empty());
+    // Unmatched reversal/resolved appends visibly as a decision, never silent.
+    l.observe_user_message(&user_msg("Reversal: drop the cache entirely."));
+    assert!(l.decisions.contains(&"drop the cache entirely".to_string()));
+    // Repeating a retirement for an already-tombstoned text stays silent
+    // (keeps the tombstone, does not resurrect the fact as a decision).
+    let before = l.decisions.clone();
+    l.observe_user_message(&user_msg("Reversal: do not edit contracts."));
+    assert_eq!(l.decisions, before);
+    assert!(l.retired.contains(&"do not edit contracts".to_string()));
+}
+
+#[test]
+fn enc301_cross_class_tombstone_does_not_shield_live_entry() {
+    let mut l = StateLedger::default();
+    // A decision whose text is later named by a resolved: tag. resolved:
+    // targets open_questions only, so for its class this retirement is
+    // unmatched: the text stays as a decision AND picks up a tombstone.
+    l.observe_user_message(&user_msg("Decision: ship the beta."));
+    l.observe_user_message(&user_msg("Resolved: ship the beta."));
+    assert_eq!(l.decisions, vec!["ship the beta".to_string()]);
+    assert_eq!(l.retired, vec!["ship the beta".to_string()]);
+    // A reversal targets decisions: the tombstone left by the other
+    // class's retirement must not shield the live decision.
+    l.observe_user_message(&user_msg("Reversal: ship the beta."));
+    assert!(l.decisions.is_empty());
+    assert_eq!(l.retired, vec!["ship the beta".to_string()]);
+    // A repeat resolved: afterwards is still a silent no-op.
+    l.observe_user_message(&user_msg("Resolved: ship the beta."));
+    assert!(l.decisions.is_empty());
+}
+
+#[test]
+fn enc301_live_reassert_clears_tombstone_and_restores() {
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO. Decision: keep cache."));
+    l.observe_user_message(&user_msg("Reversal: use FIFO."));
+    assert_eq!(l.decisions, vec!["keep cache".to_string()]);
+    // Summary re-observation of the retired text is tombstone-filtered.
+    l.merge_summary("Decision: use FIFO.", Some("s-1"));
+    assert_eq!(l.decisions, vec!["keep cache".to_string()]);
+    assert_eq!(l.retired, vec!["use fifo".to_string()]);
+    // A live re-assertion clears the tombstone and re-adds (appended anew).
+    l.observe_assistant_message(&assistant_msg("Decision: use FIFO."));
+    assert_eq!(
+        l.decisions,
+        vec!["keep cache".to_string(), "use FIFO".to_string()]
+    );
+    assert!(l.retired.is_empty());
+    // Touched files are set semantics as well; refs dedupe exact.
+    l.observe_user_message(&user_msg("File: src/a.rs. File: src/a.rs."));
+    l.merge_summary("File: src/a.rs.", Some("s-1"));
+    assert_eq!(l.touched_files, vec!["src/a.rs".to_string()]);
+    l.add_history_ref("h-1");
+    l.add_history_ref("h-1");
+    assert_eq!(l.history_refs, vec!["h-1".to_string()]);
+}
+
+#[test]
+fn enc301_summary_retirement_tags_are_ignored_entirely() {
+    // J1: retirement arms Live observations only. A summary reversal/resolved
+    // must neither retire a live entry nor append anything (the live original
+    // was already observed incrementally).
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg("Open question: retention policy?"));
+    l.merge_summary(
+        "Reversal: use FIFO. Resolved: retention policy?",
+        Some("s-1"),
+    );
+    assert_eq!(l.decisions, vec!["use FIFO".to_string()]);
+    assert_eq!(l.open_questions, vec!["retention policy?".to_string()]);
+    assert!(l.retired.is_empty());
+    // An unmatched summary reversal appends nothing either.
+    l.merge_summary("Reversal: something entirely new.", Some("s-2"));
+    assert_eq!(l.decisions, vec!["use FIFO".to_string()]);
+    assert!(l.retired.is_empty());
+}
+
+#[test]
+fn enc301_tag_match_requires_left_word_boundary() {
+    // J2: `Unresolved:` / `Indecision:` must not false-fire on the
+    // `resolved:` / `decision:` suffix.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Unresolved: flaky harness."));
+    assert!(l.decisions.is_empty());
+    assert!(l.open_questions.is_empty());
+    let mut l2 = StateLedger::default();
+    l2.observe_user_message(&user_msg("Indecision: which cache."));
+    assert!(l2.decisions.is_empty());
+    // An inline ". Decision:" (non-alphanumeric predecessor) still fires.
+    let mut l3 = StateLedger::default();
+    l3.observe_user_message(&user_msg("First thought. Decision: ship it."));
+    assert_eq!(l3.decisions, vec!["ship it".to_string()]);
+}
+
+#[test]
+fn enc301_nested_quoted_tags_do_not_rescan_but_multitag_lines_do() {
+    // J3: the scanner advances past the extracted value span, so a tag quoted
+    // inside a value never re-scans and retires a live fact.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg(
+        "Decision: she called it \"Reversal: use FIFO\" yesterday.",
+    ));
+    assert_eq!(
+        l.decisions,
+        vec![
+            "use FIFO".to_string(),
+            "she called it \"Reversal: use FIFO\" yesterday".to_string()
+        ]
+    );
+    assert!(l.retired.is_empty());
+    // Multi-tag lines still extract every tag.
+    let mut m = StateLedger::default();
+    m.observe_user_message(&user_msg("Decision: use FIFO. Decision: keep cache."));
+    assert_eq!(
+        m.decisions,
+        vec!["use FIFO".to_string(), "keep cache".to_string()]
+    );
+}
+
+#[test]
+fn enc301_repeat_unmatched_reversal_is_noop() {
+    // m3: an unmatched reversal appends visibly; repeating it must not
+    // self-cancel the appended entry.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Reversal: drop the cache entirely."));
+    assert_eq!(l.decisions, vec!["drop the cache entirely".to_string()]);
+    l.observe_user_message(&user_msg("Reversal: drop the cache entirely."));
+    assert_eq!(l.decisions, vec!["drop the cache entirely".to_string()]);
+    // Same rule for unmatched resolved.
+    l.observe_user_message(&user_msg("Resolved: unknown blocker?"));
+    assert!(l.decisions.contains(&"unknown blocker?".to_string()));
+    l.observe_user_message(&user_msg("Resolved: unknown blocker?"));
+    assert!(l.decisions.contains(&"unknown blocker?".to_string()));
+}
+
+#[test]
+fn enc301_retirement_matching_is_case_insensitive() {
+    // m4: `REVERSAL: USE fifo` retires `Decision: use FIFO`.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg("REVERSAL: USE fifo."));
+    assert!(l.decisions.is_empty());
+    assert_eq!(l.retired, vec!["use fifo".to_string()]);
+}
+
+#[test]
+fn enc301_resolved_matches_trailing_question_mark_variant() {
+    // m2: `Resolved: retention policy` (no `?`) retires the stored
+    // `retention policy?` via trailing-punctuation-insensitive keys.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Open question: retention policy?"));
+    l.observe_user_message(&user_msg("Resolved: retention policy"));
+    assert!(l.open_questions.is_empty());
+}
