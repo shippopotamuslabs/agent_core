@@ -84,13 +84,8 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     // as name stubs; the host wires their full schemas provider-side.
     let active_schemas = io.schemas.render_active_schemas(active_tool_names);
 
-    let tool_context_index = build_tool_context_index_from_set(
-        &active_schemas,
-        &io.schemas,
-        context_store,
-        config,
-        capabilities,
-    );
+    let tool_context_index =
+        build_tool_context_index_from_set(&active_schemas, &io.schemas, config, capabilities);
     let tool_schemas = if tool_context_index.is_some() && !has_catalog {
         Vec::new()
     } else {

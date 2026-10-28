@@ -135,7 +135,7 @@ fn s14_deferred_tool_schema_metadata_is_advertised_without_stash() {
 }
 
 #[test]
-fn e6_tool_schema_deferral_disabled_falls_back_to_full_schema_json() {
+fn e6_tool_schema_deferral_disabled_falls_back_to_active_schema_json() {
     let cfg = AgentConfig {
         enable_tool_schema_deferral: true,
         ..Default::default()

@@ -782,9 +782,7 @@ pub struct FfiSessionIoParams {
 /// Rebuild one entry's schema object from the typed fields: every present
 /// field is set on the object. Key order normalizes sorted on
 /// serialization, matching the legacy host-string renders.
-fn tool_schema_entry_value(
-    entry: &FfiToolSchemaEntry,
-) -> Result<serde_json::Value, AgentException> {
+fn tool_schema_entry_value(entry: &FfiToolSchemaEntry) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     object.insert(
         "name".to_string(),
@@ -814,7 +812,7 @@ fn tool_schema_entry_value(
             serde_json::Value::Number(max_result_bytes.into()),
         );
     }
-    Ok(serde_json::Value::Object(object))
+    serde_json::Value::Object(object)
 }
 
 /// Convert typed boundary entries into parsed [`SchemaEntry`]s in one
@@ -841,7 +839,7 @@ fn tool_schema_entries(
             });
         }
         converted.push(crate::tool_schema::SchemaEntry::from(
-            tool_schema_entry_value(entry)?,
+            tool_schema_entry_value(entry),
         ));
     }
     Ok(converted)

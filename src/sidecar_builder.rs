@@ -83,6 +83,7 @@ impl SidecarBuilder {
             &payload,
             budget,
             ContextReferenceKind::ArtifactSnapshot,
+            "ledger",
             "ledger_snapshot",
         );
         self.last_ledger_json = Some(full);
@@ -95,15 +96,16 @@ impl SidecarBuilder {
         index: &ToolContextIndex,
         budget: usize,
     ) -> Option<String> {
-        // ENC-296: the index is advertisement-only (no full_schema_ref to
-        // omit) and the ToolCatalogIndex spill kind is deleted; oversized
-        // payloads spill under the generic ArtifactSnapshot kind.
+        // ENC-296: the index payload is advertisement-only (no schema text)
+        // and browsable by design; oversized payloads spill under the
+        // generic ArtifactSnapshot kind with an explicit tool-index id prefix.
         let payload = serde_json::to_string(index).ok()?;
         Some(enforce_byte_budget(
             store,
             &payload,
             budget,
             ContextReferenceKind::ArtifactSnapshot,
+            "tool-index",
             "tool_context_index",
         ))
     }
@@ -120,6 +122,7 @@ impl SidecarBuilder {
             &payload,
             budget,
             ContextReferenceKind::FileOutline,
+            "file-index",
             "file_context_index",
         ))
     }
@@ -154,15 +157,11 @@ fn insert_spilled_sidecar(
     store: &mut ContextStore,
     payload: &str,
     kind: ContextReferenceKind,
+    id_prefix: &str,
     title: &str,
 ) -> String {
     let seq = store.next_sequence();
-    let prefix = match kind {
-        ContextReferenceKind::ArtifactSnapshot => "ledger",
-        ContextReferenceKind::FileOutline => "file-index",
-        _ => "sidecar",
-    };
-    let id = format!("ctxref-{}-{}", prefix, seq);
+    let id = format!("ctxref-{}-{}", id_prefix, seq);
     let preview = make_preview(payload);
     let reference = ContextReference {
         id: id.clone(),
@@ -189,12 +188,13 @@ fn enforce_byte_budget(
     payload: &str,
     budget: usize,
     kind: ContextReferenceKind,
+    id_prefix: &str,
     title: &str,
 ) -> String {
     if payload.len() <= budget {
         return payload.to_string();
     }
-    let ref_id = insert_spilled_sidecar(store, payload, kind, title);
+    let ref_id = insert_spilled_sidecar(store, payload, kind, id_prefix, title);
     let truncated = json!({
         "refs": [ref_id],
         "truncated": true,

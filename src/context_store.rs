@@ -333,6 +333,8 @@ mod tests {
         // deleted, so every remaining (engine-created) kind is browsable.
         // Re-pinned from the old exclusion assertions: the contract is now
         // that no infrastructure kind survives outside this list.
+        // The exhaustive match below has no wildcard arm on purpose: adding
+        // a future variant fails compilation here until it is classified.
         for kind in [
             ContextReferenceKind::ToolOutput,
             ContextReferenceKind::TerminalOutput,
@@ -341,10 +343,17 @@ mod tests {
             ContextReferenceKind::FileOutline,
             ContextReferenceKind::FileChunk,
         ] {
-            assert!(
-                is_browsable_context_kind(&kind),
-                "{kind:?} must be browsable"
-            );
+            match kind {
+                ContextReferenceKind::ToolOutput
+                | ContextReferenceKind::TerminalOutput
+                | ContextReferenceKind::HistorySnapshot
+                | ContextReferenceKind::ArtifactSnapshot
+                | ContextReferenceKind::FileOutline
+                | ContextReferenceKind::FileChunk => assert!(
+                    is_browsable_context_kind(&kind),
+                    "{kind:?} must be browsable"
+                ),
+            }
         }
     }
 

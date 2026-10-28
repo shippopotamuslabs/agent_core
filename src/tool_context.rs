@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context_store::{make_preview, ContextStore};
+use crate::context_store::make_preview;
 use crate::session::{AgentConfig, SessionCapabilities};
 use crate::tool_schema::{SchemaEntry, ToolSchemaSet};
 
@@ -38,7 +38,6 @@ pub struct ToolContextIndex {
 pub fn build_tool_context_index(
     tools_schema_json: &str,
     catalog_json: &str,
-    _store: &mut ContextStore,
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
 ) -> Option<ToolContextIndex> {
@@ -55,7 +54,7 @@ pub fn build_tool_context_index(
     // hard on any violation.
     let schemas = ToolSchemaSet::parse_lenient(tools_schema_json, catalog_json);
     let active = schemas.active.clone();
-    build_tool_context_index_from_set(&active, &schemas, _store, config, capabilities)
+    build_tool_context_index_from_set(&active, &schemas, config, capabilities)
 }
 
 /// Build the tool-context index from the session-parsed [`ToolSchemaSet`]
@@ -69,7 +68,6 @@ pub fn build_tool_context_index(
 pub fn build_tool_context_index_from_set(
     active: &[SchemaEntry],
     schemas: &ToolSchemaSet,
-    _store: &mut ContextStore,
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
 ) -> Option<ToolContextIndex> {
