@@ -53,6 +53,25 @@ pub fn estimate_session_pressure(
     config: &AgentConfig,
     ctx: &CompactionContext,
 ) -> crate::session::Pressure {
+    estimate_session_pressure_with(
+        crate::token_counter::default_counter(),
+        session,
+        config,
+        ctx,
+    )
+}
+
+/// [`estimate_session_pressure`] counted with an explicit [`TokenCounter`]
+/// instead of the process default (ENC-292 port). Lives here, next to
+/// [`CompactionContext`], rather than in the token-counting port: the port
+/// stays a leaf depending only on its tokenizer, and the high-level types
+/// (session, config, budget parts) stay on the domain side of it.
+pub fn estimate_session_pressure_with(
+    counter: &dyn crate::token_counter::TokenCounter,
+    session: &AgentSession,
+    config: &AgentConfig,
+    ctx: &CompactionContext,
+) -> crate::session::Pressure {
     let parts = PromptBudgetParts {
         provider: &ctx.provider,
         context_window_tokens: ctx.context_window_tokens,
@@ -64,7 +83,7 @@ pub fn estimate_session_pressure(
             &ctx.context_sidecars_estimate
         },
     };
-    TokenLedger::estimate(session, config, &parts)
+    TokenLedger::estimate_with(counter, session, config, &parts)
 }
 
 /// Result of a single compaction tier (or whole pipeline) run.

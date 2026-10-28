@@ -907,3 +907,119 @@ fn r_49_string_x_search_boolean_filters_coerced_on_parse() {
     assert_eq!(value["has_geo"], Value::Bool(true));
     assert_eq!(value["has_media"], Value::Bool(false));
 }
+
+// ---------------------------------------------------------------------------
+// FRG-45 characterization: envelope-extraction behaviors pinned before the
+// extract_dsml / extract_tool_call refactor. These guard the three risky
+// behaviors named in the ticket.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frg45_duplicate_param_failure_envelope_keeps_exact_block_byte_offsets() {
+    // The soft-failure envelope for a duplicate DSML parameter must slice
+    // visible_prefix/suffix at the exact block-tag byte offsets, so the
+    // batch surfaces the surrounding prose verbatim.
+    let raw = "PREAMBLE<| DSML | tool_calls>\
+               <| DSML | invoke name=\"web_search\">\
+               <| DSML | parameter name=\"query\" string=\"true\">first</| DSML | parameter>\
+               <| DSML | parameter name=\"query\" string=\"true\">second</| DSML | parameter>\
+               </| DSML | invoke>\
+               </| DSML | tool_calls>POSTAMBLE";
+    let batch = parse_tool_calls(raw);
+    assert_eq!(batch.visible_prefix, "PREAMBLE");
+    assert_eq!(batch.visible_suffix, "POSTAMBLE");
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::DuplicateParameter {
+            tool: "web_search".to_string(),
+            param: "query".to_string(),
+        }
+    );
+}
+
+#[test]
+fn frg45_duplicate_param_is_soft_failure_and_parse_continues() {
+    // Duplicate parameter is SOFT: the failure envelope is pushed AND parsing
+    // continues — the same invoke still yields a success (first value wins)
+    // and later invokes in the block are still parsed.
+    let raw = "<| DSML | tool_calls>\
+               <| DSML | invoke name=\"web_search\">\
+               <| DSML | parameter name=\"query\" string=\"true\">first</| DSML | parameter>\
+               <| DSML | parameter name=\"query\" string=\"true\">second</| DSML | parameter>\
+               </| DSML | invoke>\
+               <| DSML | invoke name=\"web_search\">\
+               <| DSML | parameter name=\"query\" string=\"true\">third</| DSML | parameter>\
+               </| DSML | invoke>\
+               </| DSML | tool_calls>";
+    let batch = parse_tool_calls(raw);
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::DuplicateParameter {
+            tool: "web_search".to_string(),
+            param: "query".to_string(),
+        }
+    );
+    assert_eq!(batch.successes.len(), 2);
+    assert_eq!(batch.successes[0].arguments_json, r#"{"query":"first"}"#);
+    assert_eq!(batch.successes[1].arguments_json, r#"{"query":"third"}"#);
+}
+
+#[test]
+fn frg45_truncated_tool_call_recovers_at_eos_with_repair_hint() {
+    // Unclosed <tool_call> at end of output with no later open tag and no
+    // GLM markers recovers: the truncated payload parses and the batch
+    // records the recovery hint.
+    let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"weather"#;
+    let batch = parse_tool_calls(raw);
+    assert!(batch.failures.is_empty(), "failures: {:?}", batch.failures);
+    assert_eq!(batch.successes.len(), 1);
+    assert_eq!(batch.successes[0].arguments_json, r#"{"query":"weather"}"#);
+    assert!(batch.successes[0]
+        .repairs
+        .iter()
+        .any(|r| r == "recovered unclosed tool_call envelope truncated at end of output"));
+}
+
+#[test]
+fn frg45_truncated_glm_never_takes_recovery_path() {
+    // GLM form (<arg_key>) without a closing tag is a hard failure even at
+    // end of output: it must NOT recover.
+    let raw = r#"<tool_call> web_search <arg_key>query</arg_key> <arg_value>"weather"#;
+    let batch = parse_tool_calls(raw);
+    assert!(batch.successes.is_empty());
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
+}
+
+#[test]
+fn frg45_unclosed_tool_call_with_later_open_is_hard_failure() {
+    // An unclosed <tool_call> followed by another <tool_call> opener is a
+    // hard failure: no recovery is attempted.
+    let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"a"}} <tool_call>{"name":"web_search","arguments":{"query":"b"}}"#;
+    let batch = parse_tool_calls(raw);
+    assert!(batch.successes.is_empty());
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
+}
+
+#[test]
+fn frg45_truncated_tool_call_empty_payload_is_hard_failure() {
+    // An unclosed <tool_call> with no payload content at end of output is a
+    // hard failure (there is nothing to recover).
+    let raw = "<tool_call>   ";
+    let batch = parse_tool_calls(raw);
+    assert!(batch.successes.is_empty());
+    assert_eq!(batch.failures.len(), 1);
+    assert_eq!(
+        batch.failures[0].reason,
+        ToolParseFailureReason::MalformedEnvelope
+    );
+}
