@@ -298,20 +298,6 @@ impl AgentConfig {
         })
     }
 
-    /// Re-syncs [`tool_catalog`](Self::tool_catalog) from the current
-    /// [`tool_semantics`](Self::tool_semantics) (validate only — ENC-297 D4;
-    /// the old catalog-JSON merge is deleted).
-    ///
-    /// Runs once at session construction so struct-literal configs (tests,
-    /// serde) enter the engine with a catalog that matches their semantics.
-    /// Returns [`ToolSemanticsError`] on invalid semantics; the previous
-    /// catalog is kept in that case.
-    pub fn prepare_tool_semantics(&mut self) -> Result<(), ToolSemanticsError> {
-        let catalog = ToolCatalog::from_semantics(&self.tool_semantics)?;
-        self.tool_catalog = catalog;
-        Ok(())
-    }
-
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {
         let mut config = Self {
             long_loop: LongLoopPolicy::for_policy_tier(tier),

@@ -20,6 +20,7 @@ use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
 use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
+use crate::tool_universe::ToolUniverse;
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
@@ -113,9 +114,18 @@ pub(crate) struct InnerSession {
     pub(super) terminal_action: Option<AgentAction>,
     pub(super) last_model_response_greedy_tool_names: Vec<ToolName>,
     pub(super) tools_blocked_nudges_this_turn: u32,
-    /// Active tool names for the current session. Updated on tool_discovery_tool activations.
-    /// Initially populated from the session's parsed [`ToolSchemaSet`].
-    pub(super) active_tool_names: Vec<ToolName>,
+    /// The session's tool world (ENC-304): schema entries, semantics,
+    /// catalog, and the active name set, built once at construction by
+    /// [`ToolUniverse::build`]. The universe is the session's single live
+    /// source of tool data. `config.tool_semantics` / `config.tool_catalog`
+    /// / `io.schemas` are boundary-input shape only: `create_session`
+    /// CONSUMED them into the universe at construction and reset the
+    /// stored copies (agnostic semantics, default catalog, empty schema
+    /// set), so they hold no live data. Engine tool-data reads go through
+    /// here, and `&AgentConfig` consumers (guardrails, compaction tiers)
+    /// are fed `InnerSession::effective_tool_config` — the stored config
+    /// clone with tool fields replaced from this universe.
+    pub(super) universe: ToolUniverse,
     pub(super) sidecar_builder: SidecarBuilder,
     /// Compaction-owned state (ENC-306 D1): per-turn pass/destructive-tier
     /// telemetry counters (reset on turn start) and the summary-tier

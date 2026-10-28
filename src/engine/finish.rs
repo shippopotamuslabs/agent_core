@@ -43,7 +43,7 @@ impl InnerSession {
 
         let synth = synthetic_finalize_calls_with_semantics(
             &self.pending.artifact_ids,
-            &self.config.tool_semantics,
+            self.universe.semantics(),
         );
         if !synth.is_empty() {
             self.pending.execute = Some(synth);
@@ -121,15 +121,24 @@ impl InnerSession {
         if self.config.enable_state_ledger {
             self.state_ledger.observe_user_message(&injected_message);
         }
-        let allow = self
-            .guardrails
-            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
+        // M3 (ENC-304 fix pass): the guardrail reads greedy-extension tool
+        // data through the config, so it is fed the effective config built
+        // from the session's universe — the stored `self.config` tool fields
+        // were consumed at session construction. (`build_model_request`
+        // below keeps `&self.config`: it reads no tool fields from it,
+        // taking tool data from `self.universe` directly.) The derivation
+        // itself is the shared `effective_tool_config_from`, the same one
+        // `InnerSession::effective_tool_config` uses.
+        let allow = self.guardrails.allow_tool_call(
+            &self.effective_tool_config(),
+            &self.last_model_response_greedy_tool_names,
+        );
         let request = build_model_request(ModelRequestInputs {
             session: &self.session,
             config: &self.config,
             capabilities: &self.capabilities,
             io: &self.io,
-            active_tool_names: &self.active_tool_names,
+            universe: &self.universe,
             context_store: &mut self.context_store,
             state_ledger: &self.state_ledger,
             sidecar_builder: &mut self.sidecar_builder,

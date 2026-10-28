@@ -316,6 +316,14 @@ impl ToolSchemaSet {
         Self { active, raw_active }
     }
 
+    /// Append one already-validated entry (ENC-304 admission path on
+    /// [`ToolUniverse`](crate::tool_universe::ToolUniverse)), resyncing the
+    /// raw text exactly as [`ToolSchemaSet::from_entries`] does.
+    pub(crate) fn push_entry(&mut self, entry: SchemaEntry) {
+        self.active.push(entry);
+        self.raw_active = entries_json(&self.active);
+    }
+
     /// Session-level raw text of the active channel (pressure/budget).
     pub fn active_json(&self) -> &str {
         &self.raw_active
