@@ -40,10 +40,9 @@ jobs:
       - run: cargo clippy --all-targets --locked --no-default-features -- -D warnings
 
   # NOTE: this job intentionally tests default features, not --all-features.
-  # --all-features additionally enables the dev-only `lalr-harness` feature,
-  # whose TDD-Red tests (tests/compaction_boundary_test.rs declares
-  # "TDD Red" in its header) fail by design until the long-loop feature
-  # work lands. The two consumer configurations below are what CI gates.
+  # --all-features additionally enables the dev-only `lalr-harness` feature;
+  # that family has its own job below (test-lalr-harness, ENC-309). The two
+  # consumer configurations here are what the consumer builds gate on.
   test-default-features:
     name: cargo test (default features)
     runs-on: ubuntu-latest
@@ -81,3 +80,20 @@ jobs:
           else
             echo "uniffi guard: no uniffi crates in the --no-default-features tree"
           fi
+
+  # ENC-309: the lalr-harness scenario family (compaction boundary,
+  # transcript revision, long-loop, sidecar budget, prefix stability)
+  # compiles only under --features lalr-harness, which neither consumer
+  # configuration enables. It rotted red once already behind that gap
+  # (five stale pins, all misread as "TDD Red by design"); this job is
+  # its home. It re-runs the whole suite in the harness configuration
+  # (a few minutes; the long pole is the context-management end-to-end
+  # suite), still well inside the PR budget.
+  test-lalr-harness:
+    name: cargo test (lalr-harness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --features lalr-harness

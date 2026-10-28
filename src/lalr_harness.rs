@@ -10,13 +10,12 @@ use crate::context_store::ContextStore;
 use crate::engine::{AgentEngine, SessionHandle, SessionIoParams};
 use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
 use crate::long_loop_policy::{effective_max_tool_turns, should_stop_tool_rounds, LongLoopPolicy};
-use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::ProviderContextSnapshot;
 use crate::state_ledger::StateLedger;
 use crate::transcript_revision::transcript_revision_of;
 use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
-use std::sync::Arc;
 
 /// Outcome of a simulated multi-tool user turn (LALR-01, LALR-11, LALR-20).
 #[derive(Debug, Clone)]
@@ -194,6 +193,24 @@ pub fn run_twenty_five_tool_turn_loop(
     }
 }
 
+/// Host semantics for the destructive-compaction scenarios: since the
+/// global catalog was removed (1195bca; ratified by ENC-296, host owns
+/// the tool registry), the micro tier only touches tools the host
+/// declares reproducible. A scenario whose subject is a destructive
+/// micro pass must therefore declare its tool the way a real host
+/// does — without this, the tier has no candidates and only the
+/// non-destructive HistorySnapshot tier applies (ENC-309).
+fn scenario_tool_semantics() -> crate::tool_semantics::ToolSemanticsConfig {
+    let mut semantics = crate::tool_semantics::ToolSemanticsConfig::agnostic();
+    semantics.catalog.tools.push(crate::catalog::ToolSpec {
+        name: crate::tool_name::ToolName::new("web_search").expect("valid tool name"),
+        aliases: Vec::new(),
+        reproducible: true,
+        schema_hint: None,
+    });
+    semantics
+}
+
 /// Runs one destructive micro compaction pass with Preflight trigger.
 pub fn run_destructive_micro_preflight_pass(
     session: &mut AgentSession,
@@ -203,6 +220,7 @@ pub fn run_destructive_micro_preflight_pass(
     let mut test_config = config.clone();
     test_config.preflight_token_threshold = Some(1);
     test_config.micro_keep_recent = 0;
+    test_config.tool_semantics = scenario_tool_semantics();
 
     let engine = test_engine();
 
@@ -237,10 +255,13 @@ pub fn run_destructive_micro_preflight_pass(
 
 /// Runs two destructive compaction passes; returns drained events and final revision.
 pub fn run_two_destructive_compaction_passes(session: &mut AgentSession) -> (u64, Vec<AgentEvent>) {
-    let mut config = AgentConfig::default();
-    config.preflight_token_threshold = Some(1);
-    config.post_tool_result_token_threshold = Some(1);
-    config.micro_keep_recent = 0;
+    let config = AgentConfig {
+        preflight_token_threshold: Some(1),
+        post_tool_result_token_threshold: Some(1),
+        micro_keep_recent: 0,
+        tool_semantics: scenario_tool_semantics(),
+        ..AgentConfig::default()
+    };
     let caps = SessionCapabilities::default();
 
     let engine = test_engine();

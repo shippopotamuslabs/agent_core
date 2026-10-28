@@ -1,4 +1,6 @@
-//! TDD Red — transcript revision scenarios LALR-02, LALR-04, LALR-17.
+//! Transcript revision scenarios LALR-02, LALR-04, LALR-17.
+//! (ENC-309: LALR-02 was a stale spec from the global-catalog era — see
+//! src/lalr_harness.rs `scenario_tool_semantics`.)
 
 use agent_core::events::CompactionTier;
 use agent_core::lalr_harness::{config_with_long_loop, run_destructive_micro_preflight_pass};

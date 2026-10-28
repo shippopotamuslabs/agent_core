@@ -79,15 +79,17 @@ fn capture_call_model_requests(rounds: u32) -> Vec<ModelRequest> {
 
 /// Avoid early pressure-triggered compaction; we want pure append turns.
 fn cache_friendly_config() -> AgentConfig {
-    let mut config = AgentConfig::default();
-    config.enable_state_ledger = true;
-    config.enable_loop_hooks = false;
-    config.enable_pending_work_guard = false;
+    let mut config = AgentConfig {
+        enable_state_ledger: true,
+        enable_loop_hooks: false,
+        enable_pending_work_guard: false,
+        threshold_ratio: 0.99,
+        preflight_token_threshold: None,
+        mid_turn_token_threshold: None,
+        ..AgentConfig::default()
+    };
     config.long_loop.compact_every_n_tool_turns = 0;
     config.long_loop.summarize_after_tool_turns = 0;
-    config.threshold_ratio = 0.99;
-    config.preflight_token_threshold = None;
-    config.mid_turn_token_threshold = None;
     config
 }
 
