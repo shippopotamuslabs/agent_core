@@ -3,8 +3,8 @@
 ## Phase Checklist
 - [x] Research — vision approval: approved (mission)
 - [x] Plan
-- [ ] Implementation
-- [ ] Review — rounds: 0/3, result: pending
+- [x] Implementation
+- [x] Review — rounds: 1/3, result: clean after fix pass (J1+J2+m1-m4 fixed 4e4b2af)
 - [ ] Ship — PR: none (stacked on #33)
 
 ## Current Gate
