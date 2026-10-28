@@ -346,7 +346,7 @@ impl AgentEngine {
                         // The provider finish reason may be ToolUse/Other for the blocked
                         // attempt; finishing with it would fail the loop after a graceful
                         // fallback, so force Stop semantics.
-                        finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
+                        g.finish_after_model_stop(FinishReason::Stop);
                         return;
                     }
                 }
@@ -362,7 +362,7 @@ impl AgentEngine {
         );
 
         if merged_tool_calls.is_empty() {
-            finish::finish_after_model_stop(g.finish_state(), response.finish_reason);
+            g.finish_after_model_stop(response.finish_reason);
             return;
         }
 
@@ -1013,33 +1013,6 @@ pub(super) fn session_has_append_context(
 }
 
 impl InnerSession {
-    /// ENC-286 slice 3: dispatch glue — bundles the disjoint finish fields for
-    /// `finish::finish_after_model_stop`. No logic lives here.
-    fn finish_state(&mut self) -> finish::FinishState<'_> {
-        finish::FinishState {
-            session: &mut self.session,
-            config: &self.config,
-            capabilities: &self.capabilities,
-            io: &self.io,
-            guardrails: &mut self.guardrails,
-            loop_metrics: &self.loop_metrics,
-            phase: &mut self.phase,
-            terminal_action: &mut self.terminal_action,
-            pending: &mut self.pending,
-            last_model_response_greedy_tool_names: &self.last_model_response_greedy_tool_names,
-            state_ledger: &mut self.state_ledger,
-            context_store: &mut self.context_store,
-            sidecar_builder: &mut self.sidecar_builder,
-            active_tool_names: &self.active_tool_names,
-            turn_index: self.turn_index,
-            model_requests_this_turn: &mut self.model_requests_this_turn,
-            compaction_passes_this_turn: self.compaction.passes_this_turn(),
-            destructive_tiers_this_turn: self.compaction.destructive_tiers_this_turn(),
-            suppress_summary_tier: self.compaction.suppress_summary_tier(),
-            events: &mut self.events,
-        }
-    }
-
     /// Manual-compact entry to the shared `NeedsHostCall` staging, which is
     /// an `InnerSession` method in the compaction module (ENC-306 D2).
     fn stage_summary_request(
