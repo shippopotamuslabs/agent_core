@@ -14,14 +14,8 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{ModelRequest, ModelResponse};
 
 fn io() -> SessionIoParams {
-    SessionIoParams::new(
-        "openrouter".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("openrouter".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {
@@ -46,6 +40,7 @@ fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::Se
         serde_json::Value::Null,
         io(),
     )
+    .expect("valid config creates session")
 }
 
 fn transient_failure(message: &str) -> ModelTurnFailureReport {

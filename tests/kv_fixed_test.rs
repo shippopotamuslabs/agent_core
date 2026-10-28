@@ -11,14 +11,8 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     let big = "hello ".repeat(400);
     let mk = || AgentEngine::new();
     let io = || {
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params")
+        SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+            .expect("valid test io params")
     };
     let msgs = vec![
         AgentMessage {
@@ -42,18 +36,20 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     ];
 
     let eng_kv = mk();
-    let h_kv = eng_kv.create_session(
-        msgs.clone(),
-        AgentConfig::default(),
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: true,
-            tool_result_budget_tokens: None,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        io(),
-    );
+    let h_kv = eng_kv
+        .create_session(
+            msgs.clone(),
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: true,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
     let _ = eng_kv.next_action(&h_kv);
     assert!(eng_kv
         .drain_events(&h_kv)
@@ -61,18 +57,20 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
         .any(|e| matches!(e, AgentEvent::KvCacheInvalidated { .. })));
 
     let eng_plain = mk();
-    let h_plain = eng_plain.create_session(
-        msgs,
-        AgentConfig::default(),
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: false,
-            tool_result_budget_tokens: None,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        io(),
-    );
+    let h_plain = eng_plain
+        .create_session(
+            msgs,
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
     let _ = eng_plain.next_action(&h_plain);
     assert!(!eng_plain
         .drain_events(&h_plain)
@@ -87,50 +85,52 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
 fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
     let big = "hello ".repeat(600);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            AgentMessage {
-                id: "u0".into(),
-                role: AgentRole::User,
-                content: big.clone(),
-                metadata: MessageMeta::new(),
+    let handle = eng
+        .create_session(
+            vec![
+                AgentMessage {
+                    id: "u0".into(),
+                    role: AgentRole::User,
+                    content: big.clone(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: big.clone(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: big.clone(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "a1".into(),
+                    role: AgentRole::Assistant,
+                    content: big,
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "u2".into(),
+                    role: AgentRole::User,
+                    content: "tail".into(),
+                    metadata: MessageMeta::new(),
+                },
+            ],
+            AgentConfig::default(),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: true,
+                context_policy_tier: agent_core::policy::ContextPolicyTier::FixedKv,
+                ..Default::default()
             },
-            AgentMessage {
-                id: "a0".into(),
-                role: AgentRole::Assistant,
-                content: big.clone(),
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: big.clone(),
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "a1".into(),
-                role: AgentRole::Assistant,
-                content: big,
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "u2".into(),
-                role: AgentRole::User,
-                content: "tail".into(),
-                metadata: MessageMeta::new(),
-            },
-        ],
-        AgentConfig::default(),
-        SessionCapabilities {
-            summarization_allowed: false,
-            kv_fixed: true,
-            context_policy_tier: agent_core::policy::ContextPolicyTier::FixedKv,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        SessionIoParams::new("llama".into(), 512, "[]".into(), "[]".into(), "sys".into())
-            .expect("valid test io params"),
-    );
+            serde_json::Value::Null,
+            SessionIoParams::new("llama".into(), 512, "[]".into(), "sys".into())
+                .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
 
     let action = eng.next_action(&handle);
     match action {

@@ -35,35 +35,6 @@ impl ToolSemanticsConfig {
         serde_json::from_str(json)
     }
 
-    /// Merges host-provided catalog JSON into `catalog.tools` when the config catalog is empty.
-    pub fn merge_catalog_json(&mut self, catalog_json: &str) -> Result<(), ToolSemanticsError> {
-        let trimmed = catalog_json.trim();
-        if trimmed.is_empty() || trimmed == "[]" {
-            return Ok(());
-        }
-        #[derive(Deserialize)]
-        struct CatalogFile {
-            tools: Vec<ToolSpec>,
-        }
-        let tools = if trimmed.starts_with('[') {
-            serde_json::from_str(trimmed).map_err(|error| {
-                ToolSemanticsError::InvalidResultPolicy {
-                    message: format!("invalid tool catalog json: {error}"),
-                }
-            })?
-        } else {
-            serde_json::from_str::<CatalogFile>(trimmed)
-                .map_err(|error| ToolSemanticsError::InvalidResultPolicy {
-                    message: format!("invalid tool catalog json: {error}"),
-                })?
-                .tools
-        };
-        if self.catalog.tools.is_empty() {
-            self.catalog.tools = tools;
-        }
-        self.validate()
-    }
-
     pub fn validate(&self) -> Result<(), ToolSemanticsError> {
         let mut names: HashMap<String, String> = HashMap::new();
         for tool in &self.catalog.tools {
@@ -294,40 +265,56 @@ pub(crate) fn result_policy_for<'a>(
         .find(|policy| normalize_tool_name(&policy.tool_name) == normalize_tool_name(tool_name))
 }
 
-/// Loads host semantics JSON and merges session catalog JSON into an executable catalog.
-/// Only called from the UniFFI bridge, so it exists only with the `ffi` feature.
-#[cfg(feature = "ffi")]
-pub(crate) fn load_semantics_with_session_catalog(
-    tool_semantics_json: &str,
-    tool_catalog_json: &str,
-) -> Result<(ToolSemanticsConfig, crate::catalog::ToolCatalog), String> {
-    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
-        .map_err(|error| format!("invalid tool_semantics_json: {error}"))?;
-    semantics
-        .merge_catalog_json(tool_catalog_json)
-        .map_err(|error| format!("tool catalog merge failed: {error:?}"))?;
-    let catalog = crate::catalog::ToolCatalog::from_semantics(&semantics)
-        .map_err(|error| format!("invalid merged tool catalog: {error:?}"))?;
-    Ok((semantics, catalog))
-}
-
 #[cfg(test)]
-mod merge_catalog_tests {
+mod catalog_split_tests {
     use super::*;
 
     #[test]
-    fn legacy_kotlin_catalog_shape_fails_merge() {
-        let mut semantics = ToolSemanticsConfig::agnostic();
-        let legacy = r#"[{"name":"web_search","description":"x","disclosureMode":"PRELOADED"}]"#;
-        assert!(semantics.merge_catalog_json(legacy).is_err());
+    fn with_tool_semantics_builds_policy_catalog() {
+        use crate::catalog::ToolSpec;
+        let semantics = ToolSemanticsConfig {
+            catalog: ToolCatalogConfig {
+                tools: vec![ToolSpec {
+                    name: "web_search".to_string(),
+                    aliases: vec!["websearch".to_string()],
+                    reproducible: true,
+                    schema_hint: None,
+                }],
+            },
+            ..ToolSemanticsConfig::agnostic()
+        };
+        let config =
+            crate::session::AgentConfig::with_tool_semantics(semantics).expect("valid semantics");
+        assert_eq!(config.tool_catalog.len(), 1);
+        assert_eq!(
+            config.tool_catalog.resolve("websearch").unwrap().name,
+            "web_search"
+        );
+        assert!(!config.tool_catalog.is_empty());
     }
 
     #[test]
-    fn tool_spec_array_merges_into_empty_semantics_catalog() {
-        let mut semantics = ToolSemanticsConfig::agnostic();
-        let specs = r#"[{"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":null}]"#;
-        semantics.merge_catalog_json(specs).expect("merge");
-        assert_eq!(semantics.catalog.tools.len(), 1);
-        assert_eq!(semantics.catalog.tools[0].name, "web_search");
+    fn with_tool_semantics_rejects_duplicate_tool_names() {
+        use crate::catalog::ToolSpec;
+        let semantics = ToolSemanticsConfig {
+            catalog: ToolCatalogConfig {
+                tools: vec![
+                    ToolSpec {
+                        name: "web_search".to_string(),
+                        aliases: Vec::new(),
+                        reproducible: true,
+                        schema_hint: None,
+                    },
+                    ToolSpec {
+                        name: "web-search".to_string(),
+                        aliases: Vec::new(),
+                        reproducible: true,
+                        schema_hint: None,
+                    },
+                ],
+            },
+            ..ToolSemanticsConfig::agnostic()
+        };
+        assert!(crate::session::AgentConfig::with_tool_semantics(semantics).is_err());
     }
 }

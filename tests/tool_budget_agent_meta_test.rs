@@ -18,14 +18,8 @@ use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::Value;
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {
@@ -54,6 +48,7 @@ fn new_session(eng: &AgentEngine, config: AgentConfig) -> agent_core::engine::Se
         serde_json::Value::Null,
         io_large(),
     )
+    .expect("valid config creates session")
 }
 
 fn parse_json(content: &str) -> Value {

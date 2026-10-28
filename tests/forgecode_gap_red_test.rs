@@ -57,7 +57,7 @@ fn model_request(system_prompt: &str) -> ModelRequest {
         session_messages: vec![],
         system_prompt: system_prompt.into(),
         tool_schemas: Vec::new(),
-        rendered_tool_catalog: Vec::new(),
+        rendered_runtime_tools: Vec::new(),
         allow_tool_call: true,
         context_references: vec![],
         state_ledger: None,
@@ -92,7 +92,6 @@ fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoP
     SessionIoParams::new(
         "anthropic".into(),
         context_window_tokens,
-        "[]".into(),
         tools_schema_json.into(),
         "sys".into(),
     )
@@ -129,13 +128,15 @@ fn next_model_request(
     tools_schema_json: &str,
 ) -> ModelRequest {
     let engine = red_engine();
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, "next")],
-        config,
-        capabilities,
-        serde_json::Value::Null,
-        session_io(tools_schema_json, 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, "next")],
+            config,
+            capabilities,
+            serde_json::Value::Null,
+            session_io(tools_schema_json, 200_000),
+        )
+        .expect("valid config creates session");
 
     match engine.next_action(&handle) {
         AgentAction::CallModel(request) => request,
@@ -245,19 +246,21 @@ fn fcg_005_pending_work_guard_blocks_finish() {
 #[test]
 fn fcg_006_hook_ordering_is_stable() {
     let engine = red_engine();
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, "start")],
-        AgentConfig {
-            enable_loop_hooks: true,
-            ..AgentConfig::default()
-        },
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, "start")],
+            AgentConfig {
+                enable_loop_hooks: true,
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(
         engine.next_action(&handle),
@@ -305,20 +308,22 @@ fn fcg_007_absolute_token_threshold_triggers_compaction() {
         preflight_token_threshold: Some(1200),
         ..AgentConfig::default()
     };
-    let handle = engine.create_session(
-        vec![
-            message("u1", AgentRole::User, &"token ".repeat(1300)),
-            message("a1", AgentRole::Assistant, "prior answer"),
-            message("u2", AgentRole::User, "active query"),
-        ],
-        config,
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![
+                message("u1", AgentRole::User, &"token ".repeat(1300)),
+                message("a1", AgentRole::Assistant, "prior answer"),
+                message("u2", AgentRole::User, "active query"),
+            ],
+            config,
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     match engine.next_action(&handle) {
         AgentAction::RequestSummary(request) => {
@@ -337,16 +342,18 @@ fn fcg_007b_lone_user_soft_threshold_preserves_active_query() {
         ..AgentConfig::default()
     };
     let active_query = "token ".repeat(1300);
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, &active_query)],
-        config,
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, &active_query)],
+            config,
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     match engine.next_action(&handle) {
         AgentAction::CallModel(request) => {
@@ -371,16 +378,18 @@ fn fcg_008_turn_threshold_triggers_compaction() {
         message("u2", AgentRole::User, "three"),
         message("a2", AgentRole::Assistant, "four"),
     ];
-    let handle = engine.create_session(
-        prior_turns,
-        config,
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            prior_turns,
+            config,
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     match engine.next_action(&handle) {
         AgentAction::RequestSummary(request) => {
@@ -397,16 +406,18 @@ fn fcg_009_turn_end_compaction_fires_on_user_tail() {
         compact_on_turn_end: true,
         ..AgentConfig::default()
     };
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, "tail")],
-        config,
-        SessionCapabilities {
-            summarization_allowed: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, "tail")],
+            config,
+            SessionCapabilities {
+                summarization_allowed: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(
         engine.next_action(&handle),
@@ -452,8 +463,8 @@ fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
     let catalog_json = r#"[{"name":"web_search","parameters":{"type":"object"}},{"name":"patch_file","parameters":{"type":"object"}},{"name":"write_file","parameters":{"type":"object"}}]"#;
 
     let request = next_model_request(config, SessionCapabilities::default(), catalog_json);
-    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
-        .expect("rendered_tool_catalog_json must be valid JSON");
+    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_runtime_tools_json())
+        .expect("rendered_runtime_tools_json must be valid JSON");
 
     assert!(rendered
         .as_array()
@@ -483,16 +494,18 @@ fn fcg_012_delegation_metadata_stays_inside_tool_metadata() {
 #[test]
 fn fcg_013_tool_result_metadata_is_structured() {
     let engine = red_engine();
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, "run tool")],
-        AgentConfig {
-            default_tool_timeout_ms: Some(300000),
-            ..AgentConfig::default()
-        },
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, "run tool")],
+            AgentConfig {
+                default_tool_timeout_ms: Some(300000),
+                ..AgentConfig::default()
+            },
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(
         engine.next_action(&handle),
@@ -564,8 +577,8 @@ fn fcg_016_delegation_tools_are_removed_when_unsupported() {
         capabilities,
         r#"[{"name":"task_delegate","parameters":{"type":"object"}}]"#,
     );
-    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
-        .expect("rendered_tool_catalog_json must be valid JSON");
+    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_runtime_tools_json())
+        .expect("rendered_runtime_tools_json must be valid JSON");
 
     assert!(!rendered
         .as_array()
@@ -601,21 +614,23 @@ fn fcg_018_timeout_is_typed() {
 #[test]
 fn fcg_019_end_to_end_order_remains_deterministic() {
     let engine = red_engine();
-    let handle = engine.create_session(
-        vec![message("u1", AgentRole::User, "start")],
-        AgentConfig {
-            enable_loop_hooks: true,
-            post_tool_result_token_threshold: Some(1),
-            ..AgentConfig::default()
-        },
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            request_transform_pipeline_supported: true,
-            ..SessionCapabilities::default()
-        },
-        serde_json::Value::Null,
-        session_io("[]", 200_000),
-    );
+    let handle = engine
+        .create_session(
+            vec![message("u1", AgentRole::User, "start")],
+            AgentConfig {
+                enable_loop_hooks: true,
+                post_tool_result_token_threshold: Some(1),
+                ..AgentConfig::default()
+            },
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                request_transform_pipeline_supported: true,
+                ..SessionCapabilities::default()
+            },
+            serde_json::Value::Null,
+            session_io("[]", 200_000),
+        )
+        .expect("valid config creates session");
 
     let mut order = Vec::new();
     let first = engine.next_action(&handle);

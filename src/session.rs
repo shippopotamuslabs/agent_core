@@ -1,8 +1,9 @@
+use crate::catalog::ToolCatalog;
 use crate::events::CompactionEvent;
 use crate::long_loop_policy::LongLoopPolicy;
 use crate::message::{AgentMessage, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
-use crate::tool_semantics::ToolSemanticsConfig;
+use crate::tool_semantics::{ToolSemanticsConfig, ToolSemanticsError};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -129,6 +130,11 @@ pub struct AgentConfig {
     pub long_loop: LongLoopPolicy,
     #[serde(default)]
     pub tool_semantics: ToolSemanticsConfig,
+    /// Validated policy catalog derived from [`tool_semantics`](Self::tool_semantics)
+    /// (ENC-297 D4). Skipped by serde: it is rebuilt from the semantics by the
+    /// fallible construction surface, never carried as separate serialized state.
+    #[serde(skip)]
+    pub tool_catalog: ToolCatalog,
 }
 
 fn default_threshold_ratio() -> f32 {
@@ -254,23 +260,41 @@ impl Default for AgentConfig {
             max_model_requests_per_turn: default_max_model_requests_per_turn(),
             long_loop: LongLoopPolicy::default(),
             tool_semantics: ToolSemanticsConfig::agnostic(),
+            tool_catalog: ToolCatalog::default(),
         }
     }
 }
 
 impl AgentConfig {
-    /// Applies host IO payloads to [`tool_semantics`] (catalog JSON merge).
-    /// Runs once at session construction; the catalog text parse here targets
-    /// the policy `ToolSpec` type (not the session
-    /// [`crate::tool_schema::ToolSchemaSet`]), so it is a justified remaining
-    /// parse — see ENC-289 notes.
-    pub fn prepare_tool_semantics(&mut self, schemas: &crate::tool_schema::ToolSchemaSet) {
-        if let Err(error) = self
-            .tool_semantics
-            .merge_catalog_json(schemas.catalog_json())
-        {
-            eprintln!("agent_core: tool catalog merge failed: {error:?}");
-        }
+    /// The ONE fallible construction surface for tool-aware configs (ENC-297 D4).
+    ///
+    /// Validates `semantics` (duplicate names, alias collisions, empty required
+    /// fields) and builds the policy [`ToolCatalog`] from its catalog tools, so
+    /// the two values can never desync. Core (Forge) callers that previously
+    /// passed catalog JSON now pass typed [`crate::catalog::ToolSpec`] values
+    /// inside `semantics.catalog.tools` and construct here. Returns
+    /// [`ToolSemanticsError`] on invalid semantics; no silent fallback.
+    pub fn with_tool_semantics(semantics: ToolSemanticsConfig) -> Result<Self, ToolSemanticsError> {
+        let tool_catalog = ToolCatalog::from_semantics(&semantics)?;
+        Ok(Self {
+            tool_semantics: semantics,
+            tool_catalog,
+            ..Self::default()
+        })
+    }
+
+    /// Re-syncs [`tool_catalog`](Self::tool_catalog) from the current
+    /// [`tool_semantics`](Self::tool_semantics) (validate only — ENC-297 D4;
+    /// the old catalog-JSON merge is deleted).
+    ///
+    /// Runs once at session construction so struct-literal configs (tests,
+    /// serde) enter the engine with a catalog that matches their semantics.
+    /// Returns [`ToolSemanticsError`] on invalid semantics; the previous
+    /// catalog is kept in that case.
+    pub fn prepare_tool_semantics(&mut self) -> Result<(), ToolSemanticsError> {
+        let catalog = ToolCatalog::from_semantics(&self.tool_semantics)?;
+        self.tool_catalog = catalog;
+        Ok(())
     }
 
     pub fn for_policy_tier(tier: ContextPolicyTier) -> Self {

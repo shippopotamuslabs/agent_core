@@ -19,14 +19,8 @@ const VALID_DSML_WEB_SEARCH: &str = concat!(
 );
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams::new(
-        "openrouter".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("openrouter".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn user_msg() -> AgentMessage {
@@ -51,6 +45,7 @@ fn new_session(eng: &AgentEngine) -> agent_core::engine::SessionHandle {
         serde_json::Value::Null,
         io_large(),
     )
+    .expect("valid config creates session")
 }
 
 fn last_assistant_message(snapshot: &SessionTestSnapshot) -> &AgentMessage {

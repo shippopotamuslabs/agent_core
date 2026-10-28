@@ -23,14 +23,8 @@ fn engine() -> AgentEngine {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn submit_no_tool_response(
@@ -57,13 +51,15 @@ fn submit_no_tool_response(
 #[test]
 fn fb_r_001_stop_without_tools_finishes_terminal_turn() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![user_message("answer directly")],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("answer directly")],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
     let events = eng.drain_events(&handle);
@@ -82,13 +78,15 @@ fn fb_r_001_stop_without_tools_finishes_terminal_turn() {
 #[test]
 fn fb_r_002_max_tokens_without_tools_fails_model_stopped() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![user_message("answer directly")],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("answer directly")],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::MaxTokens);
 
@@ -107,13 +105,15 @@ fn fb_r_002_max_tokens_without_tools_fails_model_stopped() {
 #[test]
 fn fb_r_003_other_finish_without_tools_fails_model_stopped() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![user_message("answer directly")],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("answer directly")],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action =
         submit_no_tool_response(&eng, &handle, FinishReason::Other("content_filter".into()));
@@ -133,13 +133,15 @@ fn fb_r_003_other_finish_without_tools_fails_model_stopped() {
 #[test]
 fn fb_r_004_tool_use_executes_exact_web_search_call() {
     let eng = engine();
-    let handle = eng.create_session(
-        vec![user_message("search")],
-        AgentConfig::default(),
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("search")],
+            AgentConfig::default(),
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            io(),
+        )
+        .expect("valid config creates session");
     assert!(matches!(
         eng.next_action(&handle),
         AgentAction::CallModel(_)
@@ -178,16 +180,18 @@ fn fb_r_005_before_finish_pending_work_injects_message_and_calls_model_under_cap
         max_model_requests_per_turn: 2,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![user_message("ship")],
-        config,
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            ..Default::default()
-        },
-        serde_json::json!({"pending_work": ["verify failing tests"]}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("ship")],
+            config,
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                ..Default::default()
+            },
+            serde_json::json!({"pending_work": ["verify failing tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
     let events = eng.drain_events(&handle);
@@ -216,13 +220,15 @@ fn fb_r_006_hooks_disabled_stop_finishes_without_second_model_call() {
         max_model_requests_per_turn: 1,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![user_message("ship")],
-        config,
-        SessionCapabilities::default(),
-        serde_json::json!({"pending_work": ["verify failing tests"]}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("ship")],
+            config,
+            SessionCapabilities::default(),
+            serde_json::json!({"pending_work": ["verify failing tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
@@ -238,16 +244,18 @@ fn fb_r_007_before_finish_pending_work_over_cap_fails_guardrail() {
         max_model_requests_per_turn: 1,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![user_message("ship")],
-        config,
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            ..Default::default()
-        },
-        serde_json::json!({"pending_work": ["verify failing tests"]}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("ship")],
+            config,
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                ..Default::default()
+            },
+            serde_json::json!({"pending_work": ["verify failing tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
@@ -275,16 +283,18 @@ fn fb_r_008_finish_blocked_without_injected_message_fails_guardrail() {
         max_model_requests_per_turn: 2,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![user_message("ship")],
-        config,
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            ..Default::default()
-        },
-        serde_json::json!({"pending_work": [], "force_finish_blocked": true}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("ship")],
+            config,
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                ..Default::default()
+            },
+            serde_json::json!({"pending_work": [], "force_finish_blocked": true}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
@@ -314,16 +324,18 @@ fn fb_r_009_hook_continuation_builds_pending_request_before_awaiting_model() {
         max_model_requests_per_turn: 2,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![user_message("ship")],
-        config,
-        SessionCapabilities {
-            lifecycle_hooks_supported: true,
-            ..Default::default()
-        },
-        serde_json::json!({"pending_work": ["ship tests"]}),
-        io(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user_message("ship")],
+            config,
+            SessionCapabilities {
+                lifecycle_hooks_supported: true,
+                ..Default::default()
+            },
+            serde_json::json!({"pending_work": ["ship tests"]}),
+            io(),
+        )
+        .expect("valid config creates session");
 
     let action = submit_no_tool_response(&eng, &handle, FinishReason::Stop);
 
@@ -367,7 +379,6 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             FfiSessionIoParams {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,
-                tool_catalog_json: "[]".into(),
                 tool_schemas: vec![],
                 system_prompt: "sys".into(),
             },

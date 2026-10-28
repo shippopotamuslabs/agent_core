@@ -58,13 +58,15 @@ fn lalr_06_second_turn_ledger_delta_is_minimal() {
 #[test]
 fn lalr_10_sidecar_generation_increments_per_call_model() {
     let engine = test_engine();
-    let handle = engine.create_session(
-        vec![],
-        agent_core::session::AgentConfig::default(),
-        agent_core::session::SessionCapabilities::default(),
-        serde_json::Value::Null,
-        default_long_loop_io(),
-    );
+    let handle = engine
+        .create_session(
+            vec![],
+            agent_core::session::AgentConfig::default(),
+            agent_core::session::SessionCapabilities::default(),
+            serde_json::Value::Null,
+            default_long_loop_io(),
+        )
+        .expect("valid config creates session");
 
     let snapshots = collect_three_call_model_snapshots(&engine, &handle);
     assert_eq!(snapshots.len(), 3);

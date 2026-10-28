@@ -53,43 +53,39 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
     };
     let eng = AgentEngine::new();
     let big = "hello ".repeat(400);
-    let handle = eng.create_session(
-        vec![
-            AgentMessage {
-                id: "u0".into(),
-                role: AgentRole::User,
-                content: format!("Objective: preserve semantic continuity. {big}"),
-                metadata: MessageMeta::new(),
+    let handle = eng
+        .create_session(
+            vec![
+                AgentMessage {
+                    id: "u0".into(),
+                    role: AgentRole::User,
+                    content: format!("Objective: preserve semantic continuity. {big}"),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: big,
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "tail".into(),
+                    metadata: MessageMeta::new(),
+                },
+            ],
+            cfg,
+            SessionCapabilities {
+                summarization_allowed: true,
+                kv_fixed: false,
+                ..Default::default()
             },
-            AgentMessage {
-                id: "a0".into(),
-                role: AgentRole::Assistant,
-                content: big,
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "tail".into(),
-                metadata: MessageMeta::new(),
-            },
-        ],
-        cfg,
-        SessionCapabilities {
-            summarization_allowed: true,
-            kv_fixed: false,
-            ..Default::default()
-        },
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::RequestSummary(req) => {
             assert_eq!(req.last_message_id, "a0");

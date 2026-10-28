@@ -1,12 +1,14 @@
 //! LiteRT / Kotlin policy helpers (AGENT-034) — small UniFFI surface separate from the session engine.
 
+use super::semantics::{FfiToolSemantics, FfiToolSpec};
 use super::types::{
-    FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField,
+    AgentException, FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason,
+    FfiToolParseField,
 };
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
 use crate::tool_parse;
-use crate::tool_semantics::{load_semantics_with_session_catalog, ToolSemanticsConfig};
+use crate::tool_semantics::ToolSemanticsConfig;
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
 
@@ -20,13 +22,21 @@ pub struct RepairResult {
     pub repaired: bool,
 }
 
+/// Typed policy-semantics loader (ENC-297 Chunk 2): the sibling specs are
+/// assigned into `semantics.catalog.tools`, then the single core constructor
+/// path validates. `None` semantics is host-declared agnostic. Errors are
+/// returned as strings for the infallible helpers' error payloads — never
+/// `eprintln`d.
 fn load_policy_semantics(
-    tool_semantics_json: &str,
-    tool_catalog_json: &str,
+    tool_semantics: Option<FfiToolSemantics>,
+    tool_specs: Vec<FfiToolSpec>,
 ) -> Result<(ToolSemanticsConfig, crate::catalog::ToolCatalog), String> {
-    load_semantics_with_session_catalog(tool_semantics_json, tool_catalog_json).map_err(|error| {
-        eprintln!("agent_core: {error}");
-        error
+    // ENC-297 M1: shared conversion — same validation, catalog build, and
+    // error mapping as the AgentConfig edge; only the error wrapper differs
+    // (String payload for the infallible helpers).
+    super::semantics::typed_to_core(tool_semantics, tool_specs).map_err(|error| match error {
+        AgentException::Internal { detail } => detail,
+        other => format!("{other:?}"),
     })
 }
 
@@ -34,10 +44,10 @@ fn load_policy_semantics(
 pub fn repair_tool(
     name: &str,
     args_json: &str,
-    tool_semantics_json: &str,
-    tool_catalog_json: &str,
+    tool_semantics: Option<FfiToolSemantics>,
+    tool_specs: Vec<FfiToolSpec>,
 ) -> RepairResult {
-    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json) {
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics, tool_specs) {
         Ok(loaded) => loaded,
         Err(error) => {
             return RepairResult {
@@ -101,10 +111,10 @@ pub fn result_json_looks_soft_failure(json: &str) -> bool {
 #[uniffi::export]
 pub fn parse_tool_calls(
     raw: &str,
-    tool_semantics_json: &str,
-    tool_catalog_json: &str,
+    tool_semantics: Option<FfiToolSemantics>,
+    tool_specs: Vec<FfiToolSpec>,
 ) -> FfiToolParseBatch {
-    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json) {
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics, tool_specs) {
         Ok(loaded) => loaded,
         Err(error) => {
             return FfiToolParseBatch {
@@ -114,7 +124,7 @@ pub fn parse_tool_calls(
                         detail: error.clone(),
                     },
                     original: raw.to_string(),
-                    format_hint: Some("tool catalog merge failed".into()),
+                    format_hint: Some("typed tool semantics conversion failed".into()),
                 }],
                 visible_prefix: String::new(),
                 visible_suffix: String::new(),
@@ -125,18 +135,16 @@ pub fn parse_tool_calls(
 }
 
 #[uniffi::export]
-pub fn has_local_tool_contract(system_prompt: &str, tool_catalog_json: &str) -> bool {
-    let mut semantics = ToolSemanticsConfig::agnostic();
-    if let Err(error) = semantics.merge_catalog_json(tool_catalog_json) {
-        eprintln!("agent_core: tool catalog merge failed: {error:?}");
-        return false;
-    }
-    let catalog = match crate::catalog::ToolCatalog::from_semantics(&semantics) {
-        Ok(catalog) => catalog,
-        Err(error) => {
-            eprintln!("agent_core: invalid merged tool catalog: {error:?}");
-            return false;
-        }
+pub fn has_local_tool_contract(
+    system_prompt: &str,
+    tool_semantics: Option<FfiToolSemantics>,
+    tool_specs: Vec<FfiToolSpec>,
+) -> bool {
+    // Infallible contract preserved (ENC-297): invalid typed input yields
+    // false, never an eprintln.
+    let (_semantics, catalog) = match load_policy_semantics(tool_semantics, tool_specs) {
+        Ok(loaded) => loaded,
+        Err(_) => return false,
     };
     tool_parse::has_local_tool_contract(system_prompt, &catalog)
 }
@@ -145,10 +153,10 @@ pub fn has_local_tool_contract(system_prompt: &str, tool_catalog_json: &str) -> 
 pub fn coerce_provider_arguments(
     tool_name: &str,
     args_json: &str,
-    tool_semantics_json: &str,
-    tool_catalog_json: &str,
+    tool_semantics: Option<FfiToolSemantics>,
+    tool_specs: Vec<FfiToolSpec>,
 ) -> FfiToolParseField {
-    let (semantics, catalog) = match load_policy_semantics(tool_semantics_json, tool_catalog_json) {
+    let (semantics, catalog) = match load_policy_semantics(tool_semantics, tool_specs) {
         Ok(loaded) => loaded,
         Err(error) => {
             return FfiToolParseField {
@@ -166,12 +174,26 @@ pub fn coerce_provider_arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::ToolSpec;
+
+    fn spec(name: &str) -> FfiToolSpec {
+        FfiToolSpec {
+            name: name.into(),
+            aliases: Vec::new(),
+            reproducible: true,
+            schema_hint: None,
+        }
+    }
+
+    fn duplicate_specs() -> Vec<FfiToolSpec> {
+        vec![spec("web_search"), spec("web-search")]
+    }
 
     #[test]
-    fn repair_tool_error_payload_is_valid_json_even_with_quotes_in_error() {
-        // Malformed catalog JSON forces the load-error path; serde error text
-        // contains characters that must be JSON-escaped.
-        let result = repair_tool("web_search", "{}", "{ not json", r#"{"broken": "#);
+    fn repair_tool_error_payload_is_valid_json_on_invalid_specs() {
+        // Duplicate (normalized-equal) spec names fail core validation; the
+        // error text lands in the JSON payload (properly escaped).
+        let result = repair_tool("web_search", "{}", None, duplicate_specs());
         let parsed: serde_json::Value =
             serde_json::from_str(&result.arguments_json).expect("error payload must be valid JSON");
         assert!(parsed.get("error").is_some(), "payload: {parsed}");
@@ -180,9 +202,32 @@ mod tests {
 
     #[test]
     fn coerce_provider_arguments_error_payload_is_valid_json() {
-        let field = coerce_provider_arguments("web_search", "{}", "{ not json", r#"{"broken": "#);
+        let field = coerce_provider_arguments("web_search", "{}", None, duplicate_specs());
         let parsed: serde_json::Value =
             serde_json::from_str(&field.arguments_json).expect("error payload must be valid JSON");
         assert!(parsed.get("error").is_some(), "payload: {parsed}");
+    }
+
+    #[test]
+    fn typed_specs_repair_without_json_strings() {
+        // websearch is an alias of web_search in the typed specs: no JSON
+        // strings cross, and repair resolves through the typed catalog.
+        let mut aliased = spec("web_search");
+        aliased.aliases = vec!["websearch".into()];
+        let result = repair_tool("websearch", "{}", None, vec![aliased]);
+        assert!(result.repaired, "payload: {}", result.arguments_json);
+        assert_eq!(result.resolved_name, "web_search");
+    }
+
+    #[test]
+    fn core_spec_type_still_convertible_for_policy_tests() {
+        // Keeps the core ToolSpec import load-bearing for policy tests.
+        let core = ToolSpec {
+            name: "x".into(),
+            aliases: Vec::new(),
+            reproducible: true,
+            schema_hint: None,
+        };
+        assert_eq!(FfiToolSpec::from(&core).name, "x");
     }
 }

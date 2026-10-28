@@ -58,20 +58,16 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
     // 3) Drive a tool spill and artifact squash through the engine so its owned
     //    store accrues ToolOutput, HistorySnapshot, ArtifactSnapshot, and file refs.
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![objective_msg.clone()],
-        cfg,
-        caps,
-        session_context,
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![objective_msg.clone()],
+            cfg,
+            caps,
+            session_context,
+            SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,

@@ -128,7 +128,6 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
     let io = SessionIoParams::new(
         f.io.provider.clone(),
         f.io.context_window_tokens,
-        "[]".into(),
         f.io.tools_schema_json.clone(),
         f.io.system_prompt.clone(),
     )
@@ -137,13 +136,15 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
     if config.tool_semantics.catalog.tools.is_empty() {
         config.tool_semantics = enclave_test_semantics();
     }
-    let handle = eng.create_session(
-        f.initial_session.messages.clone(),
-        config,
-        f.initial_session.capabilities.clone(),
-        f.initial_session.session_context.clone(),
-        io,
-    );
+    let handle = eng
+        .create_session(
+            f.initial_session.messages.clone(),
+            config,
+            f.initial_session.capabilities.clone(),
+            f.initial_session.session_context.clone(),
+            io,
+        )
+        .expect("valid config creates session");
 
     let mut actions = Vec::new();
     let mut all_events = Vec::new();

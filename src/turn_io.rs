@@ -10,10 +10,12 @@ pub struct ModelRequest {
     /// Active tool schemas in parsed form (ENC-289). Serialize to JSON only
     /// at the FFI/provider edge via [`ModelRequest::tools_schema_json`].
     pub tool_schemas: Vec<SchemaEntry>,
-    /// Rendered runtime catalog in parsed form. Serialize to JSON only at
-    /// the edge via [`ModelRequest::rendered_tool_catalog_json`].
+    /// Rendered runtime tools in parsed form (ENC-297 D6: renamed — it
+    /// renders the active channel through the runtime gates, not a catalog).
+    /// Serialize to JSON only at
+    /// the edge via [`ModelRequest::rendered_runtime_tools_json`].
     #[serde(default)]
-    pub rendered_tool_catalog: Vec<SchemaEntry>,
+    pub rendered_runtime_tools: Vec<SchemaEntry>,
     pub allow_tool_call: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_references: Vec<crate::context_store::ContextReference>,
@@ -47,9 +49,9 @@ impl ModelRequest {
         entries_json(&self.tool_schemas)
     }
 
-    /// Edge serialization of the rendered runtime catalog.
-    pub fn rendered_tool_catalog_json(&self) -> String {
-        entries_json(&self.rendered_tool_catalog)
+    /// Edge serialization of the rendered runtime tools.
+    pub fn rendered_runtime_tools_json(&self) -> String {
+        entries_json(&self.rendered_runtime_tools)
     }
 }
 
@@ -59,7 +61,7 @@ impl Default for ModelRequest {
             session_messages: vec![],
             system_prompt: String::new(),
             tool_schemas: Vec::new(),
-            rendered_tool_catalog: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,
@@ -229,7 +231,7 @@ mod tests {
             session_messages: vec![make_message("m1")],
             system_prompt: "You are helpful.".into(),
             tool_schemas: Vec::new(),
-            rendered_tool_catalog: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,
@@ -248,7 +250,7 @@ mod tests {
         assert!(back.allow_tool_call);
         assert_eq!(back.session_messages.len(), 1);
         assert_eq!(back.tools_schema_json(), "[]");
-        assert_eq!(back.rendered_tool_catalog_json(), "[]");
+        assert_eq!(back.rendered_runtime_tools_json(), "[]");
     }
 
     #[test]

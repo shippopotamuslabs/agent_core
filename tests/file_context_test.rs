@@ -99,25 +99,21 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
         ]
     });
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "Use attached source context".into(),
-            metadata: MessageMeta::new(),
-        }],
-        cfg,
-        caps,
-        session_context,
-        SessionIoParams::new(
-            "anthropic".into(),
-            8_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "Use attached source context".into(),
+                metadata: MessageMeta::new(),
+            }],
+            cfg,
+            caps,
+            session_context,
+            SessionIoParams::new("anthropic".into(), 8_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     let request = match eng.next_action(&handle) {
         AgentAction::CallModel(request) => request,

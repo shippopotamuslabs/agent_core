@@ -29,29 +29,25 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            user_msg("u0", "first"),
-            AgentMessage {
-                id: "a0".into(),
-                role: AgentRole::Assistant,
-                content: "ack".into(),
-                metadata: MessageMeta::new(),
-            },
-            user_msg("u1", "tail"),
-        ],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![
+                user_msg("u0", "first"),
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: "ack".into(),
+                    metadata: MessageMeta::new(),
+                },
+                user_msg("u1", "tail"),
+            ],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     let action = eng.request_manual_compact(
         &handle,
@@ -85,39 +81,35 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            AgentMessage {
-                id: "u0".into(),
-                role: AgentRole::User,
-                content: big.clone(),
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "a0".into(),
-                role: AgentRole::Assistant,
-                content: big.clone(),
-                metadata: MessageMeta::new(),
-            },
-            AgentMessage {
-                id: "u1".into(),
-                role: AgentRole::User,
-                content: "tail".into(),
-                metadata: MessageMeta::new(),
-            },
-        ],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![
+                AgentMessage {
+                    id: "u0".into(),
+                    role: AgentRole::User,
+                    content: big.clone(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: big.clone(),
+                    metadata: MessageMeta::new(),
+                },
+                AgentMessage {
+                    id: "u1".into(),
+                    role: AgentRole::User,
+                    content: "tail".into(),
+                    metadata: MessageMeta::new(),
+                },
+            ],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     // Should fire preflight summary tier.
     let _ = eng.next_action(&handle);
     eng.submit_summary(
@@ -169,20 +161,16 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![],
-        cfg,
-        SessionCapabilities::default(),
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![],
+            cfg,
+            SessionCapabilities::default(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     let action = eng.request_manual_compact(
         &handle,
         ManualCompactRequest {
@@ -220,29 +208,25 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            user_msg("u0", &"long context ".repeat(64)),
-            AgentMessage {
-                id: "a0".into(),
-                role: AgentRole::Assistant,
-                content: "ack".repeat(64),
-                metadata: MessageMeta::new(),
-            },
-            user_msg("u1", "tail"),
-        ],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![
+                user_msg("u0", &"long context ".repeat(64)),
+                AgentMessage {
+                    id: "a0".into(),
+                    role: AgentRole::Assistant,
+                    content: "ack".repeat(64),
+                    metadata: MessageMeta::new(),
+                },
+                user_msg("u1", "tail"),
+            ],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
 
     // Engine is now AwaitingModel.
     assert!(matches!(

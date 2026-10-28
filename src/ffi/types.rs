@@ -224,10 +224,10 @@ impl From<FfiModelRequest> for ModelRequest {
             // the string echoes a request the engine itself rendered, so a
             // contract violation here falls back to an empty active set
             // rather than failing a conversion that cannot return an error.
-            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json, "[]")
+            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json)
                 .map(|schemas| schemas.active)
                 .unwrap_or_default(),
-            rendered_tool_catalog: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
             state_ledger: m
@@ -777,7 +777,6 @@ pub struct FfiToolSchemaEntry {
 pub struct FfiSessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
-    pub tool_catalog_json: String,
     pub tool_schemas: Vec<FfiToolSchemaEntry>,
     pub system_prompt: String,
 }
@@ -854,18 +853,16 @@ fn tool_schema_entries(
 }
 
 /// FFI session edge: convert the typed params into `SessionIoParams`,
-/// constructing the parsed schema set directly from the typed entries
-/// (only the catalog channel still arrives as JSON text). Fallible
-/// (never panics): a malformed entry is an `AgentException` the caller
-/// must handle.
+/// constructing the parsed schema set directly from the typed entries.
+/// (ENC-297: the catalog travels only on the typed `AgentConfig` path, so
+/// there is no catalog channel here at all.)
+/// Fallible (never panics): a malformed entry is an `AgentException` the
+/// caller must handle.
 pub(crate) fn session_io_params(
     p: FfiSessionIoParams,
 ) -> Result<crate::engine::SessionIoParams, AgentException> {
     let active = tool_schema_entries(&p.tool_schemas)?;
-    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(active, &p.tool_catalog_json)
-        .map_err(|error| AgentException::Internal {
-            detail: error.to_string(),
-        })?;
+    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(active);
     Ok(crate::engine::SessionIoParams {
         provider: p.provider,
         context_window_tokens: p.context_window_tokens,
@@ -915,8 +912,14 @@ pub struct FfiAgentConfig {
     pub tool_retry_limit: u32,
     pub model_api_retry_limit: u32,
     pub model_api_retry_base_delay_ms: u64,
-    /// JSON-serialized [`crate::tool_semantics::ToolSemanticsConfig`]; catalog tools may be empty and merged from session IO.
-    pub tool_semantics_json: String,
+    /// Typed tool semantics (ENC-297 D1–D2): `None` is host-declared
+    /// agnostic — the default when the host supplies no semantics record,
+    /// not a parse fallback.
+    pub tool_semantics: Option<super::semantics::FfiToolSemantics>,
+    /// Policy catalog specs, sibling of the semantics tree (ENC-297 D1):
+    /// assigned into `semantics.catalog.tools` at conversion, then validated
+    /// by the single fallible core constructor.
+    pub tool_specs: Vec<super::semantics::FfiToolSpec>,
     pub tool_result_budget_cloud_bytes: u64,
     pub tool_result_budget_relaxed_bytes: u64,
     pub tool_result_truncation_pressure_ratio: f32,
@@ -961,8 +964,10 @@ impl Default for FfiAgentConfig {
             tool_retry_limit: c.tool_retry_limit,
             model_api_retry_limit: c.model_api_retry_limit,
             model_api_retry_base_delay_ms: c.model_api_retry_base_delay_ms,
-            tool_semantics_json: serde_json::to_string(&c.tool_semantics)
-                .unwrap_or_else(|_| "{}".into()),
+            // None is host-declared agnostic (D2): the default FFI config
+            // carries no semantics record and no specs.
+            tool_semantics: None,
+            tool_specs: Vec::new(),
             tool_result_budget_cloud_bytes: c.tool_result_budget_cloud_bytes as u64,
             tool_result_budget_relaxed_bytes: c.tool_result_budget_relaxed_bytes as u64,
             tool_result_truncation_pressure_ratio: c.tool_result_truncation_pressure_ratio,
@@ -999,64 +1004,74 @@ impl Default for FfiAgentConfig {
     }
 }
 
-impl From<FfiAgentConfig> for AgentConfig {
-    fn from(f: FfiAgentConfig) -> Self {
-        Self {
-            max_turns: f.max_turns,
-            threshold_ratio: f.threshold_ratio,
-            micro_keep_recent: f.micro_keep_recent,
-            tool_retry_limit: f.tool_retry_limit,
-            model_api_retry_limit: f.model_api_retry_limit,
-            model_api_retry_base_delay_ms: f.model_api_retry_base_delay_ms,
-            tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
-            tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
-            tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
-            mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
-            post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
-            manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
-            allow_fifo_on_preflight: f.allow_fifo_on_preflight,
-            allow_fifo_on_mid_turn: f.allow_fifo_on_mid_turn,
-            allow_fifo_on_post_tool_result: f.allow_fifo_on_post_tool_result,
-            require_snapshot_before_fifo: f.require_snapshot_before_fifo,
-            enable_context_store: f.enable_context_store,
-            enable_state_ledger: f.enable_state_ledger,
-            enable_tool_schema_deferral: f.enable_tool_schema_deferral,
-            enable_file_condensation: f.enable_file_condensation,
-            enable_manual_compact: f.enable_manual_compact,
-            tool_spill_threshold_bytes: f.tool_spill_threshold_bytes as usize,
-            terminal_spill_threshold_bytes: f.terminal_spill_threshold_bytes as usize,
-            history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
-            file_outline_threshold_tokens: f.file_outline_threshold_tokens,
-            prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
-            output_reserve_ratio: f.output_reserve_ratio,
-            output_reserve_floor_tokens: f.output_reserve_floor_tokens,
-            output_reserve_max_tokens: f.output_reserve_max_tokens,
-            max_model_requests_per_turn: f.max_model_requests_per_turn,
-            token_correction: std::collections::HashMap::new(),
-            preflight_token_threshold: f.preflight_token_threshold,
-            mid_turn_token_threshold: f.mid_turn_token_threshold,
-            post_tool_result_token_threshold: f.post_tool_result_token_threshold,
-            turn_threshold: None,
-            message_threshold: f.message_threshold,
-            compact_on_turn_end: false,
-            retention_window_messages: 0,
-            retention_window_tokens: f.retention_window_tokens,
-            eviction_window_ratio: 0.0,
-            enable_loop_hooks: f.enable_loop_hooks,
-            enable_doom_loop_guard: false,
-            enable_pending_work_guard: f.enable_pending_work_guard,
-            require_read_before_edit: false,
-            default_tool_timeout_ms: None,
-            long_loop: LongLoopPolicy::from(f.long_loop),
-            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::from_json(
-                &f.tool_semantics_json,
-            )
-            .unwrap_or_else(|error| {
-                eprintln!("agent_core: invalid tool_semantics_json on FfiAgentConfig: {error}");
-                crate::tool_semantics::ToolSemanticsConfig::agnostic()
-            }),
-        }
-    }
+/// FFI config edge: convert the typed config into an [`AgentConfig`],
+/// following the `session_io_params` fallible pattern (ENC-297 D2).
+///
+/// The sibling [`FfiToolSpec`]s are assigned into `semantics.catalog.tools`
+/// before the single fallible core constructor validates + builds the
+/// policy catalog. `None` semantics is host-declared agnostic (not a parse
+/// fallback). Invalid semantics (malformed `Value` payloads, duplicate tool
+/// names, alias collisions, empty required fields) is an `AgentException`
+/// naming the failure — never an `eprintln` + agnostic fallback.
+pub(crate) fn agent_config(f: FfiAgentConfig) -> Result<AgentConfig, AgentException> {
+    // ENC-297 M1: the single shared conversion — sibling specs assigned,
+    // validated, catalog built — with the one error mapping.
+    let (semantics, catalog) = super::semantics::typed_to_core(f.tool_semantics, f.tool_specs)?;
+    // ENC-297 M5: every AgentConfig field listed explicitly. Fields the FFI
+    // record does not carry take their documented core defaults visibly
+    // here, so no `..Default::default()` tail can silently inherit (or
+    // later drop) a scalar.
+    let defaults = AgentConfig::default();
+    Ok(AgentConfig {
+        max_turns: f.max_turns,
+        threshold_ratio: f.threshold_ratio,
+        micro_keep_recent: f.micro_keep_recent,
+        tool_retry_limit: f.tool_retry_limit,
+        model_api_retry_limit: f.model_api_retry_limit,
+        model_api_retry_base_delay_ms: f.model_api_retry_base_delay_ms,
+        tool_result_budget_cloud_bytes: f.tool_result_budget_cloud_bytes as usize,
+        tool_result_budget_relaxed_bytes: f.tool_result_budget_relaxed_bytes as usize,
+        tool_result_truncation_pressure_ratio: f.tool_result_truncation_pressure_ratio,
+        token_correction: defaults.token_correction,
+        mid_turn_threshold_ratio: f.mid_turn_threshold_ratio,
+        post_tool_result_threshold_ratio: f.post_tool_result_threshold_ratio,
+        manual_compact_threshold_ratio: f.manual_compact_threshold_ratio,
+        allow_fifo_on_preflight: f.allow_fifo_on_preflight,
+        allow_fifo_on_mid_turn: f.allow_fifo_on_mid_turn,
+        allow_fifo_on_post_tool_result: f.allow_fifo_on_post_tool_result,
+        require_snapshot_before_fifo: f.require_snapshot_before_fifo,
+        enable_context_store: f.enable_context_store,
+        enable_state_ledger: f.enable_state_ledger,
+        enable_tool_schema_deferral: f.enable_tool_schema_deferral,
+        enable_file_condensation: f.enable_file_condensation,
+        enable_manual_compact: f.enable_manual_compact,
+        tool_spill_threshold_bytes: f.tool_spill_threshold_bytes as usize,
+        terminal_spill_threshold_bytes: f.terminal_spill_threshold_bytes as usize,
+        history_snapshot_threshold_tokens: f.history_snapshot_threshold_tokens,
+        file_outline_threshold_tokens: f.file_outline_threshold_tokens,
+        prompt_cache_anchor_threshold_tokens: f.prompt_cache_anchor_threshold_tokens,
+        output_reserve_ratio: f.output_reserve_ratio,
+        output_reserve_floor_tokens: f.output_reserve_floor_tokens,
+        output_reserve_max_tokens: f.output_reserve_max_tokens,
+        preflight_token_threshold: f.preflight_token_threshold,
+        mid_turn_token_threshold: f.mid_turn_token_threshold,
+        post_tool_result_token_threshold: f.post_tool_result_token_threshold,
+        turn_threshold: defaults.turn_threshold,
+        message_threshold: f.message_threshold,
+        compact_on_turn_end: defaults.compact_on_turn_end,
+        retention_window_messages: defaults.retention_window_messages,
+        retention_window_tokens: f.retention_window_tokens,
+        eviction_window_ratio: defaults.eviction_window_ratio,
+        enable_loop_hooks: f.enable_loop_hooks,
+        enable_doom_loop_guard: defaults.enable_doom_loop_guard,
+        enable_pending_work_guard: f.enable_pending_work_guard,
+        require_read_before_edit: defaults.require_read_before_edit,
+        default_tool_timeout_ms: defaults.default_tool_timeout_ms,
+        max_model_requests_per_turn: f.max_model_requests_per_turn,
+        long_loop: LongLoopPolicy::from(f.long_loop),
+        tool_semantics: semantics,
+        tool_catalog: catalog,
+    })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1580,10 +1595,10 @@ mod tests {
 
     fn io_with_active(entries: Vec<FfiToolSchemaEntry>) -> FfiSessionIoParams {
         // ENC-296: no tool_schema_registry field; the host owns the registry.
+        // ENC-297: no tool_catalog_json field; the catalog travels typed on FfiAgentConfig.
         FfiSessionIoParams {
             provider: "anthropic".into(),
             context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
             tool_schemas: entries,
             system_prompt: "sys".into(),
         }

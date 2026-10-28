@@ -4,12 +4,19 @@
 //! no host callback parameters left on this bridge.
 
 mod policy_bridge;
+mod semantics;
 mod stream_gate;
 mod types;
 
 pub use policy_bridge::{
     coerce_provider_arguments, has_local_tool_contract, parse_tool_calls, repair_tool,
     result_json_looks_soft_failure, should_allow_tool, truncate_result, RepairResult,
+};
+pub use semantics::{
+    FfiArtifactSquashSemantics, FfiArtifactToolSemantics, FfiDefaultValue, FfiFieldHint,
+    FfiParameterAlias, FfiSpecialValueRepair, FfiToolArgumentRepairRule, FfiToolCanonicalShape,
+    FfiToolCompactionSemantics, FfiToolDiscoverySemantics, FfiToolGreedyExtensionSemantics,
+    FfiToolResultPolicy, FfiToolSchemaHint, FfiToolSemantics, FfiToolSpec,
 };
 pub use stream_gate::{
     create_tool_stream_gate, FfiStreamGateFinish, FfiStreamGatePushResult, FfiToolStreamGate,
@@ -69,9 +76,17 @@ impl FfiAgentEngine {
         let msgs: Vec<crate::message::AgentMessage> =
             initial_messages.into_iter().map(Into::into).collect();
         let io = types::session_io_params(io)?;
+        // ENC-297 D2: fallible typed conversion — invalid semantics/catalog
+        // is an AgentException, never an eprintln + agnostic fallback.
+        let config = types::agent_config(config)?;
+        // ENC-297 J1: engine validation failure surfaces as a typed
+        // AgentException — never a live session with a stale catalog.
         let handle = self
             .inner
-            .create_session(msgs, config.into(), capabilities.into(), ctx, io);
+            .create_session(msgs, config, capabilities.into(), ctx, io)
+            .map_err(|error| AgentException::Internal {
+                detail: format!("invalid tool semantics: {error:?}"),
+            })?;
         Ok(Arc::new(FfiSession { handle }))
     }
 

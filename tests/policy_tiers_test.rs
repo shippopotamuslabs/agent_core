@@ -73,25 +73,21 @@ fn s22_high_context_raises_thresholds() {
     // session emits exactly one cache hint covering the stable prefix.
     let eng = AgentEngine::new();
     let stable_prefix = "stable ".repeat(2_500); // ~10k tokens by char/4 heuristic
-    let handle = eng.create_session(
-        vec![AgentMessage {
-            id: "u0".into(),
-            role: AgentRole::User,
-            content: stable_prefix,
-            metadata: MessageMeta::new(),
-        }],
-        cfg.clone(),
-        caps.clone(),
-        serde_json::Value::Null,
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u0".into(),
+                role: AgentRole::User,
+                content: stable_prefix,
+                metadata: MessageMeta::new(),
+            }],
+            cfg.clone(),
+            caps.clone(),
+            serde_json::Value::Null,
+            SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+                .expect("valid test io params"),
         )
-        .expect("valid test io params"),
-    );
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::CallModel(req) => {
             assert_eq!(

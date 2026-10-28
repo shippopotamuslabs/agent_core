@@ -13,14 +13,8 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large_window() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 
 fn caps_no_summary() -> SessionCapabilities {
@@ -45,6 +39,7 @@ fn new_session(eng: &AgentEngine) -> SessionHandle {
         serde_json::Value::Null,
         io_large_window(),
     )
+    .expect("valid config creates session")
 }
 
 fn tool_call(id: &str) -> RawToolCall {
@@ -176,23 +171,24 @@ fn char_reject_only_turn_returns_to_model() {
     let io = SessionIoParams::new(
         "anthropic".into(),
         200_000,
-        "[]".into(),
         r#"[{"name":"web_search"}]"#.into(),
         "sys".into(),
     )
     .expect("valid test io params");
-    let h = eng.create_session(
-        vec![AgentMessage {
-            id: "u1".into(),
-            role: AgentRole::User,
-            content: "hi".into(),
-            metadata: MessageMeta::new(),
-        }],
-        AgentConfig::default(),
-        caps_no_summary(),
-        serde_json::Value::Null,
-        io,
-    );
+    let h = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "hi".into(),
+                metadata: MessageMeta::new(),
+            }],
+            AgentConfig::default(),
+            caps_no_summary(),
+            serde_json::Value::Null,
+            io,
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.drain_events(&h);

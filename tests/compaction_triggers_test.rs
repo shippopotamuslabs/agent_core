@@ -22,24 +22,12 @@ use agent_core::session::{AgentConfig, AgentSession, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        200_000,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 fn io_small() -> SessionIoParams {
-    SessionIoParams::new(
-        "anthropic".into(),
-        256,
-        "[]".into(),
-        "[]".into(),
-        "sys".into(),
-    )
-    .expect("valid test io params")
+    SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+        .expect("valid test io params")
 }
 fn user(id: &str, content: &str) -> AgentMessage {
     AgentMessage {
@@ -80,13 +68,15 @@ fn s1_preflight_below_threshold_skips_compaction() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u1", "hi")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_large(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u1", "hi")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_large(),
+        )
+        .expect("valid config creates session");
     let action = eng.next_action(&handle);
     assert!(matches!(action, AgentAction::CallModel(_)));
     let events = eng.drain_events(&handle);
@@ -117,13 +107,15 @@ fn s2_preflight_summary_request_carries_trigger_metadata() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::RequestSummary(req) => {
             assert_eq!(req.trigger, CompactionTrigger::Preflight);
@@ -153,13 +145,15 @@ fn s3_mid_turn_summary_resumes_pending_tool_execution() {
     };
     let eng = AgentEngine::new();
     let big = "hello ".repeat(400);
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::CallModel(_) => {}
         AgentAction::RequestSummary(req) => {
@@ -222,13 +216,15 @@ fn post_tool_small_result_on_large_window_skips_compaction() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", "research topic")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_large(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", "research topic")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_large(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,
@@ -278,13 +274,15 @@ fn s4_post_tool_result_compaction_runs_before_next_model_call() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", "hi")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", "hi")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,
@@ -334,13 +332,15 @@ fn s5_artifact_squash_is_preferred_over_fifo() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", "make artifact")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", "make artifact")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,
@@ -417,13 +417,15 @@ fn s6_kv_fixed_sessions_stay_on_synchronous_compaction() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let action = eng.next_action(&handle);
     assert!(!matches!(action, AgentAction::RequestSummary(_)));
     let events = eng.drain_events(&handle);
@@ -479,17 +481,19 @@ fn s7_summary_request_includes_history_reference_and_ledger_snapshot() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            user("u0", "Objective: Implement context manager"),
-            asst("a0", &big),
-            user("u1", "tail"),
-        ],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![
+                user("u0", "Objective: Implement context manager"),
+                asst("a0", &big),
+                user("u1", "tail"),
+            ],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     match eng.next_action(&handle) {
         AgentAction::RequestSummary(req) => {
             let h = req.history_ref.as_deref().expect("history_ref required");
@@ -605,13 +609,15 @@ fn e2_submit_summary_rejects_a_mismatched_last_message_id() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        AgentConfig::default(),
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            AgentConfig::default(),
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle); // expected RequestSummary
     eng.submit_summary(
         &handle,
@@ -639,13 +645,15 @@ fn submit_model_response_while_awaiting_summary_is_invalid_transition() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        AgentConfig::default(),
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            AgentConfig::default(),
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
 
     assert!(matches!(
         eng.next_action(&handle),
@@ -684,13 +692,15 @@ fn e3_over_threshold_pressure_with_no_eligible_tier_fails_loudly() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,
@@ -730,13 +740,15 @@ fn fixed_kv_without_history_rewrite_support_does_not_fifo_through_engine() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
-        AgentConfig::default(),
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", &big), asst("a0", &big), user("u1", "tail")],
+            AgentConfig::default(),
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
 
     match eng.next_action(&handle) {
         AgentAction::Failed(AgentError::CompactionFailed { tier, reason }) => {
@@ -770,13 +782,15 @@ fn m1_post_tool_result_trigger_must_fire_without_a_later_preflight() {
         ..Default::default()
     };
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![user("u0", "small")],
-        cfg,
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![user("u0", "small")],
+            cfg,
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
         &handle,
@@ -832,17 +846,19 @@ fn m2_fifo_before_summary_ordering_is_rejected() {
     };
     let big = "hello ".repeat(400);
     let eng = AgentEngine::new();
-    let handle = eng.create_session(
-        vec![
-            user("u0", &big),
-            asst("a0", "decision: keep fact"),
-            user("u1", "tail"),
-        ],
-        AgentConfig::default(),
-        caps,
-        serde_json::Value::Null,
-        io_small(),
-    );
+    let handle = eng
+        .create_session(
+            vec![
+                user("u0", &big),
+                asst("a0", "decision: keep fact"),
+                user("u1", "tail"),
+            ],
+            AgentConfig::default(),
+            caps,
+            serde_json::Value::Null,
+            io_small(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&handle); // RequestSummary
     eng.submit_summary(
         &handle,
