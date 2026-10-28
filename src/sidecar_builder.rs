@@ -153,6 +153,21 @@ impl SidecarBuilder {
     }
 }
 
+/// The sequence embedded in a minted sidecar ID
+/// (`ctxref-<prefix>-<seq>`), or `None` for an ID this module did not
+/// mint. The grammar lives here, beside [`insert_spilled_sidecar`]
+/// which produces it: snapshot restore hands this classifier to
+/// [`ContextStore::validate_restored`] so the store can enforce its
+/// sequence invariant without learning the ID shape (ENC-308 A2).
+pub(crate) fn minted_id_sequence(id: &str) -> Option<u64> {
+    let rest = id.strip_prefix("ctxref-")?;
+    let (_, suffix) = rest.rsplit_once('-')?;
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u64>().ok()
+}
+
 fn insert_spilled_sidecar(
     store: &mut ContextStore,
     payload: &str,
@@ -221,4 +236,34 @@ fn ledger_delta_json(previous_full: &str, current_full: &str) -> String {
     }
 
     serde_json::to_string(&Value::Object(delta)).unwrap_or_else(|_| "{}".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minted_id_sequence_reads_the_minting_grammar() {
+        assert_eq!(minted_id_sequence("ctxref-ledger-0"), Some(0));
+        assert_eq!(minted_id_sequence("ctxref-sidecar-7"), Some(7));
+        // Hyphenated prefixes: the sequence is the FINAL component.
+        assert_eq!(minted_id_sequence("ctxref-tool-index-12"), Some(12));
+        assert_eq!(minted_id_sequence("ctxref-file-index-3"), Some(3));
+    }
+
+    #[test]
+    fn minted_id_sequence_rejects_foreign_and_unshaped_ids() {
+        assert_eq!(minted_id_sequence("term-1"), None);
+        assert_eq!(minted_id_sequence("ctxref-note-x"), None);
+        assert_eq!(minted_id_sequence("ctxref-ledger-"), None);
+        // A bare sequence with no prefix component is not a minted ID.
+        assert_eq!(minted_id_sequence("ctxref-7"), None);
+        assert_eq!(minted_id_sequence(""), None);
+        // An all-digit suffix that overflows u64 was never minted here
+        // (sequences come from the store's u64 counter).
+        assert_eq!(
+            minted_id_sequence("ctxref-ledger-99999999999999999999999"),
+            None
+        );
+    }
 }

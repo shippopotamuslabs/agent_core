@@ -397,8 +397,15 @@ impl AgentEngine {
                 message: message.to_string(),
             });
         }
-        // M3: context-store restore invariants.
-        context_store.validate_restored()?;
+        // M3: context-store restore invariants. The store owns the
+        // invariants and their error; the minted-ID grammar stays with
+        // the sidecar builder that mints the IDs, and a failure maps
+        // onto the snapshot error this boundary already returns.
+        context_store
+            .validate_restored(crate::sidecar_builder::minted_id_sequence)
+            .map_err(|error| ToolSemanticsError::InvalidSnapshot {
+                message: error.to_string(),
+            })?;
         let semantics = std::mem::take(&mut config.tool_semantics);
         config.tool_catalog = ToolCatalog::default();
         let mut universe = ToolUniverse::build(schemas, semantics)?;

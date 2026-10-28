@@ -109,6 +109,28 @@ pub fn make_preview(content: &str) -> String {
     }
 }
 
+/// Why a restored [`ContextStore`] failed
+/// [`ContextStore::validate_restored`].
+///
+/// The store owns this error family: restore invariants are store
+/// invariants, so no other module's error is borrowed for them.
+/// Fallible callers (snapshot import) map it onto their own boundary
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContextStoreRestoreError {
+    /// A map key disagrees with the reference id of the entry under it.
+    #[error("context store key '{key}' does not match its entry reference id '{id}'")]
+    KeyIdMismatch { key: String, id: String },
+    /// `next_seq` is not ahead of the largest minted sequence among
+    /// restored IDs; the next minted ID would overwrite a restored
+    /// entry.
+    #[error(
+        "context store next_seq {next_seq} must be greater than the largest \
+         minted sequence {minted_max} among restored entry ids"
+    )]
+    SequenceNotAhead { next_seq: u64, minted_max: u64 },
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStore {
     /// Stable insertion-ordered map keyed by reference id.
@@ -141,53 +163,46 @@ impl ContextStore {
         reference
     }
 
-    /// Restore-time invariant check (ENC-305 fix pass, M3), run by
-    /// snapshot import before the store is installed in a live session.
+    /// Restore-time invariant check (ENC-305 fix pass, M3; decoupled
+    /// ENC-308 A2), run by snapshot import before the store is
+    /// installed in a live session.
     ///
     /// The live invariants [`ContextStore::insert_entry`] maintains are
     /// re-checked, never re-established: every map key must equal its
-    /// entry's `reference.id`, and `next_seq` must be greater than every
-    /// numeric suffix `N` among keys shaped `ctxref-*-N` (the minted-ID
-    /// shape, see `sidecar_builder`), so a future minted ID can never
-    /// collide with — and silently overwrite — a restored entry.
-    /// Content dedup is deliberately NOT re-run and entries are NOT
-    /// replayed through `insert_entry`: entries are data, and replaying
-    /// could silently drop them.
-    pub fn validate_restored(&self) -> Result<(), crate::tool_semantics::ToolSemanticsError> {
-        use crate::tool_semantics::ToolSemanticsError;
+    /// entry's `reference.id`, and `next_seq` must be greater than
+    /// every sequence number embedded in a restored minted ID, so a
+    /// future minted ID can never collide with — and silently
+    /// overwrite — a restored entry. Content dedup is deliberately NOT
+    /// re-run and entries are NOT replayed through `insert_entry`:
+    /// entries are data, and replaying could silently drop them.
+    ///
+    /// The store owns the invariants but NOT the minted-ID grammar:
+    /// `minted_sequence` is the caller's classifier, supplied by the
+    /// module that mints the IDs, returning the sequence an ID embeds
+    /// or `None` for a foreign ID. Foreign IDs impose no constraint.
+    pub fn validate_restored(
+        &self,
+        minted_sequence: impl Fn(&str) -> Option<u64>,
+    ) -> Result<(), ContextStoreRestoreError> {
         for (key, entry) in &self.entries {
             if key != &entry.reference.id {
-                return Err(ToolSemanticsError::InvalidSnapshot {
-                    message: format!(
-                        "context store key '{key}' does not match its entry reference id '{}'",
-                        entry.reference.id
-                    ),
+                return Err(ContextStoreRestoreError::KeyIdMismatch {
+                    key: key.clone(),
+                    id: entry.reference.id.clone(),
                 });
             }
         }
-        let mut max_suffix: Option<u64> = None;
+        let mut max_minted: Option<u64> = None;
         for key in self.entries.keys() {
-            let Some(rest) = key.strip_prefix("ctxref-") else {
-                continue;
-            };
-            let Some((_, suffix)) = rest.rsplit_once('-') else {
-                continue;
-            };
-            if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            if let Ok(n) = suffix.parse::<u64>() {
-                max_suffix = Some(max_suffix.map_or(n, |max: u64| max.max(n)));
+            if let Some(n) = minted_sequence(key) {
+                max_minted = Some(max_minted.map_or(n, |max: u64| max.max(n)));
             }
         }
-        if let Some(max_suffix) = max_suffix {
-            if self.next_seq <= max_suffix {
-                return Err(ToolSemanticsError::InvalidSnapshot {
-                    message: format!(
-                        "context store next_seq {} must be greater than the largest \
-                         ctxref suffix {max_suffix} among restored entry ids",
-                        self.next_seq
-                    ),
+        if let Some(minted_max) = max_minted {
+            if self.next_seq <= minted_max {
+                return Err(ContextStoreRestoreError::SequenceNotAhead {
+                    next_seq: self.next_seq,
+                    minted_max,
                 });
             }
         }
@@ -414,13 +429,28 @@ mod tests {
         }
     }
 
+    /// Test classifier standing in for the production minted-ID
+    /// classifier (the sidecar builder's) at the validate_restored
+    /// seam: IDs shaped `mint-<prefix>-<seq>`. The store's restore
+    /// tests deliberately use a FOREIGN grammar — the store must
+    /// enforce its invariants for whatever classifier it is handed,
+    /// without knowing any ID shape itself (ENC-308 A2).
+    fn test_minted_sequence(id: &str) -> Option<u64> {
+        let rest = id.strip_prefix("mint-")?;
+        let (_, suffix) = rest.rsplit_once('-')?;
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse::<u64>().ok()
+    }
+
     #[test]
     fn validate_restored_accepts_live_invariants() {
         // M3: a store built through insert_entry (plus minted-seq usage)
         // passes restore validation.
         let mut store = ContextStore::default();
         store.insert_entry(entry(
-            "ctxref-sidecar-0",
+            "mint-sidecar-0",
             ContextReferenceKind::ToolOutput,
             "payload",
         ));
@@ -430,7 +460,9 @@ mod tests {
             ContextReferenceKind::TerminalOutput,
             "other",
         ));
-        store.validate_restored().expect("live store must validate");
+        store
+            .validate_restored(test_minted_sequence)
+            .expect("live store must validate");
     }
 
     #[test]
@@ -444,51 +476,49 @@ mod tests {
             entry("real-id", ContextReferenceKind::ToolOutput, "payload"),
         );
         let error = store
-            .validate_restored()
+            .validate_restored(test_minted_sequence)
             .expect_err("key/id mismatch must fail");
-        assert!(
-            matches!(
-                error,
-                crate::tool_semantics::ToolSemanticsError::InvalidSnapshot { ref message }
-                if message.contains("wrong-key") && message.contains("real-id")
-            ),
-            "expected InvalidSnapshot naming key and id, got {error:?}"
+        assert_eq!(
+            error,
+            ContextStoreRestoreError::KeyIdMismatch {
+                key: "wrong-key".to_string(),
+                id: "real-id".to_string(),
+            }
         );
     }
 
     #[test]
     fn validate_restored_rejects_next_seq_behind_minted_suffix() {
-        // M3: next_seq reset to 0 would let a future minted
-        // ctxref-sidecar-0 overwrite the restored entry.
+        // M3: next_seq reset to the largest minted sequence would let
+        // a future minted ID overwrite the restored entry.
         let mut store = ContextStore::default();
         store.insert_entry(entry(
-            "ctxref-sidecar-3",
+            "mint-sidecar-3",
             ContextReferenceKind::ToolOutput,
             "payload",
         ));
         store.next_seq = 3;
         let error = store
-            .validate_restored()
+            .validate_restored(test_minted_sequence)
             .expect_err("next_seq not ahead of suffixes must fail");
-        assert!(
-            matches!(
-                error,
-                crate::tool_semantics::ToolSemanticsError::InvalidSnapshot { .. }
-            ),
-            "expected InvalidSnapshot, got {error:?}"
+        assert_eq!(
+            error,
+            ContextStoreRestoreError::SequenceNotAhead {
+                next_seq: 3,
+                minted_max: 3,
+            }
         );
         store.next_seq = 4;
-        store.validate_restored().expect("next_seq ahead must pass");
-        // Non-ctxref keys and non-numeric suffixes impose no constraint.
-        store.next_seq = 0;
+        store
+            .validate_restored(test_minted_sequence)
+            .expect("next_seq ahead must pass");
+        // Foreign keys and non-numeric suffixes impose no constraint.
         let mut store = ContextStore::default();
         store.insert_entry(entry("term-9", ContextReferenceKind::TerminalOutput, "x"));
-        store.insert_entry(entry(
-            "ctxref-note-x",
-            ContextReferenceKind::ToolOutput,
-            "y",
-        ));
-        store.validate_restored().expect("unshaped keys must pass");
+        store.insert_entry(entry("mint-note-x", ContextReferenceKind::ToolOutput, "y"));
+        store
+            .validate_restored(test_minted_sequence)
+            .expect("unshaped keys must pass");
     }
 
     #[test]
