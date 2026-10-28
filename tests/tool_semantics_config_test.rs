@@ -18,6 +18,7 @@ fn tn(name: &str) -> ToolName {
 use agent_core::guardrails::GuardrailState;
 use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
 use agent_core::session::AgentConfig;
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_parse::parse_tool_calls_with_semantics;
 use agent_core::tool_semantics::{
     ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
@@ -456,6 +457,7 @@ fn ts_015_semantics_aware_repair_accepts_custom_tool_names() {
 fn ts_016_provider_parse_uses_supplied_custom_catalog() {
     let semantics = custom_semantics();
     let batch = parse_tool_calls_with_semantics(
+        ToolCallFormat::XmlToolCall,
         r#"<tool_call>{"name":"lookup_memory","arguments":{"query":"alpha"}}</tool_call>"#,
         &catalog_from(&semantics),
         &semantics,

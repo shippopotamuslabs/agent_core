@@ -42,10 +42,12 @@ pub fn envelope_failure_json(failure: &ToolParseFailure, catalog: &ToolCatalog) 
 fn envelope_failure_message(failure: &ToolParseFailure) -> String {
     match &failure.reason {
         ToolParseFailureReason::MalformedEnvelope => {
-            if failure.format_hint.as_deref() == Some("dsml") {
-                "Malformed DSML tool envelope".to_string()
-            } else {
-                "Malformed tool envelope".to_string()
+            // ENC-300 D4: the hint names the DECLARED shape, so a wrong-format
+            // turn fails loudly naming what the host declared.
+            match failure.format_hint.as_deref() {
+                Some("dsml") => "Malformed DSML tool envelope".to_string(),
+                Some(hint) => format!("Malformed {hint} tool envelope"),
+                None => "Malformed tool envelope".to_string(),
             }
         }
         ToolParseFailureReason::InvalidJson { detail } => {

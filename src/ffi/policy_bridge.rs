@@ -111,6 +111,7 @@ pub fn result_json_looks_soft_failure(json: &str) -> bool {
 #[uniffi::export]
 pub fn parse_tool_calls(
     raw: &str,
+    tool_call_format: super::types::FfiToolCallFormat,
     tool_semantics: Option<FfiToolSemantics>,
     tool_specs: Vec<FfiToolSpec>,
 ) -> FfiToolParseBatch {
@@ -131,12 +132,15 @@ pub fn parse_tool_calls(
             };
         }
     };
-    tool_parse::parse_tool_calls_with_semantics(raw, &catalog, &semantics).into()
+    // ENC-300 D3: the host declares the format per call; only that parser runs.
+    let format = crate::tool_call_format::ToolCallFormat::from(tool_call_format);
+    tool_parse::parse_tool_calls_with_semantics(format, raw, &catalog, &semantics).into()
 }
 
 #[uniffi::export]
 pub fn has_local_tool_contract(
     system_prompt: &str,
+    tool_call_format: super::types::FfiToolCallFormat,
     tool_semantics: Option<FfiToolSemantics>,
     tool_specs: Vec<FfiToolSpec>,
 ) -> bool {
@@ -146,7 +150,9 @@ pub fn has_local_tool_contract(
         Ok(loaded) => loaded,
         Err(_) => return false,
     };
-    tool_parse::has_local_tool_contract(system_prompt, &catalog)
+    // ENC-300 D3: declared-format markers only (Structured => false).
+    let format = crate::tool_call_format::ToolCallFormat::from(tool_call_format);
+    tool_parse::has_local_tool_contract(format, system_prompt, &catalog)
 }
 
 #[uniffi::export]

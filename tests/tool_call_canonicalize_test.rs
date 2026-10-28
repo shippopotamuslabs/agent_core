@@ -17,6 +17,7 @@ use agent_core::turn_io::RawToolCall;
 fn tn(name: &str) -> ToolName {
     ToolName::new(name).expect("test tool name must be valid")
 }
+use agent_core::tool_call_format::ToolCallFormat;
 use serde_json::Value;
 use support::enclave_test_semantics::{
     enclave_test_catalog, enclave_test_semantics, parse_enclave_tool_calls,
@@ -307,7 +308,7 @@ fn faal_md_01_repair_provider_and_parse_paths_all_emit_array_blocks() {
         ToolRepairPipeline::repair_with_semantics(&append_blocks_raw(args), &catalog, &semantics);
     let raw_text =
         format!(r#"<tool_call>{{"name":"append_blocks","arguments":{args}}}</tool_call>"#,);
-    let parsed = parse_enclave_tool_calls(&raw_text);
+    let parsed = parse_enclave_tool_calls(&raw_text, ToolCallFormat::XmlToolCall);
 
     assert_blocks_array(&ingress.arguments_json, "Parity", "FAAL-MD-01 ingress");
     match repair {

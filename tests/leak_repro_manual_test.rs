@@ -4,6 +4,7 @@
 mod support;
 
 use agent_core::engine::resolve_model_turn_text;
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_stream_gate::{
     first_strong_tool_marker_start, normalize_spaced_dsml, ToolStreamGate,
 };
@@ -33,12 +34,22 @@ fn double_pipe_dsml_is_normalized_recovered_and_hidden_from_stream() {
     assert_eq!(finish.trailing_flush, "");
     assert!(finish.has_tool_marker);
 
-    let batch = parse_enclave_tool_calls(&normalize_spaced_dsml(LEAKED_DOUBLE_PIPE));
+    let batch = parse_enclave_tool_calls(
+        &normalize_spaced_dsml(LEAKED_DOUBLE_PIPE),
+        ToolCallFormat::Dsml,
+    );
     assert_eq!(batch.successes.len(), 2);
 
     let catalog = enclave_test_catalog();
     let semantics = enclave_test_semantics();
-    let resolution = resolve_model_turn_text(LEAKED_DOUBLE_PIPE, &[], true, &catalog, &semantics);
+    let resolution = resolve_model_turn_text(
+        ToolCallFormat::Dsml,
+        LEAKED_DOUBLE_PIPE,
+        &[],
+        true,
+        &catalog,
+        &semantics,
+    );
     assert_eq!(resolution.recovered_tool_calls.len(), 2);
     assert_eq!(resolution.visible_assistant_text, "");
 }

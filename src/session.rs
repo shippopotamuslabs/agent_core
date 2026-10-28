@@ -3,6 +3,7 @@ use crate::events::CompactionEvent;
 use crate::long_loop_policy::LongLoopPolicy;
 use crate::message::{AgentMessage, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
+use crate::tool_call_format::ToolCallFormat;
 use crate::tool_semantics::{ToolSemanticsConfig, ToolSemanticsError};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -130,6 +131,11 @@ pub struct AgentConfig {
     pub long_loop: LongLoopPolicy,
     #[serde(default)]
     pub tool_semantics: ToolSemanticsConfig,
+    /// Host-declared tool-call format (ENC-300 D2): `Structured` (native
+    /// calls only; body text never mined) by default, or one envelope shape
+    /// whose parser alone runs on model text. NOT inside `tool_semantics`.
+    #[serde(default)]
+    pub tool_call_format: ToolCallFormat,
     /// Validated policy catalog derived from [`tool_semantics`](Self::tool_semantics)
     /// (ENC-297 D4). Skipped by serde: it is rebuilt from the semantics by the
     /// fallible construction surface, never carried as separate serialized state.
@@ -260,6 +266,7 @@ impl Default for AgentConfig {
             max_model_requests_per_turn: default_max_model_requests_per_turn(),
             long_loop: LongLoopPolicy::default(),
             tool_semantics: ToolSemanticsConfig::agnostic(),
+            tool_call_format: ToolCallFormat::Structured,
             tool_catalog: ToolCatalog::default(),
         }
     }

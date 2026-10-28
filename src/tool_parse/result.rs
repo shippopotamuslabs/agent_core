@@ -18,12 +18,10 @@ pub struct ToolParseField {
 /// A single failed envelope.
 ///
 /// `format_hint` carries the discriminator that identifies which envelope
-/// dialect was being parsed when the failure occurred (e.g. `"dsml"` for
-/// DSML envelopes). Required by `test_spec.md` so callers / observers can
-/// distinguish DSML failures from Mistral / `<tool_call>` failures.
-///
-/// **TDD Red:** the field exists but the pipeline does not yet populate it;
-/// it always defaults to `None` until the implementation phase wires it up.
+/// shape was being parsed when the failure occurred (e.g. `"dsml"` for DSML
+/// envelopes, `"bracket-array"`, `"xml-tool-call"`, `"cdata"`, `"raw-json"`,
+/// `"call-brace"`). Required by `test_spec.md` so callers / observers can
+/// distinguish DSML failures from other shapes' failures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolParseFailure {
     pub reason: ToolParseFailureReason,

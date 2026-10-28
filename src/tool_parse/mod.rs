@@ -28,6 +28,7 @@ use crate::canonicalize::{
     CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
 };
 use crate::catalog::{ToolCatalog, ToolSchemaHint};
+use crate::tool_call_format::ToolCallFormat;
 use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::tool_stream_gate::normalize_spaced_dsml;
@@ -42,13 +43,113 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::ops::Range;
 
+/// Internal port (ENC-300 D3): one parser per envelope shape, each wrapping
+/// the existing `extract_*` function for its shape. The host-declared format
+/// selects the parser; there is no cross-format sniffing.
+pub trait EnvelopeParser {
+    /// Envelope shape this parser extracts.
+    fn envelope_format(&self) -> EnvelopeFormat;
+    /// Extract envelopes of this parser's shape from normalized model text.
+    /// Errors when the shape's markers are absent or malformed (loud, no
+    /// fallback to another shape).
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>;
+}
+
+struct DsmlParser;
+struct BracketArrayParser;
+struct XmlToolCallParser;
+struct CdataParser;
+struct CallBraceParser;
+struct RawJsonParser;
+
+impl EnvelopeParser for DsmlParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::Dsml
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_dsml(raw)
+    }
+}
+
+impl EnvelopeParser for BracketArrayParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::BracketArray
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_bracket_array(raw)
+    }
+}
+
+impl EnvelopeParser for XmlToolCallParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::XmlToolCall
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_xml_tool_call(raw)
+    }
+}
+
+impl EnvelopeParser for CdataParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::Cdata
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_cdata(raw)
+    }
+}
+
+impl EnvelopeParser for CallBraceParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::CallBrace
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_call_brace(raw)
+    }
+}
+
+impl EnvelopeParser for RawJsonParser {
+    fn envelope_format(&self) -> EnvelopeFormat {
+        EnvelopeFormat::RawJson
+    }
+    fn extract(&self, raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+        extract_raw_json(raw)
+    }
+}
+
+static DSML_PARSER: DsmlParser = DsmlParser;
+static BRACKET_ARRAY_PARSER: BracketArrayParser = BracketArrayParser;
+static XML_TOOL_CALL_PARSER: XmlToolCallParser = XmlToolCallParser;
+static CDATA_PARSER: CdataParser = CdataParser;
+static CALL_BRACE_PARSER: CallBraceParser = CallBraceParser;
+static RAW_JSON_PARSER: RawJsonParser = RawJsonParser;
+
+/// Resolve the host-declared format to its envelope parser.
+/// `None` for [`ToolCallFormat::Structured`]: structured sessions never mine
+/// body text.
+pub fn parser_for(format: ToolCallFormat) -> Option<&'static dyn EnvelopeParser> {
+    match format {
+        ToolCallFormat::Structured => None,
+        ToolCallFormat::Dsml => Some(&DSML_PARSER),
+        ToolCallFormat::BracketArray => Some(&BRACKET_ARRAY_PARSER),
+        ToolCallFormat::XmlToolCall => Some(&XML_TOOL_CALL_PARSER),
+        ToolCallFormat::Cdata => Some(&CDATA_PARSER),
+        ToolCallFormat::CallBrace => Some(&CALL_BRACE_PARSER),
+        ToolCallFormat::RawJson => Some(&RAW_JSON_PARSER),
+    }
+}
+
 pub fn parse_tool_calls_with_semantics(
+    format: ToolCallFormat,
     raw: &str,
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
 ) -> ToolParseBatch {
+    let Some(parser) = parser_for(format) else {
+        // Structured: body text is never mined for tool calls.
+        return ToolParseBatch::empty(raw);
+    };
     let normalized = normalize_model_text(raw);
-    match extract_envelopes(&normalized) {
+    match parser.extract(&normalized) {
         Ok(extracted) if extracted.is_empty() => ToolParseBatch::empty(raw),
         Ok(extracted) => build_batch_with_semantics(raw, extracted, catalog, semantics),
         Err(error) => ToolParseBatch {
@@ -108,18 +209,24 @@ pub fn coerce_provider_arguments_with_semantics(
     }
 }
 
-/// True iff `system_prompt` contains a local-tool marker AND names a catalog tool.
-pub fn has_local_tool_contract(system_prompt: &str, catalog: &ToolCatalog) -> bool {
-    let has_marker = [
-        "<tool_call",
-        "{\"name\"",
-        "<![CDATA[<tool",
-        "DSML",
-        "invoke name=",
-    ]
-    .iter()
-    .any(|marker| system_prompt.contains(marker));
-    has_marker
+/// True iff `system_prompt` contains the DECLARED format's marker AND names a
+/// catalog tool (ENC-300 D3). [`ToolCallFormat::Structured`] is always false:
+/// structured sessions have no text markers to contract on.
+pub fn has_local_tool_contract(
+    format: ToolCallFormat,
+    system_prompt: &str,
+    catalog: &ToolCatalog,
+) -> bool {
+    let marker = match format {
+        ToolCallFormat::Structured => return false,
+        ToolCallFormat::Dsml => "DSML",
+        ToolCallFormat::BracketArray => "[TOOL_CALLS]",
+        ToolCallFormat::XmlToolCall => "<tool_call",
+        ToolCallFormat::Cdata => "<![CDATA[<tool",
+        ToolCallFormat::CallBrace => "call:",
+        ToolCallFormat::RawJson => "\"name\"",
+    };
+    system_prompt.contains(marker)
         && catalog
             .all()
             .iter()
@@ -329,42 +436,17 @@ fn map_canonicalize_error(tool: &str, detail: &str) -> ToolParseFailureReason {
     }
 }
 
-fn extract_envelopes(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
-    if raw.contains("[TOOL_CALLS]") {
-        return extract_mistral(raw);
-    }
-    if raw.contains("DSML") {
-        return extract_dsml(raw);
-    }
-    if raw.contains("<tool_call") {
-        return extract_tool_call(raw);
-    }
-    if raw.contains("<![CDATA[<tool") {
-        return extract_cdata(raw);
-    }
-    if Regex::new(r"(?is)\bcall\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\{")
-        .unwrap()
-        .is_match(raw)
-    {
-        return extract_litert_call(raw);
-    }
-    if raw.contains("\"name\"") || raw.contains("'name'") || raw.contains("\u{201C}name\u{201D}") {
-        return extract_raw_json(raw);
-    }
-    Ok(Vec::new())
-}
-
-fn extract_litert_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+fn extract_call_brace(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let call = Regex::new(r"(?is)\bcall\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\{").unwrap();
     let captures = call
         .captures(raw)
-        .ok_or_else(|| malformed(Some(EnvelopeFormat::LiteRtCall), "missing call envelope"))?;
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::CallBrace), "missing call envelope"))?;
     let full = captures.get(0).unwrap();
     let arguments_start = full.end() - 1;
     let arguments_end = matching_delimiter(raw, arguments_start, '{', '}');
 
     let (arguments_raw, visible_suffix, repair_hints) = if let Some(end) = arguments_end {
-        let args = normalize_litert_arguments(&raw[arguments_start..=end]);
+        let args = normalize_call_brace_arguments(&raw[arguments_start..=end]);
         let suffix = raw[end + 1..].trim_start().to_string();
         (
             args,
@@ -382,11 +464,11 @@ fn extract_litert_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeErro
         let has_argument_content = !raw[after_open..].trim().is_empty();
         if has_later_envelope || !has_argument_content {
             return Err(malformed(
-                Some(EnvelopeFormat::LiteRtCall),
+                Some(EnvelopeFormat::CallBrace),
                 "unclosed call envelope",
             ));
         }
-        let args = normalize_litert_arguments(&raw[arguments_start..]);
+        let args = normalize_call_brace_arguments(&raw[arguments_start..]);
         let hints = vec![
             "converted call: tool syntax to canonical envelope".to_string(),
             "recovered unclosed call envelope truncated at end of output".to_string(),
@@ -399,12 +481,12 @@ fn extract_litert_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeErro
         arguments_raw,
         visible_prefix: raw[..full.start()].trim_end().to_string(),
         visible_suffix,
-        format: EnvelopeFormat::LiteRtCall,
+        format: EnvelopeFormat::CallBrace,
         repair_hints,
     }])
 }
 
-fn normalize_litert_arguments(raw: &str) -> String {
+fn normalize_call_brace_arguments(raw: &str) -> String {
     let sentinel_normalized = raw.replace("<|\"|>", "\"");
     let mut normalized = String::with_capacity(sentinel_normalized.len());
     let mut in_string = false;
@@ -435,31 +517,36 @@ fn normalize_litert_arguments(raw: &str) -> String {
     normalized
 }
 
-fn extract_mistral(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+fn extract_bracket_array(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let sentinel = "[TOOL_CALLS]";
     let start = raw.find(sentinel).unwrap_or_default();
     let after = start + sentinel.len();
     let Some(array_start_rel) = raw[after..].find('[') else {
         return Err(malformed(
-            Some(EnvelopeFormat::Mistral),
-            "missing Mistral array",
+            Some(EnvelopeFormat::BracketArray),
+            "missing BracketArray array",
         ));
     };
     let array_start = after + array_start_rel;
     let Some(array_end) = matching_delimiter(raw, array_start, '[', ']') else {
         return Err(malformed(
-            Some(EnvelopeFormat::Mistral),
-            "unclosed Mistral array",
+            Some(EnvelopeFormat::BracketArray),
+            "unclosed BracketArray array",
         ));
     };
     let payload = &raw[array_start..=array_end];
     let values = repair_json(payload)
         .ok()
         .and_then(|value| value.as_array().cloned())
-        .ok_or_else(|| malformed(Some(EnvelopeFormat::Mistral), "invalid Mistral array"))?;
+        .ok_or_else(|| {
+            malformed(
+                Some(EnvelopeFormat::BracketArray),
+                "invalid BracketArray array",
+            )
+        })?;
     calls_from_values(
         values,
-        EnvelopeFormat::Mistral,
+        EnvelopeFormat::BracketArray,
         raw[..start].trim().to_string(),
         raw[array_end + 1..].to_string(),
         Vec::new(),
@@ -657,15 +744,22 @@ impl<'a> DsmlBlock<'a> {
 /// Open and close tag spans of one `<tool_call>` envelope in the raw
 /// output: payload is `open.end..close.start`, visible prefix ends at
 /// `open.start`, visible suffix starts at `close.end`.
-struct ToolCallSpan {
+struct XmlToolCallSpan {
     open: Range<usize>,
     close: Range<usize>,
 }
 
-fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
+fn extract_xml_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let open = Regex::new(r#"(?is)<\s*tool_call\b[^>]*>"#).unwrap();
     let Some(start) = open.find(raw) else {
-        return Ok(Vec::new());
+        // ENC-300 D4: no silent empty — without this shape's markers the
+        // declared-format parse fails loudly (the engine maps marker-absent
+        // text to a plain-text turn before parsing, so this fires only for
+        // wrong-format text and names the declared shape).
+        return Err(malformed(
+            Some(EnvelopeFormat::XmlToolCall),
+            "missing tool_call envelope",
+        ));
     };
     let Some(close_start_rel) = raw[start.end()..].to_ascii_lowercase().find("</tool_call>") else {
         // No closing tag. Recovery is allowed only for EOS truncation: the
@@ -673,46 +767,53 @@ fn extract_tool_call(raw: &str) -> Result<Vec<ExtractedEnvelope>, EnvelopeError>
         // non-empty. GLM form requires an explicit close and never recovers.
         if open.find_at(raw, start.end()).is_some() {
             return Err(malformed(
-                Some(EnvelopeFormat::ToolCall),
+                Some(EnvelopeFormat::XmlToolCall),
                 "unclosed tool_call",
             ));
         }
         let payload = raw[start.end()..].trim();
         if payload.is_empty() {
             return Err(malformed(
-                Some(EnvelopeFormat::ToolCall),
+                Some(EnvelopeFormat::XmlToolCall),
                 "invalid tool_call payload",
             ));
         }
         if payload.contains("<arg_key>") {
             return Err(malformed(
-                Some(EnvelopeFormat::ToolCall),
+                Some(EnvelopeFormat::XmlToolCall),
                 "unclosed tool_call",
             ));
         }
-        return recover_truncated_tool_call(raw, &start);
+        return recover_truncated_xml_tool_call(raw, &start);
     };
     let close_start = start.end() + close_start_rel;
-    parse_closed_tool_call(
+    parse_closed_xml_tool_call(
         raw,
-        ToolCallSpan {
+        XmlToolCallSpan {
             open: start.start()..start.end(),
             close: close_start..close_start + "</tool_call>".len(),
         },
     )
 }
 
-/// Parse a `<tool_call>` envelope with both tags present.
-fn parse_closed_tool_call(
+/// Parse an XmlToolCall (`<tool_call>`) envelope with both tags present.
+/// The `<arg_key>`/`<arg_value>` payload sub-shape is detected
+/// deterministically inside this parser (ENC-300 D1): it stays a sub-shape of
+/// the declared XmlToolCall format, never a separately sniffed dialect.
+fn parse_closed_xml_tool_call(
     raw: &str,
-    span: ToolCallSpan,
+    span: XmlToolCallSpan,
 ) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let payload = raw[span.open.end..span.close.start].trim();
     if payload.contains("<arg_key>") {
-        return extract_glm_tool_call(raw, span.open.start, span.close.end, payload);
+        return extract_glm_xml_tool_call(raw, span.open.start, span.close.end, payload);
     }
-    let value = repair_json(payload)
-        .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
+    let value = repair_json(payload).map_err(|_| {
+        malformed(
+            Some(EnvelopeFormat::XmlToolCall),
+            "invalid tool_call payload",
+        )
+    })?;
     let repair_hints = if payload.contains('\'') {
         vec!["converted single quotes to double quotes".to_string()]
     } else {
@@ -720,7 +821,7 @@ fn parse_closed_tool_call(
     };
     values_from_payload(
         value,
-        EnvelopeFormat::ToolCall,
+        EnvelopeFormat::XmlToolCall,
         raw[..span.open.start].to_string(),
         raw[span.close.end..].to_string(),
         repair_hints,
@@ -729,13 +830,17 @@ fn parse_closed_tool_call(
 
 /// Recover an EOS-truncated `<tool_call>` envelope: the open tag is the last
 /// one in the text and the payload holds non-GLM content.
-fn recover_truncated_tool_call(
+fn recover_truncated_xml_tool_call(
     raw: &str,
     start: &Match,
 ) -> Result<Vec<ExtractedEnvelope>, EnvelopeError> {
     let payload = raw[start.end()..].trim();
-    let value = repair_json(payload)
-        .map_err(|_| malformed(Some(EnvelopeFormat::ToolCall), "invalid tool_call payload"))?;
+    let value = repair_json(payload).map_err(|_| {
+        malformed(
+            Some(EnvelopeFormat::XmlToolCall),
+            "invalid tool_call payload",
+        )
+    })?;
     let mut repair_hints =
         vec!["recovered unclosed tool_call envelope truncated at end of output".to_string()];
     if payload.contains('\'') {
@@ -743,14 +848,14 @@ fn recover_truncated_tool_call(
     }
     values_from_payload(
         value,
-        EnvelopeFormat::ToolCall,
+        EnvelopeFormat::XmlToolCall,
         raw[..start.start()].to_string(),
         String::new(),
         repair_hints,
     )
 }
 
-fn extract_glm_tool_call(
+fn extract_glm_xml_tool_call(
     raw: &str,
     start: usize,
     end: usize,
@@ -760,7 +865,7 @@ fn extract_glm_tool_call(
         .unwrap();
     let caps = glm
         .captures(payload)
-        .ok_or_else(|| malformed(Some(EnvelopeFormat::ToolCall), "invalid GLM payload"))?;
+        .ok_or_else(|| malformed(Some(EnvelopeFormat::XmlToolCall), "invalid GLM payload"))?;
     let key = caps.get(2).unwrap().as_str().trim();
     let raw_value = caps.get(3).unwrap().as_str().trim();
     let value = repair_json(raw_value)
@@ -770,7 +875,7 @@ fn extract_glm_tool_call(
         arguments_raw: Value::Object([(key.to_string(), value)].into_iter().collect()).to_string(),
         visible_prefix: raw[..start].to_string(),
         visible_suffix: raw[end..].to_string(),
-        format: EnvelopeFormat::ToolCall,
+        format: EnvelopeFormat::XmlToolCall,
         repair_hints: Vec::new(),
     }])
 }
@@ -972,10 +1077,17 @@ fn push_repair(repairs: &mut Vec<String>, repair: &str) {
 }
 
 fn format_hint(format: EnvelopeFormat) -> Option<String> {
-    match format {
-        EnvelopeFormat::Dsml => Some("dsml".to_string()),
-        _ => None,
-    }
+    // Shape names ride the shared ToolCallFormat table (ENC-300 D1); the
+    // "dsml" hint is kept byte-identical.
+    let format = match format {
+        EnvelopeFormat::Dsml => ToolCallFormat::Dsml,
+        EnvelopeFormat::BracketArray => ToolCallFormat::BracketArray,
+        EnvelopeFormat::XmlToolCall => ToolCallFormat::XmlToolCall,
+        EnvelopeFormat::Cdata => ToolCallFormat::Cdata,
+        EnvelopeFormat::CallBrace => ToolCallFormat::CallBrace,
+        EnvelopeFormat::RawJson => ToolCallFormat::RawJson,
+    };
+    format.format_hint().map(str::to_string)
 }
 
 fn malformed(format: Option<EnvelopeFormat>, detail: &str) -> EnvelopeError {

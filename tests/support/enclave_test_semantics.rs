@@ -1,4 +1,5 @@
 use agent_core::catalog::{ToolCatalog, ToolSpec};
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_parse::{parse_tool_calls_with_semantics, ToolParseBatch};
 use agent_core::tool_semantics::{ToolCatalogConfig, ToolSemanticsConfig};
 
@@ -28,9 +29,12 @@ pub fn enclave_test_catalog() -> ToolCatalog {
 
 // Used by only some test binaries; each binary compiles this support module
 // separately, so unused-in-this-binary helpers must not fail the build.
+//
+// ENC-300: every format test passes its declared format — there is no
+// sniffing fallback, so the helper cannot pick one.
 #[allow(dead_code)]
-pub fn parse_enclave_tool_calls(raw: &str) -> ToolParseBatch {
+pub fn parse_enclave_tool_calls(raw: &str, format: ToolCallFormat) -> ToolParseBatch {
     let semantics = enclave_test_semantics();
     let catalog = enclave_test_catalog();
-    parse_tool_calls_with_semantics(raw, &catalog, &semantics)
+    parse_tool_calls_with_semantics(format, raw, &catalog, &semantics)
 }
