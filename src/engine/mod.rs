@@ -948,6 +948,11 @@ impl AgentEngine {
     }
 }
 
+/// ENC-293: append context is detected from typed `raw_tool_calls` metadata
+/// only. Content-substring matching was a compatibility crutch: it misfires
+/// on prose mentions and misses structured calls, so the content arms were
+/// deleted. Hosts must populate `raw_tool_calls` (the engine does so via
+/// `patch_last_assistant_raw_tool_calls` after every model intake).
 pub(super) fn session_has_append_context(
     messages: &[AgentMessage],
     artifact_squash: Option<&ArtifactSquashSemantics>,
@@ -955,20 +960,11 @@ pub(super) fn session_has_append_context(
     let Some(squash) = artifact_squash else {
         return false;
     };
-    let quoted_total = (!squash.total_blocks_result_field.is_empty())
-        .then(|| format!("\"{}\"", squash.total_blocks_result_field));
+    if squash.append_tool_name.is_empty() {
+        return false;
+    }
     messages.iter().any(|message| {
-        (!squash.append_tool_name.is_empty()
-            && message.content.contains(squash.append_tool_name.as_str()))
-            || quoted_total
-                .as_ref()
-                .is_some_and(|quoted| message.content.contains(quoted))
-            || (!squash.append_tool_name.is_empty()
-                && message
-                    .metadata
-                    .raw_tool_calls()
-                    .iter()
-                    .any(|call| call.name == squash.append_tool_name))
+        crate::compact::artifact_squash::metadata_has_tool(message, &squash.append_tool_name)
     })
 }
 
@@ -2341,21 +2337,25 @@ mod tests {
         }
     }
 
+    // ENC-293: content alone is inert — detection reads `raw_tool_calls`
+    // metadata only, so tool-name mentions and total-field payloads without
+    // metadata no longer engage the gate.
     #[test]
-    fn frg14_append_context_custom_content_match() {
+    fn frg14_append_context_custom_content_alone_inert() {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![frg14_msg(
             r#"call:write_doc{"docId":"1","chunks":[]}"#,
             MessageMeta::new(),
         )];
-        assert!(session_has_append_context(&messages, Some(&squash)));
+        assert!(!session_has_append_context(&messages, Some(&squash)));
     }
 
     #[test]
     fn frg14_append_context_custom_raw_tool_call_match() {
         let squash = frg14_squash("write_doc", "chunkCount");
+        // Decoy content names a different tool: the metadata is authoritative.
         let messages = vec![frg14_msg(
-            "plain assistant text",
+            "call:other_tool{}",
             MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
                 id: None,
                 name: "write_doc".into(),
@@ -2366,13 +2366,25 @@ mod tests {
     }
 
     #[test]
-    fn frg14_append_context_custom_total_field_match() {
+    fn frg14_append_context_custom_total_field_alone_inert() {
         let squash = frg14_squash("write_doc", "chunkCount");
         let messages = vec![frg14_msg(
             r#"{"status":"success","chunkCount":2}"#,
             MessageMeta::new(),
         )];
-        assert!(session_has_append_context(&messages, Some(&squash)));
+        assert!(!session_has_append_context(&messages, Some(&squash)));
+    }
+
+    // ENC-293: prose that merely mentions the configured tool must not engage
+    // the gate (the old content arm misfired on exactly this shape).
+    #[test]
+    fn frg14_append_context_custom_prose_mention_inert() {
+        let squash = frg14_squash("write_doc", "chunkCount");
+        let messages = vec![frg14_msg(
+            "I will call write_doc next to append the chunkCount results",
+            MessageMeta::new(),
+        )];
+        assert!(!session_has_append_context(&messages, Some(&squash)));
     }
 
     #[test]
@@ -2420,12 +2432,29 @@ mod tests {
         assert!(!session_has_append_context(&messages, Some(&squash)));
     }
 
+    // ENC-293: legacy literals engage only via the metadata path now;
+    // content-only legacy matches are inert.
     #[test]
-    fn frg14_append_context_enclave_matches_legacy_literals() {
+    fn frg14_append_context_enclave_metadata_match() {
         let squash = frg14_squash("append_blocks", "totalBlocks");
-        let via_tool = vec![frg14_msg("call:append_blocks{}", MessageMeta::new())];
-        assert!(session_has_append_context(&via_tool, Some(&squash)));
-        let via_total = vec![frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new())];
-        assert!(session_has_append_context(&via_total, Some(&squash)));
+        let via_metadata = vec![frg14_msg(
+            "plain assistant text",
+            MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                id: None,
+                name: "append_blocks".into(),
+                arguments_json: "{}".into(),
+            }]),
+        )];
+        assert!(session_has_append_context(&via_metadata, Some(&squash)));
+        let via_tool_content = vec![frg14_msg("call:append_blocks{}", MessageMeta::new())];
+        assert!(!session_has_append_context(
+            &via_tool_content,
+            Some(&squash)
+        ));
+        let via_total_content = vec![frg14_msg(r#"{"totalBlocks":1}"#, MessageMeta::new())];
+        assert!(!session_has_append_context(
+            &via_total_content,
+            Some(&squash)
+        ));
     }
 }

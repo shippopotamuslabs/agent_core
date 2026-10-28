@@ -160,7 +160,7 @@ pub(super) fn process_one_result(
         );
     }
 
-    let message = AgentMessage {
+    let mut message = AgentMessage {
         id: format!("tool-{}", res.call_id),
         role: AgentRole::Tool,
         content: res.result_json.clone(),
@@ -170,6 +170,14 @@ pub(super) fn process_one_result(
             .with_truncated(res.truncated),
     };
     let spilled_inline = spilled.is_some() && !spill_stored_copy_only;
+    if spilled_inline {
+        // ENC-293: pair the envelope (already in place from the spill
+        // operation above) with its flag through the same operation the
+        // session spill path uses, so an envelope can never sit in a
+        // session unflagged and the exemption never re-spills it.
+        let envelope = std::mem::take(&mut message.content);
+        message.set_spilled_content(envelope);
+    }
     ProcessedToolResult {
         message,
         processed: res,

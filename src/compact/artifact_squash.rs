@@ -43,11 +43,21 @@ fn build_semantic_summary_line(
         .replace("{snippet}", &snippet)
 }
 
-fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
+pub(crate) fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
     msg.metadata
         .raw_tool_calls()
         .iter()
         .any(|call| call.name == tool_name)
+}
+
+/// ENC-293: shared typed probe for squash-claimed tool payloads. Both the
+/// squash tier and the spill exemption use this parse — never a field-name
+/// substring sniff — so large semantic results still reach the squash tier.
+pub(crate) fn is_semantic_success_payload(
+    content: &str,
+    semantics: &ArtifactSquashSemantics,
+) -> bool {
+    semantic_success_total_blocks(content, semantics).is_some()
 }
 
 /// ENC-288: single ingress parse of a result payload; typed accessors only.
@@ -96,10 +106,12 @@ fn extract_last_block_text_with_field(content: &str, field: &str) -> Option<Stri
     None
 }
 
+/// ENC-293: assistant-side append detection reads typed `raw_tool_calls`
+/// metadata only; the content-substring arm was deleted (`metadata_has_tool`
+/// already covered it, and substring matching misfires on prose mentions).
 fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSemantics) -> bool {
     if msg.role == AgentRole::Assistant {
-        return msg.content.contains(&semantics.append_tool_name)
-            || metadata_has_tool(msg, &semantics.append_tool_name);
+        return metadata_has_tool(msg, &semantics.append_tool_name);
     }
     if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
         return semantic_success_total_blocks(&msg.content, semantics).is_some();
@@ -327,6 +339,7 @@ fn apply_semantic_artifact_squash(
 mod tests {
     use super::*;
     use crate::events::CompactionTrigger;
+    use crate::turn_io::RawToolCall;
 
     fn ctx() -> CompactionContext {
         CompactionContext {
@@ -374,7 +387,12 @@ mod tests {
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
                         .into(),
-                    metadata: MessageMeta::new(),
+                    // ENC-293: assistant append detection reads metadata only.
+                    metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                        id: None,
+                        name: "append_blocks".into(),
+                        arguments_json: "{}".into(),
+                    }]),
                 },
                 AgentMessage {
                     id: "m4".into(),
@@ -387,7 +405,12 @@ mod tests {
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 2"}]}"#
                         .into(),
-                    metadata: MessageMeta::new(),
+                    // ENC-293: assistant append detection reads metadata only.
+                    metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                        id: None,
+                        name: "append_blocks".into(),
+                        arguments_json: "{}".into(),
+                    }]),
                 },
                 AgentMessage {
                     id: "m6".into(),
@@ -470,7 +493,12 @@ mod tests {
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
                         .into(),
-                    metadata: MessageMeta::new(),
+                    // ENC-293: assistant append detection reads metadata only.
+                    metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                        id: None,
+                        name: "append_blocks".into(),
+                        arguments_json: "{}".into(),
+                    }]),
                 },
                 AgentMessage {
                     id: "m2".into(),

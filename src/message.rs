@@ -35,6 +35,11 @@ pub struct MessageMeta {
     raw_tool_calls: Vec<RawToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded: Option<bool>,
+    /// ENC-293: set when this message's content is a tool-output spill
+    /// envelope (see `compact::tool_spill`). The spill exemption reads this
+    /// flag instead of sniffing content for the envelope marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spilled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rewrite_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +67,7 @@ impl Default for MessageMeta {
             tool_name: None,
             raw_tool_calls: Vec::new(),
             superseded: None,
+            spilled: None,
             rewrite_of: None,
             compaction_tier: None,
             extra: serde_json::Map::new(),
@@ -81,6 +87,7 @@ impl MessageMeta {
             && self.tool_name.is_none()
             && self.raw_tool_calls.is_empty()
             && self.superseded.is_none()
+            && self.spilled.is_none()
             && self.rewrite_of.is_none()
             && self.compaction_tier.is_none()
             && self.extra.is_empty()
@@ -138,6 +145,16 @@ impl MessageMeta {
     pub fn mark_superseded(&mut self) {
         self.superseded = Some(true);
         self.extra.remove("superseded");
+    }
+
+    /// True when this message's content is a tool-output spill envelope.
+    pub fn is_spilled(&self) -> bool {
+        self.spilled.unwrap_or(false)
+    }
+
+    /// Mark this message's content as a tool-output spill envelope.
+    pub fn mark_spilled(&mut self) {
+        self.spilled = Some(true);
     }
 
     pub fn rewrite_of(&self) -> Option<&str> {
@@ -391,12 +408,25 @@ pub struct AgentMessage {
     /// - `rewrite_of`: ID of the original message that this message replaces/rewrites.
     /// - `compaction_tier`: Name of the compaction tier that performed the rewrite (e.g. "micro").
     /// - `superseded`: Boolean flag set to `true` on the original message after it is rewritten.
+    /// - `spilled`: Boolean flag set to `true` when the content is a tool-output spill envelope.
     #[serde(
         default,
         deserialize_with = "deserialize_metadata",
         serialize_with = "serialize_metadata"
     )]
     pub metadata: MessageMeta,
+}
+
+impl AgentMessage {
+    /// Set this message's content to a spill `envelope` and flag it as
+    /// spilled, as one operation. The envelope and the flag are one fact
+    /// (ENC-293: the spill exemption trusts the flag and never re-sniffs
+    /// content), so every path that puts an envelope into a session goes
+    /// through here and the two can never diverge.
+    pub fn set_spilled_content(&mut self, envelope: String) {
+        self.content = envelope;
+        self.metadata.mark_spilled();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
