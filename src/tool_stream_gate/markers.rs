@@ -38,10 +38,12 @@ static STRONG_TOOL_MARKERS: Lazy<Vec<(ToolCallFormat, Regex)>> = Lazy::new(|| {
         ),
         (
             ToolCallFormat::RawJson,
-            // Unanchored, matching the parser: extract_raw_json scans for
-            // the first `{` anywhere, so prose before the JSON object is a
-            // valid RawJson turn (r_26_raw_json_in_prose) and must hold.
-            Regex::new(r#"(?is)\{\s*"name"\s*:"#).unwrap(),
+            // Anchored at object start on purpose: a mid-line JSON object
+            // in prose is prose, not a tool marker (CL-SG-04, CL-MD-03).
+            // Prose-preamble RawJson turns are recovered by the parser at
+            // turn end (r_26_raw_json_in_prose); the stream gate only
+            // holds a bare object at the start of the text.
+            Regex::new(r#"(?is)^\s*\{\s*"name"\s*:"#).unwrap(),
         ),
     ]
 });
