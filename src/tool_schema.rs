@@ -158,25 +158,16 @@ pub enum ToolSchemaError {
     NotAnArray { channel: &'static str },
     /// An entry in the channel array is not a JSON object.
     #[error("tool schema channel {channel} entry {index} is not a schema object")]
-    EntryNotObject {
-        channel: &'static str,
-        index: usize,
-    },
+    EntryNotObject { channel: &'static str, index: usize },
     /// An entry's `"name"` is missing, not a string, or empty/whitespace.
     #[error(
         "tool schema channel {channel} entry {index} has no valid \"name\" \
          (missing, not a string, or empty)"
     )]
-    InvalidName {
-        channel: &'static str,
-        index: usize,
-    },
+    InvalidName { channel: &'static str, index: usize },
     /// Two entries in the same channel carry the same `"name"`.
     #[error("tool schema channel {channel} contains duplicate tool name \"{name}\"")]
-    DuplicateName {
-        channel: &'static str,
-        name: String,
-    },
+    DuplicateName { channel: &'static str, name: String },
 }
 
 /// Channel labels used in [`ToolSchemaError`], matching the legacy
@@ -224,12 +215,11 @@ fn parse_schema_channel(
     if json.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
-        ToolSchemaError::InvalidJson {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ToolSchemaError::InvalidJson {
             channel,
             message: error.to_string(),
-        }
-    })?;
+        })?;
     match value {
         serde_json::Value::Array(items) => validate_entries(channel, items),
         _ => Err(ToolSchemaError::NotAnArray { channel }),
@@ -244,12 +234,11 @@ fn parse_catalog_channel(json: &str) -> Result<Vec<SchemaEntry>, ToolSchemaError
     if json.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
-        ToolSchemaError::InvalidJson {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ToolSchemaError::InvalidJson {
             channel: CATALOG_CHANNEL,
             message: error.to_string(),
-        }
-    })?;
+        })?;
     match value {
         serde_json::Value::Array(items) => validate_entries(CATALOG_CHANNEL, items),
         serde_json::Value::Object(_) => Ok(Vec::new()),
@@ -538,11 +527,8 @@ mod tests {
         assert_eq!(set.catalog_json(), "[]");
         // A malformed active channel degrades alone; the registry stash
         // text survives untouched.
-        let set = ToolSchemaSet::parse_lenient(
-            "[{}]",
-            &format!("[{}]", entry("append_blocks")),
-            "[]",
-        );
+        let set =
+            ToolSchemaSet::parse_lenient("[{}]", &format!("[{}]", entry("append_blocks")), "[]");
         assert!(set.active.is_empty());
         assert_eq!(
             set.registry_json(),

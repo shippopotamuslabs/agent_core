@@ -354,26 +354,27 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
         lifecycle_hooks_supported: true,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![FfiAgentMessage {
-            id: "u1".into(),
-            role: FfiAgentRole::User,
-            content: "ship".into(),
-            metadata_json: "null".into(),
-        }],
-        config,
-        capabilities,
-        serde_json::json!({"pending_work": ["verify failing tests"]}).to_string(),
-        FfiSessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry: vec![],
-            tool_schemas: vec![],
-            system_prompt: "sys".into(),
-        },
-    )
-    .expect("ffi create_session should accept empty schema entries");
+    let handle = eng
+        .create_session(
+            vec![FfiAgentMessage {
+                id: "u1".into(),
+                role: FfiAgentRole::User,
+                content: "ship".into(),
+                metadata_json: "null".into(),
+            }],
+            config,
+            capabilities,
+            serde_json::json!({"pending_work": ["verify failing tests"]}).to_string(),
+            FfiSessionIoParams {
+                provider: "anthropic".into(),
+                context_window_tokens: 200_000,
+                tool_catalog_json: "[]".into(),
+                tool_schema_registry: vec![],
+                tool_schemas: vec![],
+                system_prompt: "sys".into(),
+            },
+        )
+        .expect("ffi create_session should accept empty schema entries");
 
     assert!(matches!(
         eng.next_action(&handle),

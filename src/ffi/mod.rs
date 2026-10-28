@@ -69,9 +69,9 @@ impl FfiAgentEngine {
         let msgs: Vec<crate::message::AgentMessage> =
             initial_messages.into_iter().map(Into::into).collect();
         let io = types::session_io_params(io)?;
-        let handle =
-            self.inner
-                .create_session(msgs, config.into(), capabilities.into(), ctx, io);
+        let handle = self
+            .inner
+            .create_session(msgs, config.into(), capabilities.into(), ctx, io);
         Ok(Arc::new(FfiSession { handle }))
     }
 
