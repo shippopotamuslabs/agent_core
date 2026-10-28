@@ -6,7 +6,7 @@
 - [x] Implementation — chunks 1-3 (c65e02f, 58f4828, f0c1d5c)
 - [x] Review — rounds: 1/3, result: 0 Critical / 4 Major / 7 Minor, all
       fixed in c5369a1 (findings/ENC-305-findings.md)
-- [ ] Ship — PR: pending (stacked on #36)
+- [ ] Ship — PR: #37 https://github.com/shippopotamuslabs/agent_core/pull/37 (stacked on #36); CI at open was not dispatched by GitHub (Forge suite queued, no Actions run) — a synchronize push was used to re-trigger.
 
 ## Current Gate
 Final (orchestrator-run, post-fix): cargo test --locked = 645 passed /
