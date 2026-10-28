@@ -116,12 +116,15 @@ pub(crate) struct InnerSession {
     pub(super) tools_blocked_nudges_this_turn: u32,
     /// The session's tool world (ENC-304): schema entries, semantics,
     /// catalog, and the active name set, built once at construction by
-    /// [`ToolUniverse::build`]. Engine tool-data reads go through here.
-    /// `config.tool_semantics` / `io.schemas` are the construction-time
-    /// boundary inputs: they stay on the stored config/io as the
-    /// serde/boundary input shape (and feed the `&AgentConfig` consumers
-    /// — guardrails, compaction — that read static semantics through the
-    /// config), while the universe is the live, mutable world.
+    /// [`ToolUniverse::build`]. The universe is the session's single live
+    /// source of tool data. `config.tool_semantics` / `config.tool_catalog`
+    /// / `io.schemas` are boundary-input shape only: `create_session`
+    /// CONSUMED them into the universe at construction and reset the
+    /// stored copies (agnostic semantics, default catalog, empty schema
+    /// set), so they hold no live data. Engine tool-data reads go through
+    /// here, and `&AgentConfig` consumers (guardrails, compaction tiers)
+    /// are fed `InnerSession::effective_tool_config` — the stored config
+    /// clone with tool fields replaced from this universe.
     pub(super) universe: ToolUniverse,
     pub(super) sidecar_builder: SidecarBuilder,
     /// Compaction-owned state (ENC-306 D1): per-turn pass/destructive-tier

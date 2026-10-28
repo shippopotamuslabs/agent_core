@@ -116,7 +116,14 @@ fn gate_tool_name(raw: &str) -> Option<ToolName> {
 /// Inputs for the repair/discovery loop. The catalog is built once by the
 /// dispatch (hoisted out of the per-call hot loop).
 pub(super) struct RepairTurnInputs<'a> {
+    /// Provenance (ENC-304 fix pass, m5): a turn-start CLONE of the
+    /// universe's semantics, taken by the dispatch in
+    /// `submit_model_response` before the `&mut` universe borrow below —
+    /// the universe remains the live source; this is its snapshot for the
+    /// repair loop's duration.
     pub semantics: &'a ToolSemanticsConfig,
+    /// Turn-start clone of the universe's catalog; same provenance as
+    /// `semantics`.
     pub catalog: &'a ToolCatalog,
     pub universe: &'a mut ToolUniverse,
     pub turn_index: u32,

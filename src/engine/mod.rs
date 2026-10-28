@@ -51,8 +51,9 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
+use crate::tool_schema::ToolSchemaSet;
 use crate::tool_semantics::{ArtifactSquashSemantics, ToolSemanticsError};
-use crate::tool_universe::ToolUniverse;
+use crate::tool_universe::{merge_tool_names_deduped, ToolUniverse};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
@@ -93,18 +94,11 @@ pub(super) fn activate_tools_for_spill_reference(
         .filter_map(|name| ToolName::new(name).ok())
         .collect();
     // Session side: activation goes through the model (ENC-304 D5).
-    universe.activate(hinted.clone());
-    // Result-record side: keep merging into `activated_tool_names` as today
-    // (first-seen order, deduped — the former merge helper's semantics).
-    for name in hinted {
-        if !result
-            .activated_tool_names
-            .iter()
-            .any(|existing| existing == &name)
-        {
-            result.activated_tool_names.push(name);
-        }
-    }
+    universe.activate(hinted.iter().cloned());
+    // Result-record side: keep merging into `activated_tool_names` as
+    // today (first-seen order, deduped) — through the same crate-private
+    // merge helper the model's `activate` uses (ENC-304 fix pass, s1).
+    merge_tool_names_deduped(&mut result.activated_tool_names, hinted);
 }
 
 /// Session state machine: hosts drive it exclusively through the polling surface
@@ -146,29 +140,35 @@ impl AgentEngine {
         mut config: AgentConfig,
         capabilities: SessionCapabilities,
         session_context: impl Into<crate::session::SessionContext>,
-        io: SessionIoParams,
+        mut io: SessionIoParams,
     ) -> Result<SessionHandle, ToolSemanticsError> {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
-        // ENC-304 D3: the session's tool world is built once here, from
-        // the boundary inputs (`io.schemas` + `config.tool_semantics`);
-        // `ToolUniverse::build` owns the ENC-297 structural validation
-        // (via `ToolCatalog::from_semantics`) and the ENC-299 D4
-        // referential validation that used to run inline here, so the
-        // `prepare_tool_semantics` + `validate_references` calls are
-        // deleted. An invalid literal config fails session creation; no
-        // live session exists on error.
+        // ENC-304 D3 (completed by the fix pass, M3): the session's tool
+        // world is built once here, CONSUMING the boundary inputs
+        // (`io.schemas` + `config.tool_semantics`); `ToolUniverse::build`
+        // owns the ENC-297 structural validation (via
+        // `ToolCatalog::from_semantics`) and the ENC-299 D4 referential
+        // validation that used to run inline here, in the same order, so
+        // error precedence for previously-rejected inputs is unchanged.
+        // An invalid literal config fails session creation; no live
+        // session exists on error.
         //
-        // Adaptation vs plan D3's `mem::replace` sketch: build consumes
-        // clones and the stored catalog is re-synced from the universe
-        // below, rather than emptying the stored config/io tool fields.
-        // Guardrails (greedy extensions) and the compaction tiers (micro
-        // result policies, artifact squash) read static semantics through
-        // `&AgentConfig` in live sessions, so an emptied stored config
-        // would silently disable them; the universe is the live world and
-        // the stored copies are its construction-time snapshot.
-        let universe = ToolUniverse::build(io.schemas.clone(), config.tool_semantics.clone())?;
-        config.tool_catalog = universe.catalog().clone();
+        // The stored config/io tool fields are boundary-input shape only
+        // after this point: they are reset to the empty set / agnostic
+        // semantics / default catalog below, and the universe is the
+        // session's single live source of tool data. Consumers that take
+        // `&AgentConfig` (guardrails, compaction tiers) are fed an
+        // effective config derived from the universe at the dispatch
+        // boundary (`InnerSession::effective_tool_config`), never the
+        // stored copies.
+        let schemas = std::mem::replace(&mut io.schemas, ToolSchemaSet::from_entries(Vec::new()));
+        let semantics = std::mem::replace(
+            &mut config.tool_semantics,
+            crate::tool_semantics::ToolSemanticsConfig::agnostic(),
+        );
+        config.tool_catalog = ToolCatalog::default();
+        let universe = ToolUniverse::build(schemas, semantics)?;
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -285,12 +285,9 @@ impl AgentEngine {
 
         // ENC-286 slice 5: the catalog is built once here and passed into the
         // repair stage (previously cloned + rebuilt per tool call).
-        // ENC-297: the catalog is built once at config construction
-        // (AgentConfig::with_tool_semantics, re-synced by
-        // prepare_tool_semantics at session creation), so the per-turn path
-        // borrows the stored value instead of rebuilding + silently
-        // falling back to empty on invalid semantics.
-        // ENC-304: these clones come from the session's tool universe.
+        // ENC-304: these clones come from the session's tool universe —
+        // the live tool world; the stored config's tool fields were
+        // consumed at construction and hold no live data.
         let semantics = g.universe.semantics().clone();
         let catalog = g.universe.catalog().clone();
         let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
@@ -396,7 +393,7 @@ impl AgentEngine {
         if !repaired.is_empty() {
             if g.config.long_loop.max_tool_turns < g.config.max_turns
                 && crate::long_loop_policy::should_stop_tool_rounds(
-                    &g.config,
+                    &g.effective_tool_config(),
                     g.guardrails.tool_calls_executed,
                     &g.last_model_response_greedy_tool_names,
                 )
@@ -606,7 +603,7 @@ impl AgentEngine {
 
             let non_soft_outcome = tool_results::batch_has_non_soft_outcome(&processed_results);
 
-            let cfg = g.config.clone();
+            let cfg = g.effective_tool_config();
             g.guardrails.on_tool_turn_finished(
                 &cfg,
                 pending_parallel,
@@ -619,9 +616,10 @@ impl AgentEngine {
             g.pending.reject_count_this_turn = 0;
         }
 
-        let budget_meta = g
-            .guardrails
-            .tool_budget_snapshot(&g.config, &g.last_model_response_greedy_tool_names);
+        let budget_meta = g.guardrails.tool_budget_snapshot(
+            &g.effective_tool_config(),
+            &g.last_model_response_greedy_tool_names,
+        );
         let turn_index = g.turn_index;
         inject_tool_budget_into_session(
             &mut g.session,
@@ -686,11 +684,14 @@ impl AgentEngine {
         visible_assistant_text: String,
         error_json_for_model: String,
     ) {
+        // M3: the stage's guardrail/budget calls read tool data through
+        // the config, so it is fed the universe-derived effective config.
+        let effective_config = g.effective_tool_config();
         model_intake::apply_ingest_parse_failed(
             model_intake::IngestArmInputs {
                 session: &mut g.session,
                 guardrails: &mut g.guardrails,
-                config: &g.config,
+                config: &effective_config,
                 state_ledger: &mut g.state_ledger,
                 events: &mut g.events,
                 turn_index: g.turn_index,
@@ -708,11 +709,14 @@ impl AgentEngine {
         user_fallback_text: String,
         nudge_json_for_model: String,
     ) -> model_intake::ToolsBlockedEffect {
+        // M3: fed the universe-derived effective config (see
+        // `intake_parse_failed`).
+        let effective_config = g.effective_tool_config();
         model_intake::apply_ingest_tools_blocked(
             model_intake::IngestArmInputs {
                 session: &mut g.session,
                 guardrails: &mut g.guardrails,
-                config: &g.config,
+                config: &effective_config,
                 state_ledger: &mut g.state_ledger,
                 events: &mut g.events,
                 turn_index: g.turn_index,
@@ -779,10 +783,13 @@ impl AgentEngine {
 
     /// Dispatch glue for slice 5 (see `intake_parse_failed`).
     fn intake_flush_rejects(g: &mut InnerSession, parallel: usize, rejects: usize) {
+        // M3: fed the universe-derived effective config (see
+        // `intake_parse_failed`).
+        let effective_config = g.effective_tool_config();
         model_intake::flush_reject_only_turn(model_intake::RejectFlushInputs {
             session: &mut g.session,
             guardrails: &mut g.guardrails,
-            config: &g.config,
+            config: &effective_config,
             pending_tool_turn_request_order: &mut g.pending.tool_turn_request_order,
             pending_reject_tool_by_call_id: &mut g.pending.reject_tool_by_call_id,
             turn_index: g.turn_index,
@@ -958,8 +965,11 @@ impl AgentEngine {
         let ctx = g.make_ctx(trigger);
         let before = g.estimate_pressure(CompactionTrigger::Manual).total_tokens;
 
+        // M3: compaction tier invocation — fed the universe-derived
+        // effective config like the pipeline run in `run_compaction_pass`.
+        let effective_config = g.effective_tool_config();
         let outcome =
-            crate::compact::SummaryCompactionTier.apply(g.session.clone(), &g.config, &ctx);
+            crate::compact::SummaryCompactionTier.apply(g.session.clone(), &effective_config, &ctx);
         match outcome {
             CompactionOutcome::NeedsHostCall(req, sess) => {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
@@ -1020,6 +1030,22 @@ pub(super) fn session_has_append_context(
 }
 
 impl InnerSession {
+    /// The effective config for `&AgentConfig` tool-data consumers
+    /// (ENC-304 fix pass, M3): a clone of the stored config with its tool
+    /// fields replaced by the universe's live semantics + catalog. The
+    /// stored config's tool fields were consumed at `create_session` and
+    /// hold only boundary-input remnants (agnostic semantics, default
+    /// catalog), so any live-session consumer that reads tool data
+    /// through a config — guardrails (greedy extensions), the compaction
+    /// tiers (micro result policies, artifact squash) — must be fed this
+    /// instead of `&self.config`.
+    pub(super) fn effective_tool_config(&self) -> AgentConfig {
+        let mut config = self.config.clone();
+        config.tool_semantics = self.universe.semantics().clone();
+        config.tool_catalog = self.universe.catalog().clone();
+        config
+    }
+
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
@@ -1238,10 +1264,15 @@ impl InnerSession {
                 compaction::apply_force_override(&plan, &ctx, forced_by_non_ratio);
 
             let pipeline = compaction_pipeline_for_plan(&effective_plan);
+            // M3: the tiers read tool data (micro result policies,
+            // artifact squash) through the config — feed the
+            // universe-derived effective config, not the stored config
+            // whose tool fields were consumed at construction.
+            let effective_config = self.effective_tool_config();
             let outcome = pipeline.run_plan(
                 self.session.clone(),
                 &effective_ctx,
-                &self.config,
+                &effective_config,
                 &effective_plan,
             );
             // FRG-47 / ENC-306 D2+D4: the 4-arm outcome match lives exactly
@@ -1278,9 +1309,10 @@ impl InnerSession {
         self.context_store.expire_after_turn(self.turn_index);
         // Reset per-turn telemetry counters for the new user turn.
         self.compaction.begin_turn();
-        let allow = self
-            .guardrails
-            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
+        let allow = self.guardrails.allow_tool_call(
+            &self.effective_tool_config(),
+            &self.last_model_response_greedy_tool_names,
+        );
 
         self.emit(AgentEvent::TurnStarted {
             turn_index: self.turn_index,
@@ -2333,6 +2365,51 @@ mod tests {
             ),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[test]
+    fn create_session_consumes_tool_inputs_into_universe() {
+        // ENC-304 fix pass (M3): create_session CONSUMES the boundary
+        // tool inputs — the stored config/io tool fields are reset to
+        // boundary-input remnants and the universe is the live tool
+        // world; `effective_tool_config` re-derives a tool-aware config
+        // from the universe for `&AgentConfig` consumers.
+        let eng = AgentEngine::new();
+        let io = SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            r#"[{"name":"web_search","parameters":{}}]"#.into(),
+            "sys".into(),
+        )
+        .expect("valid io params");
+        let h = eng
+            .create_session(
+                vec![],
+                AgentConfig {
+                    tool_semantics: crate::tool_semantics::test_fixture_enclave_semantics(),
+                    ..AgentConfig::default()
+                },
+                SessionCapabilities::default(),
+                serde_json::Value::Null,
+                io,
+            )
+            .expect("valid config creates session");
+
+        let guard = h.lock_inner();
+        // Stored copies consumed/reset.
+        assert!(guard.io.schemas.active.is_empty());
+        assert!(guard.config.tool_semantics.catalog.tools.is_empty());
+        assert!(guard.config.tool_catalog.is_empty());
+        // The universe holds the live world.
+        assert_eq!(
+            guard.universe.active_names(),
+            &[crate::tool_name::ToolName::new("web_search").expect("valid name")]
+        );
+        assert_eq!(guard.universe.catalog().len(), 20);
+        // The effective config carries universe-derived tool data.
+        let effective = guard.effective_tool_config();
+        assert_eq!(effective.tool_catalog.len(), 20);
+        assert_eq!(effective.tool_semantics.catalog.tools.len(), 20);
     }
 
     fn frg14_squash(
