@@ -167,9 +167,12 @@ fn parse_extracted_envelope_with_semantics(
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
 ) -> Result<ToolParseField, ToolParseFailureReason> {
-    // Raw envelope text enters the canonical identity space here; the
-    // (b)-fold lives in ToolName::new, not in a per-site normalizer.
-    let canonical_name = ToolName::new(&envelope.tool_name)
+    // Raw envelope text enters the canonical identity space here. The
+    // envelope name is model-emitted text (extraction captures it as
+    // written), so it takes the model-output constructor — the same
+    // prefix-strip + snake repair intake applies to structured call
+    // names — not the fold-only boundary constructor.
+    let canonical_name = ToolName::from_model_output(&envelope.tool_name)
         .ok()
         .and_then(|name| catalog.resolve(&name))
         .map(|spec| spec.name.clone())
