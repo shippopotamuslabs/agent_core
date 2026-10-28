@@ -1,4 +1,7 @@
-//! TDD Red — compaction boundary scenarios LALR-03, LALR-09, LALR-14, LALR-15, LALR-16, LALR-19.
+//! Compaction boundary scenarios LALR-03, LALR-09, LALR-14, LALR-15, LALR-16, LALR-19.
+//! (ENC-309: the three red tests were stale specs from the global-catalog
+//! era, not pending features — the harness now declares its tool
+//! host-style. See src/lalr_harness.rs `scenario_tool_semantics`.)
 
 use agent_core::events::CompactionTrigger;
 use agent_core::lalr_harness::{
@@ -52,8 +55,10 @@ fn lalr_09_post_compact_revision_matches_session() {
 
 #[test]
 fn lalr_14_objective_after_summary_tier() {
-    let mut ledger = StateLedger::default();
-    ledger.objective = Some("ship long-loop v1".into());
+    let mut ledger = StateLedger {
+        objective: Some("ship long-loop v1".into()),
+        ..StateLedger::default()
+    };
     let mut session = AgentSession::new(vec![], serde_json::Value::Null);
 
     run_summary_compaction_with_objective(&mut ledger, &mut session);

@@ -1,4 +1,4 @@
-//! TDD Red — sidecar budget scenarios LALR-05, LALR-06, LALR-10, LALR-13, LALR-18.
+//! Sidecar budget scenarios LALR-05, LALR-06, LALR-10, LALR-13, LALR-18.
 
 use agent_core::context_store::ContextStore;
 use agent_core::lalr_harness::{
@@ -38,8 +38,10 @@ fn lalr_05_ledger_truncates_at_512_bytes() {
 #[test]
 fn lalr_06_second_turn_ledger_delta_is_minimal() {
     let mut builder = SidecarBuilder::new();
-    let mut ledger = StateLedger::default();
-    ledger.objective = Some("build feature".into());
+    let mut ledger = StateLedger {
+        objective: Some("build feature".into()),
+        ..StateLedger::default()
+    };
     let mut store = ContextStore::default();
 
     let turn1 = builder
@@ -94,10 +96,13 @@ fn lalr_13_drops_oldest_generation_over_total_budget() {
 
 #[test]
 fn lalr_18_tool_index_payload_spills_over_budget_without_schema_ref() {
-    // ENC-296 re-pin: ToolContextIndex is advertisement-only (the
-    // full_schema_ref field is deleted with the registry stash), so an
-    // oversized index spills under the generic ArtifactSnapshot kind and the
-    // delta carries truncation refs instead of full content.
+    // ENC-296 re-pin, corrected by ENC-309: ToolContextIndex is
+    // advertisement-only (the full_schema_ref field is deleted with the
+    // registry stash), so an oversized index spills under the dedicated
+    // ToolIndex kind and the delta carries truncation refs instead of
+    // full content. (The original re-pin asserted ArtifactSnapshot,
+    // contradicting the ToolIndex kind the same ENC-296 change
+    // implemented in build_tool_index_payload.)
     use agent_core::context_store::ContextReferenceKind;
 
     let policy = LongLoopPolicy {
@@ -122,7 +127,7 @@ fn lalr_18_tool_index_payload_spills_over_budget_without_schema_ref() {
     assert!(delta.len() <= 256);
     assert!(
         store.entries().any(
-            |entry| entry.reference.kind == ContextReferenceKind::ArtifactSnapshot
+            |entry| entry.reference.kind == ContextReferenceKind::ToolIndex
                 && entry.content.contains("padded_tool")
         ),
         "oversized index payload must spill to the store"
