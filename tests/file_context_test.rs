@@ -114,7 +114,6 @@ fn m7_file_context_does_not_inline_full_body_into_model_messages() {
             8_000,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),

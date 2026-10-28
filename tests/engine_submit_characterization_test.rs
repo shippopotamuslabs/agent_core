@@ -18,7 +18,6 @@ fn io_large_window() -> SessionIoParams {
         200_000,
         "[]".into(),
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid test io params")
@@ -177,7 +176,6 @@ fn char_reject_only_turn_returns_to_model() {
     let io = SessionIoParams::new(
         "anthropic".into(),
         200_000,
-        "[]".into(),
         "[]".into(),
         r#"[{"name":"web_search"}]"#.into(),
         "sys".into(),

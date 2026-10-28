@@ -32,13 +32,6 @@ const SEARCH_CATALOG_JSON: &str = r#"[
   {"name":"append_blocks","aliases":[],"reproducible":false,"schema_hint":{"required_fields":[{"name":"artifactId","ty":"string","description":"id"},{"name":"blocks","ty":"array","description":"blocks"}],"defaults":{"isComplete":false}}}
 ]"#;
 
-const SEARCH_REGISTRY_JSON: &str = r#"[
-  {"name":"tool_discovery_tool","parameters":{}},
-  {"name":"web_search","parameters":{}},
-  {"name":"web_extract","parameters":{}},
-  {"name":"append_blocks","parameters":{"properties":{"artifactId":{"type":"string"}}}}
-]"#;
-
 fn engine() -> AgentEngine {
     AgentEngine::new()
 }
@@ -87,7 +80,6 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
             "anthropic".into(),
             200_000,
             SEARCH_CATALOG_JSON.into(),
-            SEARCH_REGISTRY_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
         )
@@ -190,7 +182,6 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
             "anthropic".into(),
             200_000,
             SEARCH_CATALOG_JSON.into(),
-            SEARCH_REGISTRY_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
         )

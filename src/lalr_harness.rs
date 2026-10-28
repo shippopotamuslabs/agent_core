@@ -486,7 +486,6 @@ pub fn default_long_loop_io() -> SessionIoParams {
         200_000,
         "[]".into(),
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid long-loop io params")

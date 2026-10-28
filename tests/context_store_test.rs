@@ -143,7 +143,6 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             200_000,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),
@@ -250,7 +249,6 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             r#"[{"name":"web_search"}]"#.into(),
             "sys".into(),
         )
@@ -268,17 +266,13 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
         "model-facing refs must be browsable only: {:?}",
         req.context_references
     );
+    // ENC-296: the host-owned ToolSchema/ToolCatalogIndex kinds are deleted,
+    // so no infrastructure kind can appear here by construction — and the
+    // engine stashes no schema text, so the store holds nothing extra.
     assert!(
-        !req.context_references
-            .iter()
-            .any(|reference| reference.kind == ContextReferenceKind::ToolSchema),
-        "ToolSchema must not appear in browsable sidecar"
-    );
-    assert!(
-        !req.context_references
-            .iter()
-            .any(|reference| reference.kind == ContextReferenceKind::ToolCatalogIndex),
-        "ToolCatalogIndex must not appear in browsable sidecar"
+        eng.search_context_references(&handle, "web_search".into(), 5)
+            .is_empty(),
+        "no schema text may be stashed in the ContextStore"
     );
 }
 
@@ -293,7 +287,6 @@ fn s23_terminal_output_references_share_retrieval_path() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),
@@ -329,7 +322,6 @@ fn e4_missing_context_reference_read_returns_not_found() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),
@@ -455,7 +447,6 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),

@@ -1,10 +1,12 @@
-//! Tool-schema channels parsed once per session (ENC-289).
+//! Tool-schema channels parsed once per session (ENC-289; registry removed ENC-296).
 //!
-//! The host supplies three parallel JSON strings: the active (callable) tool
-//! schemas, the full schema registry, and the render catalog. They used to
-//! travel as raw strings on [`crate::engine::SessionIoParams`] (duplicated on
-//! [`crate::turn_io::ModelRequest`]) and were re-parsed from text on every
-//! turn in `engine/model_request.rs`, `tool_context.rs`, and
+//! The host supplies two parallel JSON strings: the active (callable) tool
+//! schemas and the render catalog. (ENC-296 deleted the former full schema
+//! registry channel: the host owns the registry now and wires full schemas
+//! provider-side, so the engine never sees, stores, or renders from it.)
+//! They used to travel as raw strings on [`crate::engine::SessionIoParams`]
+//! (duplicated on [`crate::turn_io::ModelRequest`]) and were re-parsed from
+//! text on every turn in `engine/model_request.rs`, `tool_context.rs`, and
 //! `request_pipeline.rs`.
 //!
 //! [`ToolSchemaSet::parse`] is now the single text-parse location: it runs
@@ -17,12 +19,11 @@
 //! `ffi::types` conversions).
 //!
 //! Byte-identity notes (all preserved by the engine test suite):
-//! - Registry-filtered and runtime-view renders go through the same
+//! - Active-channel and runtime-view renders go through the same
 //!   [`serde_json::Value`] filter-then-`to_string` shaping as before, so
 //!   rendered bytes are unchanged for valid inputs.
-//! - The untouched session-level raw strings back pressure/budget/stash paths
-//!   ([`ToolSchemaSet::active_json`], [`ToolSchemaSet::registry_json`],
-//!   [`ToolSchemaSet::catalog_json`]).
+//! - The untouched session-level raw strings back pressure/budget paths
+//!   ([`ToolSchemaSet::active_json`], [`ToolSchemaSet::catalog_json`]).
 //! - Degenerate inputs (invalid JSON, non-array schema channels, nameless
 //!   or duplicate entries) are rejected at session construction:
 //!   [`ToolSchemaSet::parse`] returns a [`ToolSchemaError`] and no session
@@ -76,8 +77,10 @@ impl From<SchemaEntry> for serde_json::Value {
 }
 
 impl SchemaEntry {
-    /// Stub entry used when the registry does not carry an activated tool,
-    /// matching the legacy `render_active_schema_json` stub shape.
+    /// Stub entry used when the active channel does not carry an activated
+    /// tool (ENC-296: the registry lookup is gone; the host wires the full
+    /// schema provider-side), matching the legacy `render_active_schema_json`
+    /// stub shape.
     pub fn stub(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -119,7 +122,8 @@ pub fn entries_json(entries: &[SchemaEntry]) -> String {
     serde_json::Value::Array(entries.iter().map(|entry| entry.value.clone()).collect()).to_string()
 }
 
-/// The three tool-schema channels in parsed form.
+/// The two tool-schema channels in parsed form (ENC-296: the former full
+/// schema registry channel is deleted; the host owns the registry).
 ///
 /// Parsed exactly once per session by [`ToolSchemaSet::parse`]; per-turn code
 /// borrows these entries and never parses schema text.
@@ -127,14 +131,11 @@ pub fn entries_json(entries: &[SchemaEntry]) -> String {
 pub struct ToolSchemaSet {
     /// Currently active (callable) schemas — the `tools_schema_json` channel.
     pub active: Vec<SchemaEntry>,
-    /// Full schema registry — the `tool_schema_registry_json` channel.
-    pub registry: Vec<SchemaEntry>,
     /// Render catalog — the `tool_catalog_json` channel.
     pub catalog: Vec<SchemaEntry>,
-    /// Untouched session-level raw text backing pressure/budget/stash/FFI
+    /// Untouched session-level raw text backing pressure/budget/FFI
     /// paths, so those stay byte-identical.
     raw_active: String,
-    raw_registry: String,
     raw_catalog: String,
 }
 
@@ -171,18 +172,54 @@ pub enum ToolSchemaError {
 }
 
 /// Channel labels used in [`ToolSchemaError`], matching the legacy
-/// `SessionIoParams` JSON field names the host supplies.
+/// `SessionIoParams` JSON field names the host supplies. (ENC-296: the
+/// `tool_schema_registry_json` channel label is deleted with the registry.)
 const ACTIVE_CHANNEL: &str = "tools_schema_json";
-const REGISTRY_CHANNEL: &str = "tool_schema_registry_json";
 const CATALOG_CHANNEL: &str = "tool_catalog_json";
 
 /// Validate parsed channel entries: each must be an object carrying a
 /// present, string, non-empty `"name"`, unique within the channel.
+/// The name half of the entry contract — present, non-blank after trim,
+/// unique within the channel — checked identically for the JSON-text
+/// channels and the typed FFI entries, so the two boundary paths can
+/// never drift on what a valid name is. Callers map the failure onto
+/// their own boundary error type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EntryNameError {
+    InvalidName { index: usize },
+    DuplicateName { name: String },
+}
+
+/// Stateful checker for one channel's entry sequence: feed each
+/// entry's name in order.
+#[derive(Debug, Default)]
+pub(crate) struct EntryNameChecker {
+    seen: std::collections::HashSet<String>,
+}
+
+impl EntryNameChecker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn check(&mut self, index: usize, name: &str) -> Result<(), EntryNameError> {
+        if name.trim().is_empty() {
+            return Err(EntryNameError::InvalidName { index });
+        }
+        if !self.seen.insert(name.to_string()) {
+            return Err(EntryNameError::DuplicateName {
+                name: name.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 fn validate_entries(
     channel: &'static str,
     items: Vec<serde_json::Value>,
 ) -> Result<Vec<SchemaEntry>, ToolSchemaError> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut names = EntryNameChecker::new();
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.into_iter().enumerate() {
         if !item.is_object() {
@@ -191,23 +228,23 @@ fn validate_entries(
         let name = item
             .get("name")
             .and_then(|name| name.as_str())
-            .filter(|name| !name.trim().is_empty())
             .ok_or(ToolSchemaError::InvalidName { channel, index })?;
-        if !seen.insert(name.to_string()) {
-            return Err(ToolSchemaError::DuplicateName {
-                channel,
-                name: name.to_string(),
-            });
-        }
+        names.check(index, name).map_err(|error| match error {
+            EntryNameError::InvalidName { index } => {
+                ToolSchemaError::InvalidName { channel, index }
+            }
+            EntryNameError::DuplicateName { name } => {
+                ToolSchemaError::DuplicateName { channel, name }
+            }
+        })?;
         entries.push(SchemaEntry::from(item));
     }
     Ok(entries)
 }
 
-/// Parse one provider-schema channel (active / registry) strictly: the
-/// text must be a JSON array of validly named schema objects. Empty or
-/// whitespace-only text is the legacy "channel absent" case and yields no
-/// entries.
+/// Parse the active provider-schema channel strictly: the text must be a
+/// JSON array of validly named schema objects. Empty or whitespace-only
+/// text is the legacy "channel absent" case and yields no entries.
 fn parse_schema_channel(
     channel: &'static str,
     json: &str,
@@ -249,40 +286,30 @@ fn parse_catalog_channel(json: &str) -> Result<Vec<SchemaEntry>, ToolSchemaError
 }
 
 impl ToolSchemaSet {
-    /// Parse the three schema channels, enforcing the host contract.
+    /// Parse the two schema channels, enforcing the host contract.
     /// THE single schema text-parse location: called once per session at
     /// construction. Returns [`ToolSchemaError`] on the first contract
     /// violation; no partial set is produced.
-    pub fn parse(
-        active_json: &str,
-        registry_json: &str,
-        catalog_json: &str,
-    ) -> Result<Self, ToolSchemaError> {
+    pub fn parse(active_json: &str, catalog_json: &str) -> Result<Self, ToolSchemaError> {
         Ok(Self {
             active: parse_schema_channel(ACTIVE_CHANNEL, active_json)?,
-            registry: parse_schema_channel(REGISTRY_CHANNEL, registry_json)?,
             catalog: parse_catalog_channel(catalog_json)?,
             raw_active: active_json.to_string(),
-            raw_registry: registry_json.to_string(),
             raw_catalog: catalog_json.to_string(),
         })
     }
 
-    /// Parse the three channels independently: a channel that violates
+    /// Parse the two channels independently: a channel that violates
     /// the contract degrades to an empty channel (no entries, raw text
-    /// normalized to `"[]"`) without discarding the valid channels.
+    /// normalized to `"[]"`) without discarding the valid channel.
     ///
     /// This is the lenient sibling for the infallible string-boundary
     /// render helpers in `tool_context`, whose legacy behavior parsed
     /// each channel separately. Session construction uses the strict
     /// [`ToolSchemaSet::parse`] and fails hard on the first violation.
-    pub fn parse_lenient(active_json: &str, registry_json: &str, catalog_json: &str) -> Self {
+    pub fn parse_lenient(active_json: &str, catalog_json: &str) -> Self {
         let (active, raw_active) = match parse_schema_channel(ACTIVE_CHANNEL, active_json) {
             Ok(entries) => (entries, active_json.to_string()),
-            Err(_) => (Vec::new(), "[]".to_string()),
-        };
-        let (registry, raw_registry) = match parse_schema_channel(REGISTRY_CHANNEL, registry_json) {
-            Ok(entries) => (entries, registry_json.to_string()),
             Err(_) => (Vec::new(), "[]".to_string()),
         };
         let (catalog, raw_catalog) = match parse_catalog_channel(catalog_json) {
@@ -291,48 +318,37 @@ impl ToolSchemaSet {
         };
         Self {
             active,
-            registry,
             catalog,
             raw_active,
-            raw_registry,
             raw_catalog,
         }
     }
 
     /// Build a set from already-parsed schema entries (the FFI typed
-    /// boundary, ENC-295): the active/registry channels arrive as typed
-    /// records, so no JSON text is produced or re-parsed for them; only
+    /// boundary, ENC-295): the active channel arrives as typed records,
+    /// so no JSON text is produced or re-parsed for it; only
     /// the catalog channel still arrives as text and is parsed here,
     /// under the same strict contract as [`ToolSchemaSet::parse`] — a
     /// malformed catalog is a typed error, never a silent empty channel.
-    /// The raw text backing the entry channels is synthesized with
+    /// The raw text backing the entry channel is synthesized with
     /// [`entries_json`], byte-identical to the text the string path
     /// carried (same values, same serialization).
     pub fn from_entries(
         active: Vec<SchemaEntry>,
-        registry: Vec<SchemaEntry>,
         catalog_json: &str,
     ) -> Result<Self, ToolSchemaError> {
         let raw_active = entries_json(&active);
-        let raw_registry = entries_json(&registry);
         Ok(Self {
             active,
-            registry,
             catalog: parse_catalog_channel(catalog_json)?,
             raw_active,
-            raw_registry,
             raw_catalog: catalog_json.to_string(),
         })
     }
 
-    /// Session-level raw text of the active channel (pressure/budget/stash).
+    /// Session-level raw text of the active channel (pressure/budget).
     pub fn active_json(&self) -> &str {
         &self.raw_active
-    }
-
-    /// Session-level raw text of the registry channel (stash/FFI edge).
-    pub fn registry_json(&self) -> &str {
-        &self.raw_registry
     }
 
     /// Session-level raw text of the catalog channel (semantics merge).
@@ -343,11 +359,6 @@ impl ToolSchemaSet {
     /// Whether a render catalog is present (legacy string-shape semantics).
     pub fn has_catalog(&self) -> bool {
         !self.raw_catalog.trim().is_empty() && self.raw_catalog.trim() != "[]"
-    }
-
-    /// Whether a schema registry is present (legacy string-shape semantics).
-    pub fn has_registry(&self) -> bool {
-        !self.raw_registry.trim().is_empty() && self.raw_registry.trim() != "[]"
     }
 
     /// Whether the catalog channel carries at least one named entry.
@@ -365,13 +376,16 @@ impl ToolSchemaSet {
             .collect()
     }
 
-    /// Render the active-only schemas payload by filtering the parsed
-    /// registry by name, preserving `active_names` order and stubbing tools
-    /// the registry does not carry. Same shaping as the legacy
-    /// `render_active_schema_json`; serialize with [`entries_json`].
+    /// Render the active-only schemas payload by looking each name up in
+    /// the parsed active channel, preserving `active_names` order and
+    /// stubbing tools the active channel does not carry (ENC-296: the host
+    /// owns the registry and wires full schemas provider-side, so an
+    /// activated-but-not-active tool renders as a name stub here). Same
+    /// shaping as the legacy `render_active_schema_json`; serialize with
+    /// [`entries_json`].
     pub fn render_active_schemas(&self, active_names: &[String]) -> Vec<SchemaEntry> {
         let by_name: std::collections::HashMap<&str, &SchemaEntry> = self
-            .registry
+            .active
             .iter()
             .filter(|entry| !entry.name.is_empty())
             .map(|entry| (entry.name.as_str(), entry))
@@ -449,16 +463,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_once_yields_all_three_channels() {
-        let set = ToolSchemaSet::parse(
-            &format!("[{}]", entry("web_search")),
-            &format!("[{},{}]", entry("web_search"), entry("append_blocks")),
-            "[]",
-        )
-        .expect("valid channels");
+    fn parse_once_yields_both_channels() {
+        // ENC-296: the registry channel is deleted; parse takes active +
+        // catalog only and the host owns the registry.
+        let set = ToolSchemaSet::parse(&format!("[{}]", entry("web_search")), "[]")
+            .expect("valid channels");
         assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
         assert!(!set.has_catalog());
-        assert!(set.has_registry());
         assert_eq!(set.active_json(), &format!("[{}]", entry("web_search")));
     }
 
@@ -466,74 +477,65 @@ mod tests {
     fn degenerate_inputs_are_rejected_at_parse() {
         // Invalid JSON text.
         assert!(matches!(
-            ToolSchemaSet::parse("{bogus", "[]", "[]"),
+            ToolSchemaSet::parse("{bogus", "[]"),
             Err(ToolSchemaError::InvalidJson {
                 channel: "tools_schema_json",
                 ..
             })
         ));
-        // Valid JSON, wrong top level for a provider-schema channel.
+        // Valid JSON, wrong top level for the active channel.
         assert!(matches!(
-            ToolSchemaSet::parse("[]", r#"{"a":1}"#, "[]"),
+            ToolSchemaSet::parse(r#"{"a":1}"#, "[]"),
             Err(ToolSchemaError::NotAnArray {
-                channel: "tool_schema_registry_json"
+                channel: "tools_schema_json"
             })
         ));
         // Entry without a name, and entry with a whitespace-only name.
         assert!(matches!(
-            ToolSchemaSet::parse("[{}]", "[]", "[]"),
+            ToolSchemaSet::parse("[{}]", "[]"),
             Err(ToolSchemaError::InvalidName {
                 channel: "tools_schema_json",
                 index: 0
             })
         ));
         assert!(matches!(
-            ToolSchemaSet::parse(r#"[{"name":"  "}]"#, "[]", "[]"),
+            ToolSchemaSet::parse(r#"[{"name":"  "}]"#, "[]"),
             Err(ToolSchemaError::InvalidName { index: 0, .. })
         ));
         // Duplicate names within one channel.
         let duplicates = format!("[{},{}]", entry("dup_tool"), entry("dup_tool"));
         assert!(matches!(
-            ToolSchemaSet::parse(&duplicates, "[]", "[]"),
+            ToolSchemaSet::parse(&duplicates, "[]"),
             Err(ToolSchemaError::DuplicateName { name, .. }) if name == "dup_tool"
         ));
         // Empty / whitespace-only text is the absent-channel case: Ok.
-        let set = ToolSchemaSet::parse("", "  ", "").expect("absent channels");
+        let set = ToolSchemaSet::parse("", "").expect("absent channels");
         assert!(set.initial_active_names().is_empty());
         assert_eq!(entries_json(&set.active), "[]");
         // Catalog object form (semantics file) is accepted, yields no entries.
-        let set = ToolSchemaSet::parse("[]", "[]", r#"{"tools":[]}"#).expect("catalog object");
+        let set = ToolSchemaSet::parse("[]", r#"{"tools":[]}"#).expect("catalog object");
         assert!(set.catalog.is_empty());
         assert!(!set.catalog_has_entries());
-        // A catalog array is validated like the schema channels.
-        let set = ToolSchemaSet::parse("[]", "[]", &format!("[{}]", entry("cat_tool")))
-            .expect("catalog array");
+        // A catalog array is validated like the schema channel.
+        let set =
+            ToolSchemaSet::parse("[]", &format!("[{}]", entry("cat_tool"))).expect("catalog array");
         assert_eq!(set.catalog.len(), 1);
         assert!(set.catalog_has_entries());
     }
 
     #[test]
     fn parse_lenient_degrades_only_the_bad_channel() {
-        // A malformed catalog must not erase valid active/registry entries
+        // A malformed catalog must not erase valid active entries
         // (the legacy per-channel behavior the tool_context wrapper keeps).
-        let set = ToolSchemaSet::parse_lenient(
-            &format!("[{}]", entry("web_search")),
-            &format!("[{}]", entry("append_blocks")),
-            "{bogus",
-        );
+        let set = ToolSchemaSet::parse_lenient(&format!("[{}]", entry("web_search")), "{bogus");
         assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
-        assert!(set.has_registry());
         assert!(set.catalog.is_empty());
         assert_eq!(set.catalog_json(), "[]");
-        // A malformed active channel degrades alone; the registry stash
-        // text survives untouched.
-        let set =
-            ToolSchemaSet::parse_lenient("[{}]", &format!("[{}]", entry("append_blocks")), "[]");
+        // A malformed active channel degrades alone; the catalog raw text
+        // survives untouched.
+        let set = ToolSchemaSet::parse_lenient("[{}]", &format!("[{}]", entry("cat_tool")));
         assert!(set.active.is_empty());
-        assert_eq!(
-            set.registry_json(),
-            &format!("[{}]", entry("append_blocks"))
-        );
+        assert_eq!(set.catalog_json(), &format!("[{}]", entry("cat_tool")));
     }
 
     #[test]
@@ -542,7 +544,7 @@ mod tests {
         // objects) is a contract violation now, caught at parse instead of
         // being honored by the runtime-view gates.
         assert!(matches!(
-            ToolSchemaSet::parse(r#"["web_search","patch_file"]"#, "[]", "[]"),
+            ToolSchemaSet::parse(r#"["web_search","patch_file"]"#, "[]"),
             Err(ToolSchemaError::EntryNotObject {
                 channel: "tools_schema_json",
                 index: 0
@@ -551,13 +553,12 @@ mod tests {
     }
 
     #[test]
-    fn render_active_schemas_filters_registry_in_order_with_stubs() {
-        let set = ToolSchemaSet::parse(
-            "[]",
-            &format!("[{},{}]", entry("b_tool"), entry("a_tool")),
-            "[]",
-        )
-        .expect("valid channels");
+    fn render_active_schemas_reads_active_channel_in_order_with_stubs() {
+        // ENC-296: render sources the active channel (registry deleted); a
+        // name missing from active renders as a name stub for the host to
+        // fill provider-side.
+        let set = ToolSchemaSet::parse(&format!("[{},{}]", entry("b_tool"), entry("a_tool")), "[]")
+            .expect("valid channels");
         let rendered =
             set.render_active_schemas(&["a_tool".to_string(), "missing_tool".to_string()]);
         // Full entry values are preserved (legacy Value filter-then-stringify
@@ -576,7 +577,6 @@ mod tests {
         };
         let set = ToolSchemaSet::parse(
             &format!("[{},{}]", entry("read_file"), entry("patch_file")),
-            "[]",
             "[]",
         )
         .expect("valid channels");

@@ -1,10 +1,14 @@
 //! In-memory context store for spilled tool output, terminal output, history
-//! snapshots, artifact snapshots, file outlines/chunks, and tool schemas.
+//! snapshots, artifact snapshots, and file outlines/chunks.
 //!
 //! The store is engine-owned (lives on [`crate::engine::state::InnerSession`])
 //! and exposes deterministic-ish IDs that compaction tiers can attach to model
 //! requests as [`ContextReference`] handles. The host (or future model tool)
 //! retrieves the full payload via the engine's read/search APIs.
+//!
+//! (ENC-296: the former host-owned `ToolSchema` / `ToolCatalogIndex` kinds
+//! are deleted with the tool registry — the host owns the registry and no
+//! schema text is stashed here. The remaining kinds are engine-created.)
 //!
 //! ### ENC-292 decision: no storage port for `ContextStore`
 //!
@@ -30,10 +34,9 @@ pub enum ContextReferenceKind {
     TerminalOutput,
     HistorySnapshot,
     ArtifactSnapshot,
+    ToolIndex,
     FileOutline,
     FileChunk,
-    ToolSchema,
-    ToolCatalogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +84,7 @@ pub fn is_browsable_context_kind(kind: &ContextReferenceKind) -> bool {
             | ContextReferenceKind::HistorySnapshot
             | ContextReferenceKind::TerminalOutput
             | ContextReferenceKind::ArtifactSnapshot
+            | ContextReferenceKind::ToolIndex
     )
 }
 
@@ -326,14 +330,35 @@ mod tests {
     }
 
     #[test]
-    fn is_browsable_context_kind_excludes_infrastructure_refs() {
-        assert!(is_browsable_context_kind(&ContextReferenceKind::ToolOutput));
-        assert!(!is_browsable_context_kind(
-            &ContextReferenceKind::ToolSchema
-        ));
-        assert!(!is_browsable_context_kind(
-            &ContextReferenceKind::ToolCatalogIndex
-        ));
+    fn is_browsable_context_kind_covers_all_engine_created_refs() {
+        // ENC-296: the host-owned ToolSchema/ToolCatalogIndex kinds are
+        // deleted, so every remaining (engine-created) kind is browsable.
+        // Re-pinned from the old exclusion assertions: the contract is now
+        // that no infrastructure kind survives outside this list.
+        // The exhaustive match below has no wildcard arm on purpose: adding
+        // a future variant fails compilation here until it is classified.
+        for kind in [
+            ContextReferenceKind::ToolOutput,
+            ContextReferenceKind::TerminalOutput,
+            ContextReferenceKind::HistorySnapshot,
+            ContextReferenceKind::ArtifactSnapshot,
+            ContextReferenceKind::ToolIndex,
+            ContextReferenceKind::FileOutline,
+            ContextReferenceKind::FileChunk,
+        ] {
+            match kind {
+                ContextReferenceKind::ToolOutput
+                | ContextReferenceKind::TerminalOutput
+                | ContextReferenceKind::HistorySnapshot
+                | ContextReferenceKind::ArtifactSnapshot
+                | ContextReferenceKind::ToolIndex
+                | ContextReferenceKind::FileOutline
+                | ContextReferenceKind::FileChunk => assert!(
+                    is_browsable_context_kind(&kind),
+                    "{kind:?} must be browsable"
+                ),
+            }
+        }
     }
 
     #[test]

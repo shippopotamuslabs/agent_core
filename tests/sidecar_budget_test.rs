@@ -91,20 +91,38 @@ fn lalr_13_drops_oldest_generation_over_total_budget() {
 }
 
 #[test]
-fn lalr_18_full_schema_ref_omitted_in_delta() {
+fn lalr_18_tool_index_payload_spills_over_budget_without_schema_ref() {
+    // ENC-296 re-pin: ToolContextIndex is advertisement-only (the
+    // full_schema_ref field is deleted with the registry stash), so an
+    // oversized index spills under the generic ArtifactSnapshot kind and the
+    // delta carries truncation refs instead of full content.
+    use agent_core::context_store::ContextReferenceKind;
+
     let policy = LongLoopPolicy {
         sidecar_byte_budget_per_call: 256,
         ..LongLoopPolicy::hosted_mutable_defaults()
     };
-    let mut index = ToolContextIndex {
-        full_schema_ref: String::new(),
-        advertised_tools: vec![],
+    let index = ToolContextIndex {
+        advertised_tools: vec![agent_core::tool_context::ToolContextSummary {
+            name: "padded_tool".into(),
+            description_preview: "x".repeat(512),
+            reproducible: true,
+            deferrable: false,
+            max_result_bytes: None,
+        }],
     };
-    index.full_schema_ref = "x".repeat(128);
     let mut builder = SidecarBuilder::new();
     let mut store = ContextStore::default();
     let delta = builder
         .build_tool_index_payload(&mut store, &index, policy.sidecar_byte_budget_per_call)
         .expect("tool index delta");
-    assert!(delta.contains(r#""full_schema_ref":"<omitted:128 chars>""#));
+    assert!(delta.contains("\"truncated\":true"));
+    assert!(delta.len() <= 256);
+    assert!(
+        store.entries().any(
+            |entry| entry.reference.kind == ContextReferenceKind::ArtifactSnapshot
+                && entry.content.contains("padded_tool")
+        ),
+        "oversized index payload must spill to the store"
+    );
 }

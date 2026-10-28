@@ -16,7 +16,6 @@ fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
             256,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params")
@@ -129,15 +128,8 @@ fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams::new(
-            "llama".into(),
-            512,
-            "[]".into(),
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params"),
+        SessionIoParams::new("llama".into(), 512, "[]".into(), "[]".into(), "sys".into())
+            .expect("valid test io params"),
     );
 
     let action = eng.next_action(&handle);

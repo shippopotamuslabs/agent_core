@@ -8,10 +8,6 @@ pub fn advertised_tool_names(_: &str) -> Vec<String> {
     unimplemented!("TDD Red")
 }
 
-pub fn read_full_schema_registry(_: &str) -> String {
-    unimplemented!("TDD Red")
-}
-
 pub fn merge_active_tool_names(_: &[String], _: &[String]) -> Vec<String> {
     unimplemented!("TDD Red")
 }

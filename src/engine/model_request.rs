@@ -78,18 +78,15 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
         .render_runtime_view(config, capabilities, loop_metrics);
 
     let has_catalog = io.schemas.has_catalog();
-    let has_registry = io.schemas.has_registry();
 
-    let active_schemas = if has_registry && !active_tool_names.is_empty() {
-        io.schemas.render_active_schemas(active_tool_names)
-    } else {
-        io.schemas.active.clone()
-    };
+    // ENC-296: render from the active channel (registry deleted). Names the
+    // active channel does not carry — tools activated mid-session — render
+    // as name stubs; the host wires their full schemas provider-side.
+    let active_schemas = io.schemas.render_active_schemas(active_tool_names);
 
     let tool_context_index = build_tool_context_index_from_set(
         &active_schemas,
-        &io.schemas,
-        context_store,
+        io.schemas.catalog_has_entries(),
         config,
         capabilities,
     );

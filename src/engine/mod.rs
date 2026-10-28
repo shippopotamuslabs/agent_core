@@ -49,8 +49,6 @@ use crate::policy::resolve_context_policy;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
-#[allow(unused_imports)]
-use crate::tool_context::build_tool_context_index;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
@@ -1412,7 +1410,6 @@ mod tests {
             256,
             "[]".into(),
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params")
@@ -1422,7 +1419,6 @@ mod tests {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "[]".into(),
             "sys".into(),
