@@ -98,52 +98,6 @@ pub(super) fn activate_tools_for_spill_reference(
     merge_active_tool_names(&mut result.activated_tool_names, hinted);
 }
 
-fn parse_tool_names_from_schema(schema_json: &str) -> Vec<String> {
-    let parsed: serde_json::Value = match serde_json::from_str(schema_json) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let Some(array) = parsed.as_array() else {
-        return Vec::new();
-    };
-    array
-        .iter()
-        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(String::from))
-        .collect()
-}
-
-/// Render an active-only schemas-JSON payload by filtering the registry by name.
-/// Preserves the order in `active_names`.
-fn render_active_schema_json(registry_json: &str, active_names: &[String]) -> String {
-    let parsed: serde_json::Value = match serde_json::from_str(registry_json) {
-        Ok(v) => v,
-        Err(_) => return "[]".to_string(),
-    };
-    let Some(array) = parsed.as_array() else {
-        return "[]".to_string();
-    };
-    let by_name: std::collections::HashMap<&str, &serde_json::Value> = array
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|name| (name, entry))
-        })
-        .collect();
-    let mut out = Vec::new();
-    for name in active_names {
-        if let Some(entry) = by_name.get(name.as_str()) {
-            out.push((*entry).clone());
-        } else {
-            // If the registry doesn't carry this tool, advertise a stub so the active set
-            // remains structurally consistent.
-            out.push(serde_json::json!({"name": name}));
-        }
-    }
-    serde_json::Value::Array(out).to_string()
-}
-
 /// Session state machine: hosts drive it exclusively through the polling surface
 /// (`next_action` / `submit_model_response` / `submit_tool_results` / `submit_summary`).
 ///
@@ -179,7 +133,7 @@ impl AgentEngine {
     ) -> SessionHandle {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
-        config.prepare_tool_semantics(&io);
+        config.prepare_tool_semantics(&io.schemas);
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -189,7 +143,8 @@ impl AgentEngine {
         }
 
         let initial_msg_count = initial_messages.len() as u32;
-        let initial_active_tool_names_source = io.tools_schema_json.clone();
+        // Single session-construction parse: names come from the parsed set.
+        let initial_active_tool_names = io.schemas.initial_active_names();
         let pending_work_items = session_context
             .get("pending_work")
             .and_then(|value| value.as_array())
@@ -235,7 +190,7 @@ impl AgentEngine {
                 terminal_action: None,
                 last_model_response_greedy_tool_names: Vec::new(),
                 tools_blocked_nudges_this_turn: 0,
-                active_tool_names: parse_tool_names_from_schema(&initial_active_tool_names_source),
+                active_tool_names: initial_active_tool_names,
                 sidecar_builder: SidecarBuilder::new(),
                 compaction_passes_this_turn: 0,
                 destructive_tiers_this_turn: 0,
@@ -1127,7 +1082,7 @@ impl InnerSession {
         CompactionContext {
             provider: self.io.provider.clone(),
             context_window_tokens: self.io.context_window_tokens,
-            tools_schema_json: self.io.tools_schema_json.clone(),
+            tools_schema_json: self.io.schemas.active_json().to_string(),
             system_prompt: self.io.system_prompt.clone(),
             context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
@@ -1470,25 +1425,27 @@ mod tests {
     use crate::turn_io::RawToolCall;
 
     fn io_small_window() -> SessionIoParams {
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 256,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        }
+        SessionIoParams::new(
+            "anthropic".into(),
+            256,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params")
     }
 
     fn io_large_window() -> SessionIoParams {
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        }
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params")
     }
 
     #[test]

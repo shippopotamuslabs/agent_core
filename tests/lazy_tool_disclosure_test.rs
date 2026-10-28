@@ -67,14 +67,15 @@ fn create_session(
         cfg,
         capabilities(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: CATALOG_JSON.into(),
-            tool_schema_registry_json: REGISTRY_JSON.into(),
-            tools_schema_json: tools_schema_json.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            CATALOG_JSON.into(),
+            REGISTRY_JSON.into(),
+            tools_schema_json.into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     )
 }
 
@@ -136,7 +137,7 @@ fn ltd_08_rust_model_requests_keep_active_schemas_separate_from_catalog_and_regi
         .expect("full schema registry reference must be readable");
 
     assert_eq!(
-        tool_names(&request.tools_schema_json),
+        tool_names(&request.tools_schema_json()),
         vec!["tool_discovery_tool", "web_search", "web_extract"]
     );
     // Discovery is real: advertised_tools lists only the active/callable subset, never the
@@ -191,7 +192,7 @@ fn ltd_09_rust_merges_activated_tool_names_in_first_seen_order() {
 
     let next_request = model_request(&eng, &handle);
     assert_eq!(
-        tool_names(&next_request.tools_schema_json),
+        tool_names(&next_request.tools_schema_json()),
         vec![
             "tool_discovery_tool",
             "web_search",

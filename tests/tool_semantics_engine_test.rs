@@ -19,6 +19,15 @@ fn engine() -> AgentEngine {
     AgentEngine::new()
 }
 
+const CATALOG_JSON: &str = r#"[
+  {"name":"open_tools","aliases":[],"reproducible":true,"schema_hint":null},
+  {"name":"search_web","aliases":[],"reproducible":true,"schema_hint":null},
+  {"name":"write_doc","aliases":[],"reproducible":false,"schema_hint":null},
+  {"name":"lookup_memory","aliases":[],"reproducible":true,"schema_hint":null}
+]"#;
+
+const REGISTRY_JSON: &str = r#"[{"name":"open_tools"},{"name":"search_web"},{"name":"write_doc"},{"name":"lookup_memory"}]"#;
+
 fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_core::SessionHandle {
     let eng = engine();
     eng.create_session(
@@ -41,19 +50,15 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
             ..SessionCapabilities::default()
         },
         Value::Null,
-        SessionIoParams {
-            provider: "anthropic".to_string(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: r#"[
-              {"name":"open_tools","aliases":[],"reproducible":true,"schema_hint":null},
-              {"name":"search_web","aliases":[],"reproducible":true,"schema_hint":null},
-              {"name":"write_doc","aliases":[],"reproducible":false,"schema_hint":null},
-              {"name":"lookup_memory","aliases":[],"reproducible":true,"schema_hint":null}
-            ]"#.to_string(),
-            tool_schema_registry_json: r#"[{"name":"open_tools"},{"name":"search_web"},{"name":"write_doc"},{"name":"lookup_memory"}]"#.to_string(),
-            tools_schema_json: active_schema.to_string(),
-            system_prompt: "sys".to_string(),
-        },
+        SessionIoParams::new(
+            "anthropic".to_string(),
+            200_000,
+            CATALOG_JSON.to_string(),
+            REGISTRY_JSON.to_string(),
+            active_schema.to_string(),
+            "sys".to_string(),
+        )
+        .expect("valid test io params"),
     )
 }
 

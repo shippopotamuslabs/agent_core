@@ -83,14 +83,15 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
         search_discovery_config(),
         capabilities(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: SEARCH_CATALOG_JSON.into(),
-            tool_schema_registry_json: SEARCH_REGISTRY_JSON.into(),
-            tools_schema_json: SEARCH_ACTIVE_SCHEMA_JSON.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            SEARCH_CATALOG_JSON.into(),
+            SEARCH_REGISTRY_JSON.into(),
+            SEARCH_ACTIVE_SCHEMA_JSON.into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     )
 }
 
@@ -185,14 +186,15 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
         config,
         capabilities(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: SEARCH_CATALOG_JSON.into(),
-            tool_schema_registry_json: SEARCH_REGISTRY_JSON.into(),
-            tools_schema_json: SEARCH_ACTIVE_SCHEMA_JSON.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            SEARCH_CATALOG_JSON.into(),
+            SEARCH_REGISTRY_JSON.into(),
+            SEARCH_ACTIVE_SCHEMA_JSON.into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     )
 }
 

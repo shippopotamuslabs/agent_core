@@ -13,14 +13,15 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 fn io_large_window() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 200_000,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
+    .expect("valid test io params")
 }
 
 fn caps_no_summary() -> SessionCapabilities {
@@ -173,8 +174,15 @@ fn char_text_stop_finishes_terminal() {
 fn char_reject_only_turn_returns_to_model() {
     let eng = AgentEngine::new();
     // Seed a non-empty active tool set so the discovery guard rejects unknown tools.
-    let mut io = io_large_window();
-    io.tools_schema_json = r#"[{"name":"web_search"}]"#.into();
+    let io = SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        r#"[{"name":"web_search"}]"#.into(),
+        "sys".into(),
+    )
+    .expect("valid test io params");
     let h = eng.create_session(
         vec![AgentMessage {
             id: "u1".into(),

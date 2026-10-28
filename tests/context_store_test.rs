@@ -138,14 +138,15 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
         cfg,
         SessionCapabilities::default(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     // Advance to the awaiting-tools phase so we can submit a tool result.
@@ -245,14 +246,15 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: r#"[{"name":"web_search"}]"#.into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            r#"[{"name":"web_search"}]"#.into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     let req = match eng.next_action(&handle) {
@@ -288,14 +290,15 @@ fn s23_terminal_output_references_share_retrieval_path() {
         AgentConfig::default(),
         SessionCapabilities::default(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     let reference = eng.insert_terminal_output(
         &handle,
@@ -323,14 +326,15 @@ fn e4_missing_context_reference_read_returns_not_found() {
         AgentConfig::default(),
         SessionCapabilities::default(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     let err = eng
         .read_context_reference(&handle, "missing-ref".into())
@@ -448,14 +452,15 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     // First turn: spill a tool result into the store.

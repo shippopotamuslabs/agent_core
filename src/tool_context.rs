@@ -10,6 +10,7 @@ use crate::context_store::{
     make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
 };
 use crate::session::{AgentConfig, SessionCapabilities};
+use crate::tool_schema::{SchemaEntry, ToolSchemaSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolContextSummary {
@@ -25,19 +26,6 @@ pub struct ToolContextSummary {
 pub struct ToolContextIndex {
     pub full_schema_ref: String,
     pub advertised_tools: Vec<ToolContextSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SchemaEntry {
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    reproducible: Option<bool>,
-    #[serde(default)]
-    deferrable: Option<bool>,
-    #[serde(default)]
-    max_result_bytes: Option<usize>,
 }
 
 pub fn build_tool_context_index(
@@ -73,22 +61,58 @@ pub fn build_tool_context_index_with_registry(
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
 ) -> Option<ToolContextIndex> {
+    // String-based public API preserved: parses its own input once at this
+    // boundary (a justified remaining parse — see ENC-289 notes). The
+    // per-turn engine path calls `build_tool_context_index_from_set` with the
+    // session-parsed entries and performs no text parsing.
+    //
+    // This wrapper is infallible by design (a preserved public boundary
+    // API, not session construction), so it parses leniently and
+    // per-channel: a contract violation degrades only its own channel,
+    // matching the legacy behavior where each channel was parsed
+    // separately. Session construction is the validating path and fails
+    // hard on any violation.
+    let schemas = ToolSchemaSet::parse_lenient(tools_schema_json, registry_json, catalog_json);
+    let active = schemas.active.clone();
+    build_tool_context_index_from_set(&active, &schemas, store, config, capabilities)
+}
+
+/// Build the tool-context index from the session-parsed [`ToolSchemaSet`]
+/// plus the per-turn rendered active entries. Performs no JSON text parsing.
+///
+/// `active` is the rendered active/callable set (registry-filtered when a
+/// registry is present, else the session active channel) — the sole source
+/// for `advertised_tools`, so deferred tools stay hidden until disclosure.
+/// `schemas` supplies the catalog presence guard and the raw stash text.
+pub fn build_tool_context_index_from_set(
+    active: &[SchemaEntry],
+    schemas: &ToolSchemaSet,
+    store: &mut ContextStore,
+    config: &AgentConfig,
+    capabilities: &SessionCapabilities,
+) -> Option<ToolContextIndex> {
     if !config.enable_tool_schema_deferral || !capabilities.tool_schema_deferral_supported {
         return None;
     }
 
-    let catalog_entries: Vec<SchemaEntry> = serde_json::from_str(catalog_json).unwrap_or_default();
-    let fallback_entries: Vec<SchemaEntry> = serde_json::from_str(tools_schema_json).ok()?;
-    if catalog_entries.is_empty() && fallback_entries.is_empty() {
+    // Presence guard: a session with neither active tools nor a catalog has
+    // nothing to index. Nameless entries count as absent, matching the legacy
+    // strict-struct parse (which failed closed on them).
+    let advertised: Vec<&SchemaEntry> = active
+        .iter()
+        .filter(|entry| !entry.name.is_empty())
+        .collect();
+    if !schemas.catalog_has_entries() && advertised.is_empty() {
         return None;
     }
 
     // Persist the registry (full schemas) when supplied; otherwise fall back to the
-    // legacy single-channel persistence of `tools_schema_json`.
-    let stash_content = if !registry_json.trim().is_empty() && registry_json.trim() != "[]" {
-        registry_json.to_string()
+    // legacy single-channel persistence of the active channel. The untouched
+    // session raw text is stashed so reads stay byte-identical.
+    let stash_content = if schemas.has_registry() {
+        schemas.registry_json().to_string()
     } else {
-        tools_schema_json.to_string()
+        schemas.active_json().to_string()
     };
     let existing_ref = store
         .entries()
@@ -98,13 +122,24 @@ pub fn build_tool_context_index_with_registry(
         })
         .map(|entry| entry.reference.clone());
 
+    // Title names come from the stashed channel's parsed entries (registry
+    // when present, else the rendered active set).
+    let title_source: &[SchemaEntry] = if schemas.has_registry() {
+        &schemas.registry
+    } else {
+        active
+    };
     let stored = match existing_ref {
         Some(r) => r,
         None => {
             let seq = store.next_sequence();
             let id = format!("tool-schema-{seq}");
             let preview = make_preview(&stash_content);
-            let tool_names = get_tool_names(&stash_content);
+            let tool_names: Vec<String> = title_source
+                .iter()
+                .filter(|entry| !entry.name.is_empty())
+                .map(|entry| entry.name.clone())
+                .collect();
             let title = if tool_names.is_empty() {
                 "tool_schema_full".to_string()
             } else if tool_names.len() <= 3 {
@@ -137,16 +172,14 @@ pub fn build_tool_context_index_with_registry(
 
     // Advertise only the active/callable tools. Deferred catalog tools stay hidden until
     // the model activates them through `tool_discovery_tool` (capability search).
-    let advertised_source = fallback_entries;
-
-    let summaries: Vec<ToolContextSummary> = advertised_source
+    let summaries: Vec<ToolContextSummary> = advertised
         .into_iter()
-        .map(|e| ToolContextSummary {
-            name: e.name,
-            description_preview: make_preview(&e.description),
-            reproducible: e.reproducible.unwrap_or(true),
-            deferrable: e.deferrable.unwrap_or(true),
-            max_result_bytes: e.max_result_bytes,
+        .map(|entry| ToolContextSummary {
+            name: entry.name.clone(),
+            description_preview: make_preview(entry.description()),
+            reproducible: entry.reproducible(),
+            deferrable: entry.deferrable(),
+            max_result_bytes: entry.max_result_bytes(),
         })
         .collect();
 
@@ -154,10 +187,4 @@ pub fn build_tool_context_index_with_registry(
         full_schema_ref: stored.id,
         advertised_tools: summaries,
     })
-}
-
-fn get_tool_names(json_str: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<SchemaEntry>>(json_str)
-        .map(|entries| entries.into_iter().map(|e| e.name).collect())
-        .unwrap_or_default()
 }

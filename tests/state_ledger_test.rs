@@ -81,14 +81,15 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 256,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            256,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     match eng.next_action(&handle) {
         AgentAction::RequestSummary(req) => {

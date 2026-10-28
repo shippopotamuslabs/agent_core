@@ -74,14 +74,15 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "LLAMA".into(),
-            context_window_tokens: 4096,
-            tools_schema_json: "[]".into(),
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            system_prompt: system,
-        },
+        SessionIoParams::new(
+            "LLAMA".into(),
+            4096,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            system,
+        )
+        .expect("valid test io params"),
     );
 
     let before = eng.drain_events(&handle);
@@ -92,7 +93,7 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
             let ctx = CompactionContext {
                 provider: "LLAMA".into(),
                 context_window_tokens: 4096,
-                tools_schema_json: req.tools_schema_json.clone(),
+                tools_schema_json: req.tools_schema_json(),
                 system_prompt: req.system_prompt.clone(),
                 context_sidecars_estimate: String::new(),
                 capabilities: SessionCapabilities {

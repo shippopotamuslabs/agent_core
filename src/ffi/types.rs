@@ -219,8 +219,20 @@ impl From<FfiModelRequest> for ModelRequest {
         Self {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
             system_prompt: m.system_prompt,
-            tools_schema_json: m.tools_schema_json,
-            rendered_tool_catalog_json: String::new(),
+            // FFI inbound edge (a justified remaining parse): the host-side
+            // request string is parsed once here, at the boundary. Unlike
+            // session construction, this conversion is infallible (`From`):
+            // the string echoes a request the engine itself rendered, so a
+            // contract violation here falls back to an empty active set
+            // rather than failing a conversion that cannot return an error.
+            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(
+                &m.tools_schema_json,
+                "[]",
+                "[]",
+            )
+            .map(|schemas| schemas.active)
+            .unwrap_or_default(),
+            rendered_tool_catalog: Vec::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
             state_ledger: m
@@ -245,10 +257,12 @@ impl From<FfiModelRequest> for ModelRequest {
 
 impl From<ModelRequest> for FfiModelRequest {
     fn from(m: ModelRequest) -> Self {
+        // FFI outbound edge: serialize the parsed entries to JSON here.
+        let tools_schema_json = m.tools_schema_json();
         Self {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
             system_prompt: m.system_prompt,
-            tools_schema_json: m.tools_schema_json,
+            tools_schema_json,
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
             state_ledger_json: m
@@ -755,16 +769,23 @@ pub struct FfiSessionIoParams {
     pub system_prompt: String,
 }
 
-impl From<FfiSessionIoParams> for crate::engine::SessionIoParams {
-    fn from(p: FfiSessionIoParams) -> Self {
-        Self {
-            provider: p.provider,
-            context_window_tokens: p.context_window_tokens,
-            tool_catalog_json: p.tool_catalog_json,
-            tool_schema_registry_json: p.tool_schema_registry_json,
-            tools_schema_json: p.tools_schema_json,
-            system_prompt: p.system_prompt,
-        }
+impl TryFrom<FfiSessionIoParams> for crate::engine::SessionIoParams {
+    type Error = AgentError;
+
+    fn try_from(p: FfiSessionIoParams) -> Result<Self, Self::Error> {
+        // FFI session edge: the single construction-time parse lives in
+        // `new`, and its contract errors surface as `AgentError` here so
+        // `create_session` can return them through `AgentException`. The
+        // FFI DTO strings themselves are unchanged (ENC-289).
+        Self::new(
+            p.provider,
+            p.context_window_tokens,
+            p.tool_catalog_json,
+            p.tool_schema_registry_json,
+            p.tools_schema_json,
+            p.system_prompt,
+        )
+        .map_err(|error| AgentError::Internal(error.to_string()))
     }
 }
 

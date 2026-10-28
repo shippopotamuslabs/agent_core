@@ -63,14 +63,15 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         cfg,
         caps,
         session_context,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 256,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            256,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     let _ = eng.next_action(&handle);
     eng.submit_model_response(
@@ -169,7 +170,7 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
         &agent_core::budget::PromptBudgetParts {
             provider: "anthropic",
             context_window_tokens: 256,
-            tools_schema_json: &req.tools_schema_json,
+            tools_schema_json: &req.tools_schema_json(),
             system_prompt: &req.system_prompt,
             context_sidecars: "",
         },

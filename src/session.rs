@@ -259,10 +259,14 @@ impl Default for AgentConfig {
 
 impl AgentConfig {
     /// Applies host IO payloads to [`tool_semantics`] (catalog JSON merge).
-    pub fn prepare_tool_semantics(&mut self, io: &crate::engine::SessionIoParams) {
+    /// Runs once at session construction; the catalog text parse here targets
+    /// the policy `ToolSpec` type (not the session
+    /// [`crate::tool_schema::ToolSchemaSet`]), so it is a justified remaining
+    /// parse — see ENC-289 notes.
+    pub fn prepare_tool_semantics(&mut self, schemas: &crate::tool_schema::ToolSchemaSet) {
         if let Err(error) = self
             .tool_semantics
-            .merge_catalog_json(&io.tool_catalog_json)
+            .merge_catalog_json(schemas.catalog_json())
         {
             eprintln!("agent_core: tool catalog merge failed: {error:?}");
         }

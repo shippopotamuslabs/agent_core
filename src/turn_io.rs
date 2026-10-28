@@ -1,16 +1,19 @@
 use crate::message::AgentMessage;
 use crate::sidecar_builder::ProviderContextSnapshot;
+use crate::tool_schema::{entries_json, SchemaEntry};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub session_messages: Vec<AgentMessage>,
     pub system_prompt: String,
-    /// Raw JSON blob of the tool schemas in provider-specific format.
-    /// Engine passes through opaquely; transport assembles it.
-    pub tools_schema_json: String,
+    /// Active tool schemas in parsed form (ENC-289). Serialize to JSON only
+    /// at the FFI/provider edge via [`ModelRequest::tools_schema_json`].
+    pub tool_schemas: Vec<SchemaEntry>,
+    /// Rendered runtime catalog in parsed form. Serialize to JSON only at
+    /// the edge via [`ModelRequest::rendered_tool_catalog_json`].
     #[serde(default)]
-    pub rendered_tool_catalog_json: String,
+    pub rendered_tool_catalog: Vec<SchemaEntry>,
     pub allow_tool_call: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_references: Vec<crate::context_store::ContextReference>,
@@ -38,13 +41,25 @@ pub struct ModelRequest {
     pub model_retry_attempt: Option<u32>,
 }
 
+impl ModelRequest {
+    /// Edge serialization of the active tool schemas (provider/FFI format).
+    pub fn tools_schema_json(&self) -> String {
+        entries_json(&self.tool_schemas)
+    }
+
+    /// Edge serialization of the rendered runtime catalog.
+    pub fn rendered_tool_catalog_json(&self) -> String {
+        entries_json(&self.rendered_tool_catalog)
+    }
+}
+
 impl Default for ModelRequest {
     fn default() -> Self {
         Self {
             session_messages: vec![],
             system_prompt: String::new(),
-            tools_schema_json: "[]".into(),
-            rendered_tool_catalog_json: String::new(),
+            tool_schemas: Vec::new(),
+            rendered_tool_catalog: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,
@@ -213,8 +228,8 @@ mod tests {
         let req = ModelRequest {
             session_messages: vec![make_message("m1")],
             system_prompt: "You are helpful.".into(),
-            tools_schema_json: "[]".into(),
-            rendered_tool_catalog_json: "[]".into(),
+            tool_schemas: Vec::new(),
+            rendered_tool_catalog: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,
@@ -232,6 +247,8 @@ mod tests {
         let back: ModelRequest = serde_json::from_str(&json).unwrap();
         assert!(back.allow_tool_call);
         assert_eq!(back.session_messages.len(), 1);
+        assert_eq!(back.tools_schema_json(), "[]");
+        assert_eq!(back.rendered_tool_catalog_json(), "[]");
     }
 
     #[test]

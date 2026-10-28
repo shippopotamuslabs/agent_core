@@ -37,21 +37,19 @@ pub fn render_runtime_tool_view(
     let filtered: Vec<&serde_json::Value> = arr
         .iter()
         .filter(|tool| {
-            // Catalog entries are schema objects ({"name": ..., ...}), so
-            // extract the tool name from the "name" field.
-            let name: &str = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            // Remove patch_file and write_file when require_read_before_edit and no files read yet
-            if config.require_read_before_edit
-                && metrics.files_read.is_empty()
-                && (name == "patch_file" || name == "write_file")
-            {
-                return false;
-            }
-            // Remove task_delegate when delegation tools not supported
-            if !capabilities.delegation_tools_supported && name == "task_delegate" {
-                return false;
-            }
-            true
+            // Catalog entries are schema objects ({"name": ..., ...}), not
+            // bare strings, so extract the tool name from the "name" field.
+            // A bare string entry is still honored for backward compatibility.
+            let name: &str = match tool {
+                serde_json::Value::String(s) => s.as_str(),
+                serde_json::Value::Object(_) => {
+                    tool.get("name").and_then(|n| n.as_str()).unwrap_or("")
+                }
+                _ => "",
+            };
+            // Gate policy shared with `ToolSchemaSet::render_runtime_view`
+            // (the parse-free per-turn sibling) so the renders cannot drift.
+            crate::tool_schema::runtime_gate_allows(name, config, capabilities, metrics)
         })
         .collect();
 

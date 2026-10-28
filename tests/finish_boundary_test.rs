@@ -23,14 +23,15 @@ fn engine() -> AgentEngine {
 }
 
 fn io() -> SessionIoParams {
-    SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 200_000,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
-    }
+    SessionIoParams::new(
+        "anthropic".into(),
+        200_000,
+        "[]".into(),
+        "[]".into(),
+        "[]".into(),
+        "sys".into(),
+    )
+    .expect("valid test io params")
 }
 
 fn submit_no_tool_response(
@@ -330,7 +331,7 @@ fn fb_r_009_hook_continuation_builds_pending_request_before_awaiting_model() {
     match action {
         AgentAction::CallModel(request) => {
             assert_eq!("sys", request.system_prompt);
-            assert_eq!("[]", request.tools_schema_json);
+            assert_eq!("[]", request.tools_schema_json());
             assert_eq!(
                 "Pending work remains: ship tests",
                 request.session_messages.last().unwrap().content
@@ -353,25 +354,27 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
         lifecycle_hooks_supported: true,
         ..Default::default()
     };
-    let handle = eng.create_session(
-        vec![FfiAgentMessage {
-            id: "u1".into(),
-            role: FfiAgentRole::User,
-            content: "ship".into(),
-            metadata_json: "null".into(),
-        }],
-        config,
-        capabilities,
-        serde_json::json!({"pending_work": ["verify failing tests"]}).to_string(),
-        FfiSessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
-    );
+    let handle = eng
+        .create_session(
+            vec![FfiAgentMessage {
+                id: "u1".into(),
+                role: FfiAgentRole::User,
+                content: "ship".into(),
+                metadata_json: "null".into(),
+            }],
+            config,
+            capabilities,
+            serde_json::json!({"pending_work": ["verify failing tests"]}).to_string(),
+            FfiSessionIoParams {
+                provider: "anthropic".into(),
+                context_window_tokens: 200_000,
+                tool_catalog_json: "[]".into(),
+                tool_schema_registry_json: "[]".into(),
+                tools_schema_json: "[]".into(),
+                system_prompt: "sys".into(),
+            },
+        )
+        .expect("valid ffi io params");
 
     assert!(matches!(
         eng.next_action(&handle),

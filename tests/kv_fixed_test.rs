@@ -10,13 +10,16 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 fn kv_fixed_emits_invalidated_non_kv_fixed_does_not_on_same_shape() {
     let big = "hello ".repeat(400);
     let mk = || AgentEngine::new();
-    let io = || SessionIoParams {
-        provider: "anthropic".into(),
-        context_window_tokens: 256,
-        tool_catalog_json: "[]".into(),
-        tool_schema_registry_json: "[]".into(),
-        tools_schema_json: "[]".into(),
-        system_prompt: "sys".into(),
+    let io = || {
+        SessionIoParams::new(
+            "anthropic".into(),
+            256,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params")
     };
     let msgs = vec![
         AgentMessage {
@@ -126,14 +129,15 @@ fn kv_fixed_without_summarization_oversized_history_resolves_cleanly() {
             ..Default::default()
         },
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "llama".into(),
-            context_window_tokens: 512,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "llama".into(),
+            512,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     let action = eng.next_action(&handle);

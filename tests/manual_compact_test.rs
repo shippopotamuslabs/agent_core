@@ -43,14 +43,15 @@ fn s18_manual_compact_uses_focus_instruction_and_emits_summary_request() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     let action = eng.request_manual_compact(
@@ -109,14 +110,15 @@ fn s24_pre_compact_and_post_compact_lifecycle_events_bracket_compaction() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 256,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            256,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     // Should fire preflight summary tier.
     let _ = eng.next_action(&handle);
@@ -174,14 +176,15 @@ fn e9_manual_compact_disabled_by_policy_returns_no_op() {
         cfg,
         SessionCapabilities::default(),
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
     let action = eng.request_manual_compact(
         &handle,
@@ -234,14 +237,15 @@ fn manual_compact_mid_model_turn_is_deferred_as_noop() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams {
-            provider: "anthropic".into(),
-            context_window_tokens: 200_000,
-            tool_catalog_json: "[]".into(),
-            tool_schema_registry_json: "[]".into(),
-            tools_schema_json: "[]".into(),
-            system_prompt: "sys".into(),
-        },
+        SessionIoParams::new(
+            "anthropic".into(),
+            200_000,
+            "[]".into(),
+            "[]".into(),
+            "[]".into(),
+            "sys".into(),
+        )
+        .expect("valid test io params"),
     );
 
     // Engine is now AwaitingModel.

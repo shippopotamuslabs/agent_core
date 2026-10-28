@@ -17,17 +17,49 @@ use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
+///
+/// The three tool-schema channels travel as a [`ToolSchemaSet`] parsed once
+/// at construction ([`SessionIoParams::new`]); per-turn code borrows the
+/// parsed entries and never re-parses schema text.
 #[derive(Debug, Clone)]
 pub struct SessionIoParams {
     pub provider: String,
     pub context_window_tokens: u32,
-    pub tool_catalog_json: String,
-    pub tool_schema_registry_json: String,
-    pub tools_schema_json: String,
+    pub schemas: ToolSchemaSet,
     pub system_prompt: String,
+}
+
+impl SessionIoParams {
+    /// Build session IO params, parsing the schema channels exactly once via
+    /// [`ToolSchemaSet::parse`]. Parameter order mirrors the legacy struct
+    /// literal field order.
+    ///
+    /// Fallible: a schema channel that violates the host contract (see
+    /// [`ToolSchemaError`]) rejects construction here, at the boundary,
+    /// instead of degrading silently during the session.
+    pub fn new(
+        provider: String,
+        context_window_tokens: u32,
+        tool_catalog_json: String,
+        tool_schema_registry_json: String,
+        tools_schema_json: String,
+        system_prompt: String,
+    ) -> Result<Self, ToolSchemaError> {
+        Ok(Self {
+            provider,
+            context_window_tokens,
+            schemas: ToolSchemaSet::parse(
+                &tools_schema_json,
+                &tool_schema_registry_json,
+                &tool_catalog_json,
+            )?,
+            system_prompt,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -83,7 +115,7 @@ pub(crate) struct InnerSession {
     pub(super) last_model_response_greedy_tool_names: Vec<String>,
     pub(super) tools_blocked_nudges_this_turn: u32,
     /// Active tool names for the current session. Updated on tool_discovery_tool activations.
-    /// Initially populated from the session's initial `tools_schema_json`.
+    /// Initially populated from the session's parsed [`ToolSchemaSet`].
     pub(super) active_tool_names: Vec<String>,
     pub(super) sidecar_builder: SidecarBuilder,
     /// Telemetry: number of compaction passes run this user turn (reset on turn start).
