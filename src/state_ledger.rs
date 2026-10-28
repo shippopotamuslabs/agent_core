@@ -1,9 +1,35 @@
-//! Semantic state ledger.
+//! Semantic state ledger: a derived cache, not ground truth.
 //!
 //! The ledger preserves continuity across compaction boundaries by extracting
 //! durable facts (objective, constraints, decisions, open questions, etc.) from
 //! the raw chat history. Compaction tiers (summary, FIFO) can rewrite history
-//! freely while the ledger remains the source of truth for "what we agreed".
+//! freely; the ledger is a convenience cache of the newest observation per
+//! fact class.
+//!
+//! # Precedence rule
+//!
+//! 1. Surviving log wins: non-superseded session messages are ground truth for
+//!    anything they still contain.
+//! 2. Ledger is a derived cache, newest observation wins per fact class:
+//!    objective = last-write-wins; artifact anchors = keyed replace by
+//!    `artifact_id` (unchanged); decisions/constraints/open_questions/
+//!    touched_files = set semantics (exact normalized-text dedupe; first-seen
+//!    order kept); tool_decisions = append-only event history (never retired).
+//! 3. Explicit retirement tags (same declared tag protocol as existing
+//!    extraction, case-insensitive): `reversal:` / `supersedes:` retire
+//!    matching decisions+constraints; `resolved:` retires matching
+//!    open_questions. Match = normalized full entry text (trim, collapse
+//!    whitespace, case-fold for COMPARISON key only; stored text unchanged).
+//!    Unmatched reversal/resolved appends as a decision (visible, never
+//!    silent). NO natural-language reversal inference.
+//! 4. Summary is older than the log tail: `merge_summary` observations are
+//!    tombstone-filtered — retired texts (ledger tombstone set) are NOT
+//!    resurrected by summary re-observation. A live user/assistant re-assertion
+//!    clears the tombstone and re-adds. (Ledger gets `retired: Vec<String>`
+//!    tombstones, serde default; cap not required but dedupe.)
+//! 5. HistorySnapshot has no precedence: verbatim archive behind
+//!    read_context_reference; it never overrides log/ledger/summary in render.
+//!    summary_refs/history_refs deduped exact.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,15 +54,26 @@ pub struct StateLedger {
     pub artifact_states: Vec<ArtifactStateAnchor>,
     pub summary_refs: Vec<String>,
     pub history_refs: Vec<String>,
+    /// Normalized tombstone set (precedence rule 4): retired entry keys.
+    /// Summary re-observations matching a tombstone are dropped; a live
+    /// re-assertion clears the tombstone and re-adds the entry.
+    #[serde(default)]
+    pub retired: Vec<String>,
 }
 
 /// Pulled-from-text patterns. Each tag maps to a `Vec<String>` field; the
-/// "objective" tag uses `Option<String>` and is set on first sighting only.
+/// "objective" tag uses `Option<String>` with last-write-wins for live
+/// observations (summary fills only when empty).
 const PREFIX_OBJECTIVE: &[&str] = &["objective:", "goal:"];
 const PREFIX_CONSTRAINT: &[&str] = &["constraint:", "constraints:"];
 const PREFIX_DECISION: &[&str] = &["decision:", "decided:"];
 const PREFIX_OPEN_QUESTION: &[&str] = &["open question:", "question:", "todo:"];
 const PREFIX_TOUCHED_FILE: &[&str] = &["file:", "touched:"];
+/// Explicit retirement tags (precedence rule 3). `reversal:` / `supersedes:`
+/// retire matching decisions+constraints; `resolved:` retires matching
+/// open_questions. Unmatched retirement appends as a decision.
+const PREFIX_REVERSAL: &[&str] = &["reversal:", "supersedes:"];
+const PREFIX_RESOLVED: &[&str] = &["resolved:"];
 
 /// Trim leading whitespace and end at the next sentence boundary
 /// (`.`/`?`/`!` followed by space, or end-of-string).
@@ -62,8 +99,79 @@ fn parse_lines(text: &str) -> Vec<&str> {
     text.split('\n').collect()
 }
 
+/// Normalization for COMPARISON keys only (precedence rule 3): trim, collapse
+/// whitespace runs, case-fold. Stored entry text is unchanged.
+fn normalize_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Observation source (precedence rules 2, 4). Public `observe_user_message` /
+/// `observe_assistant_message` are `Live`; `merge_summary` is `Summary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObserveSource {
+    Live,
+    Summary,
+}
+
 impl StateLedger {
-    fn observe_text(&mut self, content: &str) {
+    /// Set-semantics insert into a fact-class vec (precedence rules 2, 4):
+    /// exact normalized-text dedupe, first-seen order kept. Summary
+    /// observations matching a tombstone are dropped (never resurrected); a
+    /// live re-assertion clears the tombstone and re-adds.
+    fn insert_fact(
+        retired: &mut Vec<String>,
+        field: &mut Vec<String>,
+        value: String,
+        source: ObserveSource,
+    ) {
+        let key = normalize_key(&value);
+        if field.iter().any(|e| normalize_key(e) == key) {
+            return;
+        }
+        match source {
+            ObserveSource::Summary => {
+                if retired.iter().any(|k| k == &key) {
+                    return;
+                }
+                field.push(value);
+            }
+            ObserveSource::Live => {
+                retired.retain(|k| k != &key);
+                field.push(value);
+            }
+        }
+    }
+
+    /// Retire matching entries from the given fact-class fields (precedence
+    /// rule 3). Returns true when at least one live entry — or an existing
+    /// tombstone — matched, in which case the tombstone is recorded (or kept).
+    fn retire_matches(
+        retired: &mut Vec<String>,
+        fields: &mut [&mut Vec<String>],
+        key: &str,
+    ) -> bool {
+        let mut matched = false;
+        for field in fields.iter_mut() {
+            let before = field.len();
+            field.retain(|e| normalize_key(e) != key);
+            if field.len() != before {
+                matched = true;
+            }
+        }
+        if matched {
+            if !retired.iter().any(|k| k == key) {
+                retired.push(key.to_string());
+            }
+            return true;
+        }
+        // Already retired: keep the tombstone, stay silent (no resurrection).
+        retired.iter().any(|k| k == key)
+    }
+
+    fn observe_text(&mut self, content: &str, source: ObserveSource) {
         // We scan line-by-line and also allow inline ". Decision: …" sentences
         // (M4 puts multiple "Decision:" tags on a single line).
         let mut search_from = 0usize;
@@ -77,6 +185,8 @@ impl StateLedger {
             (PREFIX_DECISION, "decision"),
             (PREFIX_OPEN_QUESTION, "open_question"),
             (PREFIX_TOUCHED_FILE, "touched_file"),
+            (PREFIX_REVERSAL, "reversal"),
+            (PREFIX_RESOLVED, "resolved"),
         ];
         while search_from < content.len() {
             // Find the earliest prefix match starting at `search_from`.
@@ -100,15 +210,68 @@ impl StateLedger {
             let value = until_sentence_end(after);
             if !value.is_empty() {
                 match kind {
-                    "objective" => {
-                        if self.objective.is_none() {
+                    "objective" => match source {
+                        // Live is newest: last-write-wins. Summary is older
+                        // than the log tail: fills only when empty.
+                        ObserveSource::Live => {
                             self.objective = Some(value);
                         }
+                        ObserveSource::Summary => {
+                            if self.objective.is_none() {
+                                self.objective = Some(value);
+                            }
+                        }
+                    },
+                    "constraint" => {
+                        Self::insert_fact(&mut self.retired, &mut self.constraints, value, source)
                     }
-                    "constraint" => self.constraints.push(value),
-                    "decision" => self.decisions.push(value),
-                    "open_question" => self.open_questions.push(value),
-                    "touched_file" => self.touched_files.push(value),
+                    "decision" => {
+                        Self::insert_fact(&mut self.retired, &mut self.decisions, value, source)
+                    }
+                    "open_question" => Self::insert_fact(
+                        &mut self.retired,
+                        &mut self.open_questions,
+                        value,
+                        source,
+                    ),
+                    "touched_file" => {
+                        Self::insert_fact(&mut self.retired, &mut self.touched_files, value, source)
+                    }
+                    "reversal" => {
+                        let key = normalize_key(&value);
+                        let matched = Self::retire_matches(
+                            &mut self.retired,
+                            &mut [&mut self.constraints, &mut self.decisions],
+                            &key,
+                        );
+                        if !matched {
+                            // Unmatched retirement stays visible: append as a
+                            // decision instead of silently dropping it.
+                            Self::insert_fact(
+                                &mut self.retired,
+                                &mut self.decisions,
+                                value,
+                                source,
+                            );
+                        }
+                    }
+                    "resolved" => {
+                        let key = normalize_key(&value);
+                        let matched = Self::retire_matches(
+                            &mut self.retired,
+                            &mut [&mut self.open_questions],
+                            &key,
+                        );
+                        if !matched {
+                            // Same visibility rule as unmatched reversal.
+                            Self::insert_fact(
+                                &mut self.retired,
+                                &mut self.decisions,
+                                value,
+                                source,
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -120,13 +283,13 @@ impl StateLedger {
 
     pub fn observe_user_message(&mut self, message: &AgentMessage) {
         if matches!(message.role, AgentRole::User) {
-            self.observe_text(&message.content);
+            self.observe_text(&message.content, ObserveSource::Live);
         }
     }
 
     pub fn observe_assistant_message(&mut self, message: &AgentMessage) {
         if matches!(message.role, AgentRole::Assistant) {
-            self.observe_text(&message.content);
+            self.observe_text(&message.content, ObserveSource::Live);
         }
     }
 
@@ -160,14 +323,21 @@ impl StateLedger {
 
     pub fn merge_summary(&mut self, summary_text: &str, summary_ref: Option<&str>) {
         if let Some(r) = summary_ref {
-            self.summary_refs.push(r.to_string());
+            // HistorySnapshot has no precedence (rule 5): refs deduped exact.
+            if !self.summary_refs.iter().any(|e| e == r) {
+                self.summary_refs.push(r.to_string());
+            }
         }
         // Surface any embedded structured tags from the summary text itself.
-        self.observe_text(summary_text);
+        // Summary is older than the log tail (rule 4): tombstone-filtered,
+        // and it never clobbers a live objective.
+        self.observe_text(summary_text, ObserveSource::Summary);
     }
 
     pub fn add_history_ref(&mut self, history_ref: &str) {
-        self.history_refs.push(history_ref.to_string());
+        if !self.history_refs.iter().any(|e| e == history_ref) {
+            self.history_refs.push(history_ref.to_string());
+        }
     }
 
     pub fn as_anchor_message(&self) -> Option<AgentMessage> {
