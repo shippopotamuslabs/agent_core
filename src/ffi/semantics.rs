@@ -904,7 +904,7 @@ mod tests {
         // AgentException path (fixture discovery tool stripped of its
         // self-exemption, active schemas non-empty without it).
         use crate::ffi::{create_agent_engine, FfiAgentMessage, FfiAgentRole, FfiSessionIoParams};
-        use crate::ffi::{FfiSessionCapabilities, FfiToolSchemaEntry};
+        use crate::ffi::{FfiSessionCapabilities, FfiSessionContext, FfiToolSchemaEntry};
 
         let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
         let discovery_name = tree
@@ -933,7 +933,7 @@ mod tests {
             }],
             config,
             FfiSessionCapabilities::default(),
-            "null".to_string(),
+            FfiSessionContext::default(),
             FfiSessionIoParams {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,
@@ -966,7 +966,7 @@ mod tests {
         // ENC-299 D4: the typed FFI boundary propagates referential failures
         // through the existing create_session -> AgentException path.
         use crate::ffi::{create_agent_engine, FfiAgentMessage, FfiAgentRole, FfiSessionIoParams};
-        use crate::ffi::{FfiSessionCapabilities, FfiToolSchemaEntry};
+        use crate::ffi::{FfiSessionCapabilities, FfiSessionContext, FfiToolSchemaEntry};
 
         let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
         tree.argument_repairs[0].tool_name = "typo_tool_xyz".to_string();
@@ -985,7 +985,7 @@ mod tests {
             }],
             config,
             FfiSessionCapabilities::default(),
-            "null".to_string(),
+            FfiSessionContext::default(),
             FfiSessionIoParams {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,

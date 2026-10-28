@@ -525,12 +525,32 @@ pub struct Pressure {
     pub ratio: f32,
 }
 
-/// Typed host session context (ENC-290).
+/// One host-supplied file carried in [`SessionContext::included_files`]
+/// (ENC-308 B1: typed in the core; previously a raw `serde_json::Value`
+/// blob that `condense_file_context` re-parsed and silently dropped on
+/// malformed input). Lives here rather than in `file_context` so the
+/// module dependency stays one-directional: `file_context` already
+/// depends on this module for `AgentConfig`/`SessionCapabilities`.
 ///
-/// Replaces the previously opaque `serde_json::Value` map. Known host keys are
-/// typed fields; every other key round-trips through [`SessionContext::extras`]
-/// so host extensions survive a serialize/deserialize cycle byte-for-byte at
-/// the value level.
+/// Wire shape is the legacy array-entry form `{path, token_estimate,
+/// content}`; a stored entry missing `content` reads with the empty
+/// default, and an empty `content` serializes back without the key, so
+/// stored rows round-trip at the value level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncludedFile {
+    pub path: String,
+    pub token_estimate: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content: String,
+}
+
+/// Typed host session context (ENC-290, closed by ENC-308 B1).
+///
+/// Replaces the previously opaque `serde_json::Value` map. The fields
+/// below are the complete schema the engine accepts: there is no extras
+/// carry, so unknown host keys are unrepresentable at the FFI (the typed
+/// `FfiSessionContext` record has no slot for them) and are dropped by
+/// serde at the stored-state read seam.
 ///
 /// Field renames preserve the exact wire keys (`chatId`, `userMessageId`,
 /// `assistantMessageId`, `history_snapshot_ids`, `pending_work`,
@@ -584,13 +604,16 @@ pub struct SessionContext {
         deserialize_with = "de_lenient_bool"
     )]
     pub force_finish_blocked: bool,
-    /// Host-supplied file list consumed by `condense_file_context` (kept as
-    /// JSON: the consumer re-serializes it to a string).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub included_files: Option<Value>,
-    /// Forward-compatible carry for every host key without a typed field.
-    #[serde(flatten)]
-    pub extras: HashMap<String, Value>,
+    /// Host-supplied files consumed by `condense_file_context`, typed as
+    /// [`IncludedFile`] values (ENC-308 B1). An absent list and an empty
+    /// list are the same state, matching `pending_work` /
+    /// `history_snapshot_ids` in this struct.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "de_included_files"
+    )]
+    pub included_files: Vec<IncludedFile>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -620,6 +643,27 @@ where
         Some(Value::Array(items)) => items
             .into_iter()
             .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// Lenient included-files list (the stored-state read seam, ENC-308 D2):
+/// an array keeps the entries that deserialize as [`IncludedFile`] (an
+/// entry missing `content` reads with the empty default); malformed
+/// entries and non-array shapes drop rather than failing the whole
+/// context parse, mirroring [`de_string_list`]. Live construction never
+/// passes through here — at the FFI the typed record is the only
+/// representation, so malformed entries are unrepresentable there.
+fn de_included_files<'de, D>(deserializer: D) -> Result<Vec<IncludedFile>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
             .collect(),
         _ => Vec::new(),
     })
@@ -655,13 +699,6 @@ where
 }
 
 impl SessionContext {
-    /// Serialized `included_files` payload for `condense_file_context`, if present.
-    pub fn included_files_json(&self) -> Option<String> {
-        self.included_files
-            .as_ref()
-            .and_then(|value| serde_json::to_string(value).ok())
-    }
-
     /// Whether every id in `message_ids` is covered by the latest snapshot.
     pub fn history_snapshot_covers(&self, message_ids: &[String]) -> bool {
         message_ids.iter().all(|id| {
@@ -673,10 +710,11 @@ impl SessionContext {
 }
 
 impl From<Value> for SessionContext {
-    /// Lenient config-file boundary conversion: object keys map onto typed
-    /// fields (unknown keys land in `extras`); `null`/scalar legacy values and
-    /// type-mismatched objects fall back to empty rather than failing session
-    /// construction, matching the old opaque-`Value` tolerance.
+    /// Lenient stored-state conversion: object keys map onto typed
+    /// fields (unknown keys are dropped by serde — there is no extras
+    /// carry since ENC-308 B1); `null`/scalar legacy values and
+    /// type-mismatched objects fall back to empty rather than failing
+    /// session construction, matching the old opaque-`Value` tolerance.
     fn from(value: Value) -> Self {
         match value {
             Value::Null => Self::default(),
@@ -822,7 +860,7 @@ mod tests {
         let session = AgentSession::new(vec![], serde_json::Value::Null);
         assert_eq!(session.session_context.chat_id, None);
         assert!(session.session_context.history_snapshot_ids.is_empty());
-        assert!(session.session_context.extras.is_empty());
+        assert!(session.session_context.included_files.is_empty());
         let s = serde_json::to_string(&session).unwrap();
         let back: AgentSession = serde_json::from_str(&s).unwrap();
         assert_eq!(back.session_context.chat_id, None);
@@ -838,9 +876,11 @@ mod tests {
 
     #[test]
     fn session_context_roundtrips_existing_fixture_shape() {
-        // Byte-compat (ENC-290): every key of the legacy opaque object —
-        // typed fields and host extensions alike — must survive a
-        // serialize/deserialize cycle.
+        // Value-compat for the typed schema (ENC-290, closed by ENC-308
+        // B1): every typed key of the legacy opaque object survives a
+        // serialize/deserialize cycle. Unknown host keys no longer ride
+        // along — the schema is closed, so `custom_host_flag` drops at
+        // the read seam instead of round-tripping through an extras map.
         let ctx = json!({
             "chatId": "chat-1",
             "userMessageId": "u-1",
@@ -862,7 +902,16 @@ mod tests {
             vec!["verify failing tests".to_string()]
         );
         assert!(session.session_context.force_finish_blocked);
-        assert!(session.session_context.included_files_json().is_some());
+        // The stored entry carries no `content` key; it reads with the
+        // empty default into the typed struct.
+        assert_eq!(
+            session.session_context.included_files,
+            vec![IncludedFile {
+                path: "src/big.rs".to_string(),
+                token_estimate: 500,
+                content: String::new(),
+            }]
+        );
         assert!(session
             .session_context
             .history_snapshot_covers(&["u0".to_string(), "a0".to_string()]));
@@ -873,14 +922,73 @@ mod tests {
         let json = serde_json::to_string(&session.session_context).unwrap();
         let back: SessionContext = serde_json::from_str(&json).unwrap();
         let again = serde_json::to_value(&back).unwrap();
-        // Value-level byte-compat: the re-parsed context equals the legacy object.
-        assert_eq!(again, ctx);
+        // Value-level compat: the re-serialized context equals the
+        // legacy object minus the dropped unknown key (the contentless
+        // entry round-trips contentless via skip-if-empty).
+        let mut expected = ctx.clone();
+        expected.as_object_mut().unwrap().remove("custom_host_flag");
+        assert_eq!(again, expected);
+        assert!(again.get("custom_host_flag").is_none());
+    }
 
-        // Unknown host keys ride along in extras without typed access.
+    #[test]
+    fn session_context_legacy_row_with_junk_keys_and_contentless_file() {
+        // Stored-state tolerance (ENC-308 D2): a hand-written pre-B1 row
+        // — typed wire keys, junk host keys at both levels, and an
+        // `included_files` entry without `content` — deserializes
+        // through the real AgentSession path with every typed field
+        // intact and the junk gone.
+        let raw = r#"{
+            "messages": [],
+            "tool_trace": [],
+            "compaction_log": [],
+            "ledger_snapshot": null,
+            "session_context": {
+                "chatId": "chat-legacy",
+                "userMessageId": "u-legacy",
+                "assistantMessageId": "a-legacy",
+                "history_snapshot_ids": ["m0"],
+                "pending_work": ["legacy item"],
+                "force_finish_blocked": true,
+                "included_files": [
+                    {"path": "src/no_content.rs", "token_estimate": 42},
+                    {"path": "src/full.rs", "token_estimate": 7, "content": "fn x() {}"},
+                    {"token_estimate": 9}
+                ],
+                "custom_host_flag": {"nested": [1, 2, 3]},
+                "another_unknown": "drop me"
+            },
+            "transcript_revision": 3
+        }"#;
+        let back: AgentSession = serde_json::from_str(raw).unwrap();
+        let ctx = &back.session_context;
+        assert_eq!(ctx.chat_id.as_deref(), Some("chat-legacy"));
+        assert_eq!(ctx.user_message_id.as_deref(), Some("u-legacy"));
+        assert_eq!(ctx.assistant_message_id.as_deref(), Some("a-legacy"));
+        assert_eq!(ctx.history_snapshot_ids, vec!["m0".to_string()]);
+        assert_eq!(ctx.pending_work, vec!["legacy item".to_string()]);
+        assert!(ctx.force_finish_blocked);
+        // The entry missing `path` drops at the seam; the well-formed
+        // entries survive, the contentless one with its empty default.
         assert_eq!(
-            back.extras.get("custom_host_flag"),
-            Some(&json!({"nested": [1, 2, 3]}))
+            ctx.included_files,
+            vec![
+                IncludedFile {
+                    path: "src/no_content.rs".to_string(),
+                    token_estimate: 42,
+                    content: String::new(),
+                },
+                IncludedFile {
+                    path: "src/full.rs".to_string(),
+                    token_estimate: 7,
+                    content: "fn x() {}".to_string(),
+                },
+            ]
         );
+        // Re-serialized, the context carries no trace of the junk keys.
+        let reserialized = serde_json::to_value(ctx).unwrap();
+        assert!(reserialized.get("custom_host_flag").is_none());
+        assert!(reserialized.get("another_unknown").is_none());
     }
 
     #[test]
@@ -898,8 +1006,8 @@ mod tests {
         // A loosely-typed force_finish_blocked (string form, as a host
         // sending raw JSON might produce) must not fail the whole struct
         // parse: the From<Value> conversion falls back to a default
-        // context on any field error, which would silently drop chat_id,
-        // pending_work, and extras along with the flag.
+        // context on any field error, which would silently drop chat_id
+        // and pending_work along with the flag.
         let ctx = SessionContext::from(json!({
             "chatId": "chat-9",
             "pending_work": ["still here"],

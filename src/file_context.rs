@@ -1,18 +1,16 @@
 //! File and folder condensation into outline/chunk references.
 //!
-//! Input shape:
-//! ```json
-//! [
-//!   { "path": "src/big.rs", "token_estimate": 500, "content": "fn ..." }
-//! ]
-//! ```
+//! Input: the session's typed [`IncludedFile`] list (wire form:
+//! `[{ "path": "src/big.rs", "token_estimate": 500, "content": "fn ..." }]`),
+//! carried on `SessionContext::included_files` since ENC-308 B1 — this
+//! module no longer parses JSON.
 
 use serde::{Deserialize, Serialize};
 
 use crate::context_store::{
     make_preview, ContextReference, ContextReferenceKind, ContextStore, ContextStoreEntry,
 };
-use crate::session::{AgentConfig, SessionCapabilities};
+use crate::session::{AgentConfig, IncludedFile, SessionCapabilities};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,14 +40,6 @@ pub struct FileContextIndex {
 /// Threshold above which content is treated as unparseable / oversized and
 /// demoted to filename-only.
 const FILENAME_ONLY_TOKEN_CEILING: u32 = 16_000;
-
-#[derive(Debug, Deserialize)]
-struct InputFile {
-    path: String,
-    token_estimate: u32,
-    #[serde(default)]
-    content: String,
-}
 
 fn looks_parseable(content: &str) -> bool {
     // Heuristic: parseable when it contains structural separators (fn/class
@@ -88,7 +78,7 @@ fn build_outline(content: &str) -> String {
 }
 
 pub fn condense_file_context(
-    included_files_json: &str,
+    files: &[IncludedFile],
     store: &mut ContextStore,
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
@@ -97,28 +87,12 @@ pub fn condense_file_context(
     if !config.enable_file_condensation {
         return None;
     }
-    let files: Vec<InputFile> = match serde_json::from_str(included_files_json) {
-        Ok(files) => files,
-        Err(_) => {
-            let sanitized: String = included_files_json
-                .chars()
-                .map(|ch| {
-                    if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-                        ' '
-                    } else {
-                        ch
-                    }
-                })
-                .collect();
-            serde_json::from_str(&sanitized).ok()?
-        }
-    };
 
     let outline_threshold = config.file_outline_threshold_tokens.max(1);
     let allow_outline = capabilities.file_backed_context_supported;
 
     let mut summaries: Vec<FileContextSummary> = Vec::with_capacity(files.len());
-    for file in &files {
+    for file in files {
         let level: FileCondensationLevel;
         let mut outline_ref: Option<String> = None;
         let mut chunk_refs: Vec<String> = Vec::new();

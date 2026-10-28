@@ -73,12 +73,7 @@ fn non_budget_tool_role_messages(
 ) -> Vec<&AgentMessage> {
     tool_role_messages(snapshot)
         .into_iter()
-        .filter(|m| {
-            !m.metadata
-                .extra("agent_tool_budget")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|m| !m.metadata.agent_tool_budget())
         .collect()
 }
 
@@ -116,7 +111,7 @@ fn e_01_malformed_dsml_retries_model() {
     assert!(
         tool_role_messages(&snapshot)
             .iter()
-            .all(|m| m.metadata.extra("agent_tool_budget").is_none()),
+            .all(|m| !m.metadata.agent_tool_budget()),
         "E-01 skips budget injection until remaining <= 5 or tools disabled"
     );
 }

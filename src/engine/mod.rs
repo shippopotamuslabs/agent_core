@@ -124,6 +124,100 @@ pub struct AgentEngine {
     _private: (),
 }
 
+/// Snapshot import gate 1 (ENC-305 fix pass, m5; extracted as a named
+/// validator by ENC-308 item 7): the format version must equal
+/// [`SNAPSHOT_VERSION`].
+fn validate_snapshot_version(version: u32) -> Result<(), ToolSemanticsError> {
+    if version != SNAPSHOT_VERSION {
+        return Err(ToolSemanticsError::InvalidSnapshot {
+            message: format!(
+                "unsupported snapshot version {version} (expected {SNAPSHOT_VERSION})"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Snapshot import gate 2 (ENC-305 fix pass, M1; extracted as a named
+/// validator by ENC-308 item 7): the (phase, pending) pair must be one
+/// construction can produce — `AwaitingModel` ⇒ `pending.call_model`,
+/// `AwaitingTools` ⇒ `pending.execute`, `AwaitingSummary` ⇒
+/// `pending.summary_req` AND `pending.summary_ctx`; `Idle` imposes no
+/// constraint. The incoherent pairs otherwise panic on the first
+/// `next_action` poll, so they are rejected here, never coerced. Pure
+/// over (phase, pending) so the rule is unit-testable directly,
+/// without JSON tampering.
+fn validate_snapshot_phase_coherence(
+    phase: EnginePhase,
+    pending: &PendingToolTurn,
+) -> Result<(), ToolSemanticsError> {
+    let incoherence = match phase {
+        EnginePhase::AwaitingModel if pending.call_model.is_none() => {
+            Some("phase AwaitingModel requires pending.call_model to be present")
+        }
+        EnginePhase::AwaitingTools if pending.execute.is_none() => {
+            Some("phase AwaitingTools requires pending.execute to be present")
+        }
+        EnginePhase::AwaitingSummary if pending.summary_req.is_none() => {
+            Some("phase AwaitingSummary requires pending.summary_req to be present")
+        }
+        EnginePhase::AwaitingSummary if pending.summary_ctx.is_none() => {
+            Some("phase AwaitingSummary requires pending.summary_ctx to be present")
+        }
+        _ => None,
+    };
+    match incoherence {
+        Some(message) => Err(ToolSemanticsError::InvalidSnapshot {
+            message: message.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Snapshot import gate 3 (ENC-305 fix pass, M3; extracted as a named
+/// validator by ENC-308 item 7): the context store must satisfy its
+/// restore invariants ([`ContextStore::validate_restored`]). The store
+/// owns the invariants and their error; the minted-ID grammar stays
+/// with the sidecar builder that mints the IDs, and a failure maps
+/// onto the snapshot error this boundary already returns.
+fn validate_snapshot_context_store(context_store: &ContextStore) -> Result<(), ToolSemanticsError> {
+    context_store
+        .validate_restored(crate::sidecar_builder::minted_id_sequence)
+        .map_err(|error| ToolSemanticsError::InvalidSnapshot {
+            message: error.to_string(),
+        })
+}
+
+/// Snapshot import gate 4 (extracted by ENC-308 item 7): build the
+/// session's tool world from the snapshot and reset the stored
+/// config/io exactly as `create_session` leaves them. The semantics
+/// are taken into the universe (`mem::take` leaves the agnostic
+/// default, as `ToolSemanticsConfig::default()` IS the agnostic
+/// bundle — ENC-305 fix pass, m7), the catalog is defaulted, the
+/// captured active set replaces the built universe's initial active
+/// set via `restore_active`, and the io carries the empty schema set
+/// (the live schema data is the universe's).
+fn restore_snapshot_tool_world(
+    config: &mut AgentConfig,
+    schemas: ToolSchemaSet,
+    active_tool_names: Vec<ToolName>,
+    provider: String,
+    context_window_tokens: u32,
+    system_prompt: String,
+) -> Result<(ToolUniverse, SessionIoParams), ToolSemanticsError> {
+    let semantics = std::mem::take(&mut config.tool_semantics);
+    config.tool_catalog = ToolCatalog::default();
+    let mut universe = ToolUniverse::build(schemas, semantics)?;
+    universe.restore_active(active_tool_names);
+    let io = SessionIoParams {
+        provider,
+        context_window_tokens,
+        schemas: ToolSchemaSet::from_entries(Vec::new()),
+        system_prompt,
+    };
+    Ok((universe, io))
+}
+
 impl AgentEngine {
     pub fn new() -> Self {
         Self::default()
@@ -307,7 +401,9 @@ impl AgentEngine {
     /// Import a [`SessionSnapshot`] as a live session (ENC-305 D6).
     ///
     /// Validation is EXACTLY construction's, plus the snapshot-only
-    /// coherence gates (ENC-305 fix pass, M1/M3/m5), all BEFORE the
+    /// coherence gates (ENC-305 fix pass, M1/M3/m5; the gates are the
+    /// `validate_snapshot_*` / `restore_snapshot_tool_world` functions
+    /// since ENC-308 item 7), all BEFORE the
     /// `InnerSession` is assembled — an incoherent snapshot is rejected
     /// with [`ToolSemanticsError::InvalidSnapshot`], never coerced:
     /// - `version` must equal [`SNAPSHOT_VERSION`];
@@ -362,14 +458,10 @@ impl AgentEngine {
             destructive_tiers_this_turn,
             suppress_summary_tier,
         } = snapshot;
+        // The gates are named validators (ENC-308 item 7), called in
+        // the order the fix pass established them.
         // m5: the format version gate.
-        if version != SNAPSHOT_VERSION {
-            return Err(ToolSemanticsError::InvalidSnapshot {
-                message: format!(
-                    "unsupported snapshot version {version} (expected {SNAPSHOT_VERSION})"
-                ),
-            });
-        }
+        validate_snapshot_version(version)?;
         // m6: apply the policy-tier defaults FIRST, mirroring
         // create_session's ordering (defaults before the universe
         // build). Idempotent for genuine snapshots — their effective
@@ -377,38 +469,18 @@ impl AgentEngine {
         // snapshot must not silently run un-tiered.
         config.apply_policy_tier_defaults(capabilities.context_policy_tier, context_window_tokens);
         // M1: (phase, pending) coherence. Never coerce.
-        let incoherence = match phase {
-            EnginePhase::AwaitingModel if pending.call_model.is_none() => {
-                Some("phase AwaitingModel requires pending.call_model to be present")
-            }
-            EnginePhase::AwaitingTools if pending.execute.is_none() => {
-                Some("phase AwaitingTools requires pending.execute to be present")
-            }
-            EnginePhase::AwaitingSummary if pending.summary_req.is_none() => {
-                Some("phase AwaitingSummary requires pending.summary_req to be present")
-            }
-            EnginePhase::AwaitingSummary if pending.summary_ctx.is_none() => {
-                Some("phase AwaitingSummary requires pending.summary_ctx to be present")
-            }
-            _ => None,
-        };
-        if let Some(message) = incoherence {
-            return Err(ToolSemanticsError::InvalidSnapshot {
-                message: message.to_string(),
-            });
-        }
+        validate_snapshot_phase_coherence(phase, &pending)?;
         // M3: context-store restore invariants.
-        context_store.validate_restored()?;
-        let semantics = std::mem::take(&mut config.tool_semantics);
-        config.tool_catalog = ToolCatalog::default();
-        let mut universe = ToolUniverse::build(schemas, semantics)?;
-        universe.restore_active(active_tool_names);
-        let io = SessionIoParams {
+        validate_snapshot_context_store(&context_store)?;
+        // Universe build + active-set restore + stored config/io reset.
+        let (universe, io) = restore_snapshot_tool_world(
+            &mut config,
+            schemas,
+            active_tool_names,
             provider,
             context_window_tokens,
-            schemas: ToolSchemaSet::from_entries(Vec::new()),
             system_prompt,
-        };
+        )?;
         Ok(SessionHandle {
             inner: Arc::new(Mutex::new(InnerSession {
                 session,
@@ -1189,7 +1261,7 @@ impl AgentEngine {
             CompactionOutcome::NeedsHostCall(req, sess) => {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
                 // Shared staging: session replace + history/ledger refs.
-                let req = g.attach_summary_staging(sess, req, trigger);
+                let req = g.attach_summary_staging(sess, req);
                 g.pending.summary_req = Some(req.clone());
                 g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
@@ -1279,15 +1351,18 @@ impl InnerSession {
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
     fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
-        self.compaction.set_suppress_summary_tier(true);
-        match self.run_compaction_pass(trigger) {
+        // ENC-308: the suppression set/reset pairing is owned by
+        // CompactionState; this site just brackets the re-run.
+        let previous = self.compaction.begin_summary_tier_suppression();
+        let result = self.run_compaction_pass(trigger);
+        self.compaction.end_summary_tier_suppression(previous);
+        match result {
             Ok(Some(_)) => {}
             Ok(None) => {}
             Err(e) => {
                 self.set_terminal(AgentAction::Failed(e));
             }
         }
-        self.compaction.set_suppress_summary_tier(false);
     }
 
     pub(super) fn set_terminal(&mut self, a: AgentAction) {
@@ -1455,7 +1530,7 @@ impl InnerSession {
                         None,
                         pass.take_history_ref(),
                         pass.destructive_tiers(),
-                        pass.message_count_before(),
+                        pass.message_count_before,
                     );
                 }
                 return Ok(None);
@@ -1632,6 +1707,145 @@ mod tests {
     fn io_large_window() -> SessionIoParams {
         SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
             .expect("valid test io params")
+    }
+
+    // ENC-308 item 7: the (phase, pending) coherence rule, exercised
+    // directly against the extracted validator — mismatched pairs are
+    // fed in as values, no JSON tampering required.
+
+    fn empty_model_request() -> crate::turn_io::ModelRequest {
+        crate::turn_io::ModelRequest {
+            session_messages: vec![],
+            system_prompt: "test".into(),
+            tool_schemas: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
+            allow_tool_call: true,
+            context_references: vec![],
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: vec![],
+            provider_context: Default::default(),
+            state_ledger_delta_json: None,
+            tool_context_index_delta_json: None,
+            file_context_index_delta_json: None,
+            retry_after_ms: None,
+            model_retry_attempt: None,
+        }
+    }
+
+    fn empty_summary_request() -> crate::turn_io::SummaryRequest {
+        crate::turn_io::SummaryRequest {
+            messages_to_summarize: vec![],
+            instruction: "Summarize.".into(),
+            last_message_id: "m1".into(),
+            trigger: CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
+        }
+    }
+
+    fn empty_compaction_context() -> CompactionContext {
+        CompactionContext {
+            provider: "anthropic".into(),
+            context_window_tokens: 200_000,
+            tools_schema_json: "[]".into(),
+            system_prompt: "sys".into(),
+            context_sidecars_estimate: String::new(),
+            capabilities: SessionCapabilities::default(),
+            trigger: CompactionTrigger::Preflight,
+            suppress_summary_tier: false,
+        }
+    }
+
+    fn coherence_rejection(phase: EnginePhase, pending: &PendingToolTurn) -> String {
+        match validate_snapshot_phase_coherence(phase, pending) {
+            Err(ToolSemanticsError::InvalidSnapshot { message }) => message,
+            Err(other) => panic!("expected InvalidSnapshot, got {other:?}"),
+            Ok(()) => panic!("expected InvalidSnapshot rejection, got Ok"),
+        }
+    }
+
+    #[test]
+    fn snapshot_coherence_rejects_awaiting_model_without_call_model() {
+        let pending = PendingToolTurn::default();
+        assert_eq!(
+            coherence_rejection(EnginePhase::AwaitingModel, &pending),
+            "phase AwaitingModel requires pending.call_model to be present"
+        );
+    }
+
+    #[test]
+    fn snapshot_coherence_rejects_awaiting_tools_without_execute() {
+        let pending = PendingToolTurn::default();
+        assert_eq!(
+            coherence_rejection(EnginePhase::AwaitingTools, &pending),
+            "phase AwaitingTools requires pending.execute to be present"
+        );
+    }
+
+    #[test]
+    fn snapshot_coherence_rejects_awaiting_summary_without_request() {
+        let pending = PendingToolTurn::default();
+        assert_eq!(
+            coherence_rejection(EnginePhase::AwaitingSummary, &pending),
+            "phase AwaitingSummary requires pending.summary_req to be present"
+        );
+    }
+
+    #[test]
+    fn snapshot_coherence_rejects_awaiting_summary_without_context() {
+        let pending = PendingToolTurn {
+            summary_req: Some(empty_summary_request()),
+            ..Default::default()
+        };
+        assert_eq!(
+            coherence_rejection(EnginePhase::AwaitingSummary, &pending),
+            "phase AwaitingSummary requires pending.summary_ctx to be present"
+        );
+    }
+
+    #[test]
+    fn snapshot_coherence_accepts_coherent_pairs() {
+        // Idle imposes no constraint, with empty or stray pendings.
+        assert!(
+            validate_snapshot_phase_coherence(EnginePhase::Idle, &PendingToolTurn::default())
+                .is_ok()
+        );
+        assert!(validate_snapshot_phase_coherence(
+            EnginePhase::Idle,
+            &PendingToolTurn {
+                call_model: Some(empty_model_request()),
+                ..Default::default()
+            },
+        )
+        .is_ok());
+        assert!(validate_snapshot_phase_coherence(
+            EnginePhase::AwaitingModel,
+            &PendingToolTurn {
+                call_model: Some(empty_model_request()),
+                ..Default::default()
+            },
+        )
+        .is_ok());
+        assert!(validate_snapshot_phase_coherence(
+            EnginePhase::AwaitingTools,
+            &PendingToolTurn {
+                execute: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .is_ok());
+        assert!(validate_snapshot_phase_coherence(
+            EnginePhase::AwaitingSummary,
+            &PendingToolTurn {
+                summary_req: Some(empty_summary_request()),
+                summary_ctx: Some(empty_compaction_context()),
+                ..Default::default()
+            },
+        )
+        .is_ok());
     }
 
     #[test]
