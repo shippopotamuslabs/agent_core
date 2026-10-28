@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context_store::make_preview;
 use crate::session::{AgentConfig, SessionCapabilities};
-use crate::tool_schema::{SchemaEntry, ToolSchemaSet};
+use crate::tool_schema::SchemaEntry;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolContextSummary {
@@ -28,46 +28,20 @@ pub struct ToolContextIndex {
     pub advertised_tools: Vec<ToolContextSummary>,
 }
 
-/// Build the tool-context index from the active schemas plus catalog text.
-///
-/// `tools_schema_json` is the currently active (callable) schemas and the
-/// sole source for `advertised_tools` — discovery must be real, so deferred
-/// tools are never listed up front and can only be surfaced via
-/// `tool_discovery_tool`. `catalog_json` is retained for the presence guard
-/// (a session with neither active tools nor a catalog has nothing to index).
-pub fn build_tool_context_index(
-    tools_schema_json: &str,
-    catalog_json: &str,
-    config: &AgentConfig,
-    capabilities: &SessionCapabilities,
-) -> Option<ToolContextIndex> {
-    // String-based public API preserved: parses its own input once at this
-    // boundary (a justified remaining parse — see ENC-289 notes). The
-    // per-turn engine path calls `build_tool_context_index_from_set` with the
-    // session-parsed entries and performs no text parsing.
-    //
-    // This wrapper is infallible by design (a preserved public boundary
-    // API, not session construction), so it parses leniently and
-    // per-channel: a contract violation degrades only its own channel,
-    // matching the legacy behavior where each channel was parsed
-    // separately. Session construction is the validating path and fails
-    // hard on any violation.
-    let schemas = ToolSchemaSet::parse_lenient(tools_schema_json, catalog_json);
-    let active = schemas.active.clone();
-    build_tool_context_index_from_set(&active, &schemas, config, capabilities)
-}
-
-/// Build the tool-context index from the session-parsed [`ToolSchemaSet`]
-/// plus the per-turn rendered active entries. Performs no JSON text parsing.
+/// Build the tool-context index from the per-turn rendered active entries.
+/// Performs no JSON text parsing: the session-parsed set is the only
+/// input, so there is one (strict) error contract for schema data.
 ///
 /// `active` is the rendered active/callable set — the sole source for
 /// `advertised_tools`, so deferred tools stay hidden until disclosure.
-/// `schemas` supplies the catalog presence guard. Nothing is stashed in the
-/// store (ENC-296): the host owns the registry and serves full schemas
-/// provider-side, so there is no engine-side retrieval reference to mint.
+/// `has_catalog_entries` is the catalog presence guard (a session with
+/// neither active tools nor a catalog has nothing to index). Nothing is
+/// stashed in the store (ENC-296): the host owns the registry and serves
+/// full schemas provider-side, so there is no engine-side retrieval
+/// reference to mint.
 pub fn build_tool_context_index_from_set(
     active: &[SchemaEntry],
-    schemas: &ToolSchemaSet,
+    has_catalog_entries: bool,
     config: &AgentConfig,
     capabilities: &SessionCapabilities,
 ) -> Option<ToolContextIndex> {
@@ -82,7 +56,7 @@ pub fn build_tool_context_index_from_set(
         .iter()
         .filter(|entry| !entry.name.is_empty())
         .collect();
-    if !schemas.catalog_has_entries() && advertised.is_empty() {
+    if !has_catalog_entries && advertised.is_empty() {
         return None;
     }
 

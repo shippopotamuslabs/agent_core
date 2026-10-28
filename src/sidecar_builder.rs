@@ -98,13 +98,13 @@ impl SidecarBuilder {
     ) -> Option<String> {
         // ENC-296: the index payload is advertisement-only (no schema text)
         // and browsable by design; oversized payloads spill under the
-        // generic ArtifactSnapshot kind with an explicit tool-index id prefix.
+        // dedicated ToolIndex kind so the kind describes the content.
         let payload = serde_json::to_string(index).ok()?;
         Some(enforce_byte_budget(
             store,
             &payload,
             budget,
-            ContextReferenceKind::ArtifactSnapshot,
+            ContextReferenceKind::ToolIndex,
             "tool-index",
             "tool_context_index",
         ))

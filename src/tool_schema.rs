@@ -179,11 +179,47 @@ const CATALOG_CHANNEL: &str = "tool_catalog_json";
 
 /// Validate parsed channel entries: each must be an object carrying a
 /// present, string, non-empty `"name"`, unique within the channel.
+/// The name half of the entry contract — present, non-blank after trim,
+/// unique within the channel — checked identically for the JSON-text
+/// channels and the typed FFI entries, so the two boundary paths can
+/// never drift on what a valid name is. Callers map the failure onto
+/// their own boundary error type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EntryNameError {
+    InvalidName { index: usize },
+    DuplicateName { name: String },
+}
+
+/// Stateful checker for one channel's entry sequence: feed each
+/// entry's name in order.
+#[derive(Debug, Default)]
+pub(crate) struct EntryNameChecker {
+    seen: std::collections::HashSet<String>,
+}
+
+impl EntryNameChecker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn check(&mut self, index: usize, name: &str) -> Result<(), EntryNameError> {
+        if name.trim().is_empty() {
+            return Err(EntryNameError::InvalidName { index });
+        }
+        if !self.seen.insert(name.to_string()) {
+            return Err(EntryNameError::DuplicateName {
+                name: name.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 fn validate_entries(
     channel: &'static str,
     items: Vec<serde_json::Value>,
 ) -> Result<Vec<SchemaEntry>, ToolSchemaError> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut names = EntryNameChecker::new();
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.into_iter().enumerate() {
         if !item.is_object() {
@@ -192,14 +228,15 @@ fn validate_entries(
         let name = item
             .get("name")
             .and_then(|name| name.as_str())
-            .filter(|name| !name.trim().is_empty())
             .ok_or(ToolSchemaError::InvalidName { channel, index })?;
-        if !seen.insert(name.to_string()) {
-            return Err(ToolSchemaError::DuplicateName {
-                channel,
-                name: name.to_string(),
-            });
-        }
+        names.check(index, name).map_err(|error| match error {
+            EntryNameError::InvalidName { index } => {
+                ToolSchemaError::InvalidName { channel, index }
+            }
+            EntryNameError::DuplicateName { name } => {
+                ToolSchemaError::DuplicateName { channel, name }
+            }
+        })?;
         entries.push(SchemaEntry::from(item));
     }
     Ok(entries)

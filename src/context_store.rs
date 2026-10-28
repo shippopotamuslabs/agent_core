@@ -34,6 +34,7 @@ pub enum ContextReferenceKind {
     TerminalOutput,
     HistorySnapshot,
     ArtifactSnapshot,
+    ToolIndex,
     FileOutline,
     FileChunk,
 }
@@ -83,6 +84,7 @@ pub fn is_browsable_context_kind(kind: &ContextReferenceKind) -> bool {
             | ContextReferenceKind::HistorySnapshot
             | ContextReferenceKind::TerminalOutput
             | ContextReferenceKind::ArtifactSnapshot
+            | ContextReferenceKind::ToolIndex
     )
 }
 
@@ -340,6 +342,7 @@ mod tests {
             ContextReferenceKind::TerminalOutput,
             ContextReferenceKind::HistorySnapshot,
             ContextReferenceKind::ArtifactSnapshot,
+            ContextReferenceKind::ToolIndex,
             ContextReferenceKind::FileOutline,
             ContextReferenceKind::FileChunk,
         ] {
@@ -348,6 +351,7 @@ mod tests {
                 | ContextReferenceKind::TerminalOutput
                 | ContextReferenceKind::HistorySnapshot
                 | ContextReferenceKind::ArtifactSnapshot
+                | ContextReferenceKind::ToolIndex
                 | ContextReferenceKind::FileOutline
                 | ContextReferenceKind::FileChunk => assert!(
                     is_browsable_context_kind(&kind),

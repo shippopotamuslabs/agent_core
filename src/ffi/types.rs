@@ -86,6 +86,7 @@ pub enum FfiContextReferenceKind {
     TerminalOutput,
     HistorySnapshot,
     ArtifactSnapshot,
+    ToolIndex,
     FileOutline,
     FileChunk,
 }
@@ -97,6 +98,7 @@ impl From<ContextReferenceKind> for FfiContextReferenceKind {
             ContextReferenceKind::TerminalOutput => FfiContextReferenceKind::TerminalOutput,
             ContextReferenceKind::HistorySnapshot => FfiContextReferenceKind::HistorySnapshot,
             ContextReferenceKind::ArtifactSnapshot => FfiContextReferenceKind::ArtifactSnapshot,
+            ContextReferenceKind::ToolIndex => FfiContextReferenceKind::ToolIndex,
             ContextReferenceKind::FileOutline => FfiContextReferenceKind::FileOutline,
             ContextReferenceKind::FileChunk => FfiContextReferenceKind::FileChunk,
         }
@@ -110,6 +112,7 @@ impl From<FfiContextReferenceKind> for ContextReferenceKind {
             FfiContextReferenceKind::TerminalOutput => ContextReferenceKind::TerminalOutput,
             FfiContextReferenceKind::HistorySnapshot => ContextReferenceKind::HistorySnapshot,
             FfiContextReferenceKind::ArtifactSnapshot => ContextReferenceKind::ArtifactSnapshot,
+            FfiContextReferenceKind::ToolIndex => ContextReferenceKind::ToolIndex,
             FfiContextReferenceKind::FileOutline => ContextReferenceKind::FileOutline,
             FfiContextReferenceKind::FileChunk => ContextReferenceKind::FileChunk,
         }
@@ -818,26 +821,29 @@ fn tool_schema_entry_value(entry: &FfiToolSchemaEntry) -> serde_json::Value {
 /// Convert typed boundary entries into parsed [`SchemaEntry`]s in one
 /// pass: each entry's schema object is built by [`tool_schema_entry_value`],
 /// then wrapped directly — no serialize-to-string / re-parse round-trip.
-/// Names are validated here (present, non-blank, unique): a violation is a
-/// typed `AgentException` naming the entry, never a silent empty channel.
+/// Names are validated by the shared [`crate::tool_schema::EntryNameChecker`]
+/// (the same check the JSON-text channels run): a violation is a typed
+/// `AgentException` naming the entry, never a silent empty channel.
 fn tool_schema_entries(
     entries: &[FfiToolSchemaEntry],
 ) -> Result<Vec<crate::tool_schema::SchemaEntry>, AgentException> {
     let mut converted = Vec::with_capacity(entries.len());
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut names = crate::tool_schema::EntryNameChecker::new();
     for (index, entry) in entries.iter().enumerate() {
-        if entry.name.trim().is_empty() {
-            return Err(AgentException::Internal {
-                detail: format!(
-                    "tool schema entry {index} has no valid \"name\" (missing or empty)"
-                ),
-            });
-        }
-        if !seen.insert(entry.name.as_str()) {
-            return Err(AgentException::Internal {
-                detail: format!("tool schema entry '{}' is a duplicate", entry.name),
-            });
-        }
+        names.check(index, &entry.name).map_err(|error| match error {
+            crate::tool_schema::EntryNameError::InvalidName { index } => {
+                AgentException::Internal {
+                    detail: format!(
+                        "tool schema entry {index} has no valid \"name\" (missing or empty)"
+                    ),
+                }
+            }
+            crate::tool_schema::EntryNameError::DuplicateName { name } => {
+                AgentException::Internal {
+                    detail: format!("tool schema entry '{name}' is a duplicate"),
+                }
+            }
+        })?;
         converted.push(crate::tool_schema::SchemaEntry::from(
             tool_schema_entry_value(entry),
         ));
