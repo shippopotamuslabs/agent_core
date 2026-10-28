@@ -12,7 +12,9 @@ mod state;
 pub(super) mod tool_results;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
-pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
+pub use state::{
+    EnginePhase, PendingToolTurn, SessionHandle, SessionIoParams, SessionTestSnapshot,
+};
 
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +50,7 @@ use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
 
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
+use crate::session_snapshot::SessionSnapshot;
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
@@ -57,7 +60,7 @@ use crate::tool_universe::{merge_tool_names_deduped, ToolUniverse};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
-use state::{EnginePhase, InnerSession, PendingToolTurn};
+use state::InnerSession;
 
 pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
@@ -217,6 +220,126 @@ impl AgentEngine {
                 universe,
                 sidecar_builder: SidecarBuilder::new(),
                 compaction: compaction::CompactionState::new(),
+            })),
+        })
+    }
+
+    /// Export the session's full restorable state as a typed
+    /// [`SessionSnapshot`] (ENC-305 D6): an infallible projection from
+    /// the locked `InnerSession`. Tool data is sourced from the universe
+    /// (the live tool world): `config` is the effective config, so the
+    /// snapshot is self-describing, and `schemas` / `active_tool_names`
+    /// are the universe's entries and live active set. The io triple
+    /// comes from the stored `io` (whose schema set was consumed at
+    /// construction and holds no live data).
+    pub fn export_snapshot(&self, handle: &SessionHandle) -> SessionSnapshot {
+        let g = handle.lock_inner();
+        SessionSnapshot {
+            session: g.session.clone(),
+            config: g.effective_tool_config(),
+            capabilities: g.capabilities.clone(),
+            provider: g.io.provider.clone(),
+            context_window_tokens: g.io.context_window_tokens,
+            system_prompt: g.io.system_prompt.clone(),
+            schemas: g.universe.schemas().clone(),
+            active_tool_names: g.universe.active_names().to_vec(),
+            context_store: g.context_store.clone(),
+            state_ledger: g.state_ledger.clone(),
+            guardrails: g.guardrails.clone(),
+            loop_metrics: g.loop_metrics.clone(),
+            phase: g.phase,
+            pending: g.pending.clone(),
+            sidecar_builder: g.sidecar_builder.clone(),
+            model_requests_this_turn: g.model_requests_this_turn,
+            events: g.events.clone(),
+            turn_index: g.turn_index,
+            cancelled: g.cancelled,
+            terminal_action: g.terminal_action.clone(),
+            last_model_response_greedy_tool_names: g.last_model_response_greedy_tool_names.clone(),
+            tools_blocked_nudges_this_turn: g.tools_blocked_nudges_this_turn,
+            compaction_passes_this_turn: g.compaction_passes_this_turn,
+            destructive_tiers_this_turn: g.destructive_tiers_this_turn,
+            suppress_summary_tier: g.suppress_summary_tier,
+        }
+    }
+
+    /// Import a [`SessionSnapshot`] as a live session (ENC-305 D6).
+    ///
+    /// Validation is EXACTLY construction's: the snapshot's schemas and
+    /// the semantics carried by its config go through
+    /// [`ToolUniverse::build`], and the captured active set then replaces
+    /// the built universe's initial active set via `restore_active`.
+    /// Stored config/io are reset exactly as `create_session` leaves
+    /// them (semantics taken into the universe — `mem::take` leaves the
+    /// agnostic default, as `ToolSemanticsConfig::default()` IS the
+    /// agnostic bundle — catalog defaulted, io schemas the empty set).
+    /// The `InnerSession` is assembled DIRECTLY from the snapshot: no
+    /// ledger re-seeding, no counter resets.
+    pub fn import_snapshot(
+        &self,
+        snapshot: SessionSnapshot,
+    ) -> Result<SessionHandle, ToolSemanticsError> {
+        let SessionSnapshot {
+            session,
+            mut config,
+            capabilities,
+            provider,
+            context_window_tokens,
+            system_prompt,
+            schemas,
+            active_tool_names,
+            context_store,
+            state_ledger,
+            guardrails,
+            loop_metrics,
+            phase,
+            pending,
+            sidecar_builder,
+            model_requests_this_turn,
+            events,
+            turn_index,
+            cancelled,
+            terminal_action,
+            last_model_response_greedy_tool_names,
+            tools_blocked_nudges_this_turn,
+            compaction_passes_this_turn,
+            destructive_tiers_this_turn,
+            suppress_summary_tier,
+        } = snapshot;
+        let semantics = std::mem::take(&mut config.tool_semantics);
+        config.tool_catalog = ToolCatalog::default();
+        let mut universe = ToolUniverse::build(schemas, semantics)?;
+        universe.restore_active(active_tool_names);
+        let io = SessionIoParams {
+            provider,
+            context_window_tokens,
+            schemas: ToolSchemaSet::from_entries(Vec::new()),
+            system_prompt,
+        };
+        Ok(SessionHandle {
+            inner: Arc::new(Mutex::new(InnerSession {
+                session,
+                config,
+                capabilities,
+                io,
+                guardrails,
+                loop_metrics,
+                phase,
+                pending,
+                context_store,
+                state_ledger,
+                model_requests_this_turn,
+                events,
+                turn_index,
+                cancelled,
+                terminal_action,
+                last_model_response_greedy_tool_names,
+                tools_blocked_nudges_this_turn,
+                universe,
+                sidecar_builder,
+                compaction_passes_this_turn,
+                destructive_tiers_this_turn,
+                suppress_summary_tier,
             })),
         })
     }

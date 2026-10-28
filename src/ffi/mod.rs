@@ -91,6 +91,40 @@ impl FfiAgentEngine {
         Ok(Arc::new(FfiSession { handle }))
     }
 
+    /// Export the session's typed snapshot (ENC-305 D7) as its canonical
+    /// serde JSON — the only bulk state crossing this FFI, following
+    /// `create_session`'s `session_context_json` precedent of typed core
+    /// values as serde text. Serialization of the typed struct is
+    /// infallible in practice; a failure surfaces as a typed
+    /// `AgentException::Internal`, never a fallback payload.
+    pub fn export_snapshot(&self, session: &FfiSession) -> Result<String, AgentException> {
+        let snapshot = self.inner.export_snapshot(&session.handle);
+        serde_json::to_string(&snapshot).map_err(|error| AgentException::Internal {
+            detail: format!("session snapshot serialization failed: {error}"),
+        })
+    }
+
+    /// Import a snapshot JSON produced by [`FfiAgentEngine::export_snapshot`]
+    /// (ENC-305 D7). Bad JSON is an `AgentException::Internal` naming the
+    /// parse failure (no silent default); an engine-level rejection maps
+    /// exactly as `create_session` maps `ToolSemanticsError`.
+    pub fn import_snapshot(
+        &self,
+        snapshot_json: String,
+    ) -> Result<Arc<FfiSession>, AgentException> {
+        let snapshot: crate::session_snapshot::SessionSnapshot =
+            serde_json::from_str(&snapshot_json).map_err(|error| AgentException::Internal {
+                detail: format!("invalid session snapshot JSON: {error}"),
+            })?;
+        let handle =
+            self.inner
+                .import_snapshot(snapshot)
+                .map_err(|error| AgentException::Internal {
+                    detail: format!("invalid tool semantics: {error:?}"),
+                })?;
+        Ok(Arc::new(FfiSession { handle }))
+    }
+
     pub fn next_action(&self, session: &FfiSession) -> FfiAgentAction {
         self.inner.next_action(&session.handle).into()
     }
