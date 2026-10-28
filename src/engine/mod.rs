@@ -163,10 +163,7 @@ impl AgentEngine {
         // boundary (`InnerSession::effective_tool_config`), never the
         // stored copies.
         let schemas = std::mem::replace(&mut io.schemas, ToolSchemaSet::from_entries(Vec::new()));
-        let semantics = std::mem::replace(
-            &mut config.tool_semantics,
-            crate::tool_semantics::ToolSemanticsConfig::agnostic(),
-        );
+        let semantics = std::mem::take(&mut config.tool_semantics);
         config.tool_catalog = ToolCatalog::default();
         let universe = ToolUniverse::build(schemas, semantics)?;
         let mut state_ledger = StateLedger::default();
