@@ -23,6 +23,7 @@ use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord};
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
@@ -36,7 +37,7 @@ pub(super) struct AppendAssistantInputs<'a> {
     pub events: &'a mut Vec<AgentEvent>,
     pub enable_loop_hooks: bool,
     pub lifecycle_hooks_supported: bool,
-    pub greedy_tool_names: &'a mut Vec<String>,
+    pub greedy_tool_names: &'a mut Vec<ToolName>,
 }
 
 pub(super) fn append_assistant_message(
@@ -96,24 +97,19 @@ pub(super) fn append_assistant_message(
         });
     }
 
+    // J1: greedy capture keys off the same model-output constructor as
+    // gating, so `webSearch` records `web_search` (matching policy names).
     *greedy_tool_names = merged_tool_calls
         .iter()
-        .map(|c| normalize_tool_name_hint(&c.name))
+        .filter_map(|c| ToolName::from_model_output(&c.name).ok())
         .collect();
 }
 
-fn normalize_tool_name_hint(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(r) = s.strip_prefix("functions.") {
-            s = r.to_string();
-        } else if let Some(r) = s.strip_prefix("tools.") {
-            s = r.to_string();
-        } else {
-            break;
-        }
-    }
-    s.to_lowercase().replace(['-', ' '], "_")
+/// Gate identity for one raw model tool name (J1): the single
+/// model-output constructor (prefix-strip + snake-split + identity fold).
+/// A blank result is not a name at all.
+fn gate_tool_name(raw: &str) -> Option<ToolName> {
+    ToolName::from_model_output(raw).ok()
 }
 
 /// Inputs for the repair/discovery loop. The catalog is built once by the
@@ -121,7 +117,7 @@ fn normalize_tool_name_hint(raw: &str) -> String {
 pub(super) struct RepairTurnInputs<'a> {
     pub semantics: &'a ToolSemanticsConfig,
     pub catalog: &'a ToolCatalog,
-    pub active_tool_names: &'a mut Vec<String>,
+    pub active_tool_names: &'a mut Vec<ToolName>,
     pub turn_index: u32,
     pub default_tool_timeout_ms: Option<u64>,
     pub tool_retry_limit: u32,
@@ -153,7 +149,7 @@ pub(super) fn repair_tool_turn(
     } = inputs;
     // Hoisted out of the per-call loop (was cloned + rebuilt per call).
     let discovery = semantics.discovery.clone();
-    let discovery_name = discovery.as_ref().map(|d| d.tool_name.as_str());
+    let discovery_name = discovery.as_ref().map(|d| d.tool_name.clone());
     let discovery_always_callable = discovery
         .as_ref()
         .map(|d| d.always_callable)
@@ -170,13 +166,21 @@ pub(super) fn repair_tool_turn(
         // the currently active set (the discovery tool itself is always callable).
         // Only enforce when active_tool_names has actually been initialized — empty
         // active set means the host has not opted into the new contract yet.
-        let companion_callable = is_companion_callable_tool(&discovery, &raw.name);
+        // Both sides are canonical identities, so this is plain equality.
+        let tool_name = gate_tool_name(&raw.name);
+        let companion_callable = tool_name
+            .as_ref()
+            .is_some_and(|name| is_companion_callable_tool(&discovery, name));
         if companion_callable {
-            merge_active_tool_names(active_tool_names, [raw.name.clone()]);
+            if let Some(name) = tool_name.clone() {
+                merge_active_tool_names(active_tool_names, [name]);
+            }
         }
         let callable_now = !active_tool_names.is_empty()
-            && (active_tool_names.iter().any(|n| n == &raw.name)
-                || (discovery_always_callable && Some(raw.name.as_str()) == discovery_name)
+            && (tool_name
+                .as_ref()
+                .is_some_and(|name| active_tool_names.iter().any(|active| active == name))
+                || (discovery_always_callable && tool_name.as_ref() == discovery_name.as_ref())
                 || companion_callable);
         if !active_tool_names.is_empty() && !callable_now {
             events.push(AgentEvent::ToolSoftFailure {
@@ -184,12 +188,12 @@ pub(super) fn repair_tool_turn(
                 turn_index,
             });
             let mut available = active_tool_names.clone();
-            if let Some(name) = discovery_name {
-                if !available.iter().any(|n| n == name) {
-                    available.insert(0, name.to_string());
+            if let Some(name) = discovery_name.clone() {
+                if !available.iter().any(|n| n == &name) {
+                    available.insert(0, name);
                 }
             }
-            let error = if let Some(name) = discovery_name {
+            let error = if let Some(name) = discovery_name.as_ref() {
                 format!("Tool '{}' is not active. Call {name} first.", raw.name)
             } else {
                 format!("Tool '{}' is not active.", raw.name)
@@ -315,7 +319,7 @@ pub(super) struct IngestArmInputs<'a> {
     pub state_ledger: &'a mut StateLedger,
     pub events: &'a mut Vec<AgentEvent>,
     pub turn_index: u32,
-    pub last_model_response_greedy_tool_names: &'a [String],
+    pub last_model_response_greedy_tool_names: &'a [ToolName],
 }
 
 /// FRG-47 stage: the `ParseFailed` ingest arm. Applies message/ledger/
@@ -464,7 +468,7 @@ pub(super) struct RejectFlushInputs<'a> {
     pub turn_index: u32,
     pub parallel: usize,
     pub rejects: usize,
-    pub last_model_response_greedy_tool_names: &'a [String],
+    pub last_model_response_greedy_tool_names: &'a [ToolName],
 }
 
 /// FRG-47 stage: the reject-only synthetic turn tail. Applies guardrail

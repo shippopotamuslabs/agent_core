@@ -14,6 +14,7 @@ use crate::events::AgentEvent;
 use crate::json_repair::repair_json;
 use crate::message::RepairRecord;
 use crate::schema_coerce::coerce_to_schema;
+use crate::tool_name::{normalize_to_snake_case, strip_tool_prefixes, ToolName};
 use crate::tool_name_match::{best_catalog_match, FUZZY_AUTO_ACCEPT};
 use crate::tool_semantics::{schema_hint_for_semantics, SpecialValueRepair, ToolSemanticsConfig};
 use crate::turn_io::RawToolCall;
@@ -118,7 +119,7 @@ pub fn canonicalize_tool_call_with_semantics(
 
     (
         CanonicalizeToolCallOutcome::Ok(CanonicalizedToolCall {
-            resolved_name,
+            resolved_name: resolved_name.as_str().to_string(),
             arguments_json: arguments.arguments_json,
             arguments_value: arguments.value,
             repair_metadata,
@@ -129,7 +130,7 @@ pub fn canonicalize_tool_call_with_semantics(
 }
 
 pub fn canonicalize_raw_arguments_with_semantics(
-    tool_name: &str,
+    tool_name: &ToolName,
     raw_arguments_json: &str,
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
@@ -216,7 +217,7 @@ fn only_schema_defaults_added(before: &Value, after: &Value, hint: &ToolSchemaHi
 
 enum ToolNameResolution {
     Resolved {
-        name: String,
+        name: ToolName,
         repair_metadata: Option<RepairRecord>,
         event: Option<AgentEvent>,
     },
@@ -231,29 +232,38 @@ fn resolve_tool_name_with_semantics(
     semantics: &ToolSemanticsConfig,
     mode: ToolCallCanonicalizeMode,
 ) -> ToolNameResolution {
-    let stripped = strip_tool_prefixes(raw);
-    let normalized = normalize_to_snake_case(&stripped);
+    // J1: raw model output enters through the single model-output
+    // constructor (prefix-strip + snake-split + identity fold). A blank
+    // result (raw was punctuation/whitespace only) is not a name at all.
+    // `normalized` stays the snake string for the fuzzy-match input and the
+    // reject message (it equals `name.as_str()` whenever `name` is `Some`).
+    let normalized = normalize_to_snake_case(&strip_tool_prefixes(raw));
+    let name = ToolName::from_model_output(raw).ok();
 
-    if let Some(spec) = catalog.resolve(&normalized) {
-        return ToolNameResolution::Resolved {
-            name: spec.name.clone(),
-            repair_metadata: None,
-            event: None,
-        };
+    if let Some(name) = name.as_ref() {
+        if let Some(spec) = catalog.resolve(name) {
+            return ToolNameResolution::Resolved {
+                name: spec.name.clone(),
+                repair_metadata: None,
+                event: None,
+            };
+        }
     }
 
     if catalog.all().is_empty() || matches!(mode, ToolCallCanonicalizeMode::ProviderIngress) {
-        return ToolNameResolution::Resolved {
-            name: normalized,
-            repair_metadata: None,
-            event: None,
-        };
+        if let Some(name) = name {
+            return ToolNameResolution::Resolved {
+                name,
+                repair_metadata: None,
+                event: None,
+            };
+        }
     }
 
     if let Some((best, score)) = best_catalog_match(&normalized, catalog) {
         if score >= FUZZY_AUTO_ACCEPT {
             return ToolNameResolution::Resolved {
-                name: best.to_string(),
+                name: best.clone(),
                 repair_metadata: Some(RepairRecord {
                     original_name: raw.trim().to_string(),
                     applied_aliases: vec![],
@@ -261,7 +271,7 @@ fn resolve_tool_name_with_semantics(
                 }),
                 event: Some(AgentEvent::ToolRepaired {
                     original_name: raw.to_string(),
-                    resolved_name: best.to_string(),
+                    resolved_name: best.as_str().to_string(),
                     confidence: score as f32,
                 }),
             };
@@ -270,7 +280,10 @@ fn resolve_tool_name_with_semantics(
             error_json: reject_json(
                 &format!(
                     "Unknown tool '{}' (best match '{}' score {:.2} < {:.2})",
-                    raw, best, score, FUZZY_AUTO_ACCEPT
+                    raw,
+                    best.as_str(),
+                    score,
+                    FUZZY_AUTO_ACCEPT
                 ),
                 catalog,
             ),
@@ -292,51 +305,6 @@ fn resolve_tool_name_with_semantics(
     }
 }
 
-fn strip_tool_prefixes(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(rest) = s.strip_prefix("functions.") {
-            s = rest.to_string();
-        } else if let Some(rest) = s.strip_prefix("tools.") {
-            s = rest.to_string();
-        } else {
-            return s;
-        }
-    }
-}
-
-fn normalize_to_snake_case(input: &str) -> String {
-    let mut result = String::new();
-    let chars: Vec<char> = input.trim().chars().collect();
-    for (index, &ch) in chars.iter().enumerate() {
-        if ch == '-' || ch == ' ' {
-            if !result.ends_with('_') && !result.is_empty() {
-                result.push('_');
-            }
-            continue;
-        }
-        if ch.is_uppercase() {
-            let prev_lower = index > 0 && chars[index - 1].is_lowercase();
-            let next_lower = index + 1 < chars.len() && chars[index + 1].is_lowercase();
-            if (prev_lower || (index > 0 && chars[index - 1].is_ascii_uppercase() && next_lower))
-                && !result.ends_with('_')
-                && !result.is_empty()
-            {
-                result.push('_');
-            }
-            for lower in ch.to_lowercase() {
-                result.push(lower);
-            }
-        } else if ch.is_alphanumeric() || ch == '_' {
-            result.push(ch);
-        }
-    }
-    while result.contains("__") {
-        result = result.replace("__", "_");
-    }
-    result.trim_matches('_').to_string()
-}
-
 fn move_alias(
     object: &mut serde_json::Map<String, Value>,
     alias: &str,
@@ -356,17 +324,20 @@ fn move_alias(
 }
 
 fn semantic_rule<'a>(
-    tool: &str,
+    tool: &ToolName,
     semantics: &'a ToolSemanticsConfig,
 ) -> Option<&'a crate::tool_semantics::ToolArgumentRepairRule> {
+    // Both sides are canonical identities (rule names validated at the
+    // boundary, inputs canonicalized by the repair pipeline), so this is
+    // plain equality — no folding (ENC-299).
     semantics
         .argument_repairs
         .iter()
-        .find(|rule| normalize_to_snake_case(&rule.tool_name) == normalize_to_snake_case(tool))
+        .find(|rule| rule.tool_name == *tool)
 }
 
 fn apply_semantic_aliases(
-    tool: &str,
+    tool: &ToolName,
     semantics: &ToolSemanticsConfig,
     value: &mut Value,
     repaired: &mut bool,
@@ -384,7 +355,7 @@ fn apply_semantic_aliases(
 }
 
 fn apply_semantic_special_values(
-    tool: &str,
+    tool: &ToolName,
     semantics: &ToolSemanticsConfig,
     value: &mut Value,
     repaired: &mut bool,
@@ -428,7 +399,7 @@ fn apply_semantic_special_values(
 }
 
 fn validate_semantic_stringified_arrays(
-    tool: &str,
+    tool: &ToolName,
     semantics: &ToolSemanticsConfig,
     value: &Value,
 ) -> Result<(), CanonicalizeArgumentsError> {
@@ -463,7 +434,7 @@ fn validate_semantic_stringified_arrays(
 }
 
 fn validate_required_types(
-    tool_name: &str,
+    tool_name: &ToolName,
     value: &Value,
     catalog: &ToolCatalog,
 ) -> Result<(), CanonicalizeArgumentsError> {
@@ -471,7 +442,7 @@ fn validate_required_types(
 }
 
 fn validate_required_types_with_semantics(
-    tool_name: &str,
+    tool_name: &ToolName,
     value: &Value,
     semantics: &ToolSemanticsConfig,
 ) -> Result<(), CanonicalizeArgumentsError> {
@@ -485,7 +456,7 @@ fn validate_required_types_with_semantics(
 /// Shared body for the required-field type validators; only the hint source
 /// (catalog vs. semantics) differs between callers.
 fn validate_required_types_with_hint(
-    tool_name: &str,
+    tool_name: &ToolName,
     value: &Value,
     hint: Option<ToolSchemaHint>,
 ) -> Result<(), CanonicalizeArgumentsError> {
@@ -520,21 +491,21 @@ fn validate_required_types_with_hint(
     Ok(())
 }
 
-fn schema_hint_for(tool_name: &str, catalog: &ToolCatalog) -> Option<ToolSchemaHint> {
+fn schema_hint_for(tool_name: &ToolName, catalog: &ToolCatalog) -> Option<ToolSchemaHint> {
     catalog
         .resolve(tool_name)
         .and_then(|spec| spec.schema_hint.clone())
 }
 
 fn canonical_arguments_json_with_semantics(
-    tool: &str,
+    tool: &ToolName,
     value: &Value,
     semantics: &ToolSemanticsConfig,
 ) -> String {
     let Some(shape) = semantics
         .canonical_shapes
         .iter()
-        .find(|shape| normalize_to_snake_case(&shape.tool_name) == normalize_to_snake_case(tool))
+        .find(|shape| shape.tool_name == *tool)
     else {
         return value.to_string();
     };

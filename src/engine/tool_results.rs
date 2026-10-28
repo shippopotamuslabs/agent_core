@@ -27,6 +27,7 @@ use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolR
 use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::session::AgentSession;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::truncate::truncate_tool_result_json;
 
@@ -119,7 +120,12 @@ pub(super) fn process_one_result(
         context_store,
         pending_artifact_ids,
     } = inputs;
-    let spill_stored_copy_only = crate::tool_semantics::result_policy_for(semantics, &call.name)
+    // J1: policy lookup over the call-record name goes through the
+    // model-output constructor (punctuated input resolves instead of
+    // silently missing policy); a blank name simply matches no policy.
+    let spill_stored_copy_only = ToolName::from_model_output(&call.name)
+        .ok()
+        .and_then(|name| crate::tool_semantics::result_policy_for(semantics, &name))
         .map(|policy| policy.spill_stored_copy_only)
         .unwrap_or(false);
     let spilled = if spill_stored_copy_only {
@@ -149,15 +155,19 @@ pub(super) fn process_one_result(
 
     if semantics.artifact.is_some() {
         // ENC-288: parse each payload once; typed accessors downstream.
+        // m2: the call-record name enters as a ToolName (model-output repair,
+        // like the policy lookup above); unparseable names record nothing.
         let args = ParsedToolArgs::parse(&call.arguments_json);
         let result = ParsedToolResult::parse(&res.result_json);
-        record_artifact_progress_with_parsed(
-            pending_artifact_ids,
-            semantics,
-            &call.name,
-            &args,
-            &result,
-        );
+        if let Ok(tool_name) = ToolName::from_model_output(&call.name) {
+            record_artifact_progress_with_parsed(
+                pending_artifact_ids,
+                semantics,
+                &tool_name,
+                &args,
+                &result,
+            );
+        }
     }
 
     let mut message = AgentMessage {
@@ -192,7 +202,7 @@ pub(super) struct ApplyProcessedInputs<'a> {
     pub session: &'a mut AgentSession,
     pub enable_state_ledger: bool,
     pub state_ledger: &'a mut StateLedger,
-    pub active_tool_names: &'a mut Vec<String>,
+    pub active_tool_names: &'a mut Vec<ToolName>,
     pub events: &'a mut Vec<AgentEvent>,
     pub last_batch_tool_message_index: &'a mut Option<usize>,
     pub spill_tokens_before: u32,

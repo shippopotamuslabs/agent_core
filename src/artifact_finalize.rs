@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::message::ToolCallRecord;
 use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
+use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 
 /// Boundary entry: parses both payloads once, then delegates to
@@ -20,21 +21,28 @@ pub fn record_artifact_progress_with_semantics(
 ) {
     let args = ParsedToolArgs::parse(arguments_json);
     let result = ParsedToolResult::parse(result_json);
-    record_artifact_progress_with_parsed(pending, semantics, tool_name, &args, &result);
+    // String-boundary entry: the name arrives canonical, so ToolName::new
+    // (no model-output repair); unparseable names record nothing.
+    if let Ok(name) = ToolName::new(tool_name) {
+        record_artifact_progress_with_parsed(pending, semantics, &name, &args, &result);
+    }
 }
 
 /// Hot-path entry over already-parsed payloads (no re-parse).
+/// The tool identity is a [`ToolName`]: callers construct it from the
+/// call-record name via [`ToolName::from_model_output`] (model output) or
+/// [`ToolName::new`] (canonical boundary names).
 pub fn record_artifact_progress_with_parsed(
     pending: &mut HashSet<String>,
     semantics: &ToolSemanticsConfig,
-    tool_name: &str,
+    tool_name: &ToolName,
     args: &ParsedToolArgs,
     result: &ParsedToolResult,
 ) {
     let Some(artifact) = &semantics.artifact else {
         return;
     };
-    if tool_name == artifact.start_tool_name {
+    if *tool_name == artifact.start_tool_name {
         if let Some(id) = extract_success_field(
             result.value(),
             &artifact.status_field,
@@ -43,7 +51,7 @@ pub fn record_artifact_progress_with_parsed(
         ) {
             pending.insert(id);
         }
-    } else if tool_name == artifact.append_tool_name {
+    } else if *tool_name == artifact.append_tool_name {
         let Some(complete) = parse_success_bool_field(
             result,
             &artifact.status_field,
@@ -128,7 +136,7 @@ pub fn synthetic_finalize_calls_with_semantics(
             let arguments_json = finalize_arguments_json(artifact, id);
             ToolCallRecord {
                 call_id: format!("{}{}", artifact.synthetic_call_id_prefix, id),
-                name: artifact.append_tool_name.clone(),
+                name: artifact.append_tool_name.as_str().to_string(),
                 arguments_json,
                 attempt_metadata: None,
                 repair_metadata: None,

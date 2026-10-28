@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{de::Error as _, Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use crate::catalog::{ToolSchemaHint, ToolSpec};
+use crate::tool_name::ToolName;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSemanticsConfig {
@@ -31,38 +32,56 @@ impl ToolSemanticsConfig {
         }
     }
 
+    /// Parse a semantics config, tracking the serde field path (m5): a
+    /// blank [`ToolName`] fails at this JSON boundary, and the error names
+    /// the offending field (e.g. `artifact.append_tool_name`) instead of a
+    /// bare line/column.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let deserializer = &mut serde_json::Deserializer::from_str(json);
+        serde_path_to_error::deserialize(deserializer)
+            .map_err(|error| serde_json::Error::custom(error.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), ToolSemanticsError> {
-        let mut names: HashMap<String, String> = HashMap::new();
+        // Identity is ToolName equality: specs and aliases arrive canonical,
+        // so validation compares directly with no per-site folding (ENC-299:
+        // the fold lives in ToolName::new).
+        let mut names: HashMap<&ToolName, &ToolName> = HashMap::new();
         for tool in &self.catalog.tools {
-            let normalized = normalize_tool_name(&tool.name);
-            if names
-                .insert(normalized.clone(), tool.name.clone())
-                .is_some()
-            {
+            if names.insert(&tool.name, &tool.name).is_some() {
                 return Err(ToolSemanticsError::DuplicateToolName {
-                    normalized_name: normalized,
+                    normalized_name: tool.name.as_str().to_string(),
                 });
             }
         }
 
-        let mut aliases: HashMap<String, String> = HashMap::new();
+        let mut aliases: HashMap<&ToolName, &ToolName> = HashMap::new();
         for tool in &self.catalog.tools {
             for alias in &tool.aliases {
-                let normalized = normalize_tool_name(alias);
-                if let Some(first) = aliases.get(&normalized) {
-                    if first != &tool.name {
+                if let Some(first) = aliases.get(alias) {
+                    if *first != &tool.name {
                         return Err(ToolSemanticsError::AliasCollision {
-                            alias: alias.clone(),
-                            first_tool: first.clone(),
-                            second_tool: tool.name.clone(),
+                            alias: alias.as_str().to_string(),
+                            first_tool: first.as_str().to_string(),
+                            second_tool: tool.name.as_str().to_string(),
                         });
                     }
                 } else {
-                    aliases.insert(normalized, tool.name.clone());
+                    // ENC-299 D5: an alias colliding with another tool's
+                    // canonical name is the same collision — without this, the
+                    // first-alias-wins catalog index would silently shadow the
+                    // canonical owner post-validation. An alias equal to its
+                    // OWN canonical name is harmless and stays allowed.
+                    if let Some(owner) = names.get(alias) {
+                        if *owner != &tool.name {
+                            return Err(ToolSemanticsError::AliasCollision {
+                                alias: alias.as_str().to_string(),
+                                first_tool: owner.as_str().to_string(),
+                                second_tool: tool.name.as_str().to_string(),
+                            });
+                        }
+                    }
+                    aliases.insert(alias, &tool.name);
                 }
             }
         }
@@ -81,14 +100,25 @@ impl ToolSemanticsConfig {
         }
 
         if let Some(artifact) = &self.artifact {
-            for (name, value) in [
-                ("start_tool_name", &artifact.start_tool_name),
-                ("append_tool_name", &artifact.append_tool_name),
-                ("id_field", &artifact.id_field),
-                ("append_blocks_field", &artifact.append_blocks_field),
-                ("completion_field", &artifact.completion_field),
+            // ToolName fields are non-empty by construction (blank is a
+            // boundary error); the wire-name fields keep the explicit check.
+            for (name, empty) in [
+                (
+                    "start_tool_name",
+                    artifact.start_tool_name.as_str().is_empty(),
+                ),
+                (
+                    "append_tool_name",
+                    artifact.append_tool_name.as_str().is_empty(),
+                ),
+                ("id_field", artifact.id_field.is_empty()),
+                (
+                    "append_blocks_field",
+                    artifact.append_blocks_field.is_empty(),
+                ),
+                ("completion_field", artifact.completion_field.is_empty()),
             ] {
-                if value.is_empty() {
+                if empty {
                     return Err(ToolSemanticsError::InvalidArtifactConfig {
                         message: format!("artifact {name} must not be empty"),
                     });
@@ -106,6 +136,71 @@ impl ToolSemanticsConfig {
 
         Ok(())
     }
+
+    /// Referential validation (ENC-299 D4): every tool name referenced by a
+    /// configured semantics section must resolve — either to a catalog tool
+    /// (canonical name or declared alias) or to an active schema name.
+    ///
+    /// Only enforced when the containing section is present/non-empty, so the
+    /// agnostic config passes. The engine runs this in `create_session`
+    /// after [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics),
+    /// where the catalog and the parsed schema set meet for the first time.
+    pub fn validate_references(
+        &self,
+        catalog: &crate::catalog::ToolCatalog,
+        schema_names: &[ToolName],
+    ) -> Result<(), ToolSemanticsError> {
+        let mut known: HashSet<&ToolName> = HashSet::new();
+        for spec in catalog.all() {
+            known.insert(&spec.name);
+            for alias in &spec.aliases {
+                known.insert(alias);
+            }
+        }
+        for name in schema_names {
+            if !name.is_empty() {
+                known.insert(name);
+            }
+        }
+        let check = |section: &str, name: &ToolName| -> Result<(), ToolSemanticsError> {
+            if !known.contains(name) {
+                return Err(ToolSemanticsError::UnknownToolReference {
+                    section: section.to_string(),
+                    name: name.as_str().to_string(),
+                });
+            }
+            Ok(())
+        };
+        if let Some(discovery) = &self.discovery {
+            check("discovery.tool_name", &discovery.tool_name)?;
+            for companion in &discovery.companion_callable_tools {
+                check("discovery.companion_callable_tools", companion)?;
+            }
+        }
+        if let Some(artifact) = &self.artifact {
+            check("artifact.start_tool_name", &artifact.start_tool_name)?;
+            check("artifact.append_tool_name", &artifact.append_tool_name)?;
+        }
+        for rule in &self.argument_repairs {
+            check("argument_repairs.tool_name", &rule.tool_name)?;
+        }
+        for shape in &self.canonical_shapes {
+            check("canonical_shapes.tool_name", &shape.tool_name)?;
+        }
+        for policy in &self.result_policies {
+            check("result_policies.tool_name", &policy.tool_name)?;
+        }
+        if let Some(squash) = self.compaction.artifact_squash.as_ref() {
+            check(
+                "compaction.artifact_squash.append_tool_name",
+                &squash.append_tool_name,
+            )?;
+        }
+        for greedy in &self.greedy_extension_tools {
+            check("greedy_extension_tools.tool_name", &greedy.tool_name)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for ToolSemanticsConfig {
@@ -121,18 +216,18 @@ pub struct ToolCatalogConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDiscoverySemantics {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub request_field_name: String,
     pub always_callable: bool,
     /// Tools that may be called without a prior `tool_discovery_tool` activation (e.g. context retrieval).
     #[serde(default)]
-    pub companion_callable_tools: Vec<String>,
+    pub companion_callable_tools: Vec<ToolName>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactToolSemantics {
-    pub start_tool_name: String,
-    pub append_tool_name: String,
+    pub start_tool_name: ToolName,
+    pub append_tool_name: ToolName,
     pub id_field: String,
     pub append_blocks_field: String,
     pub completion_field: String,
@@ -144,7 +239,7 @@ pub struct ArtifactToolSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolArgumentRepairRule {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub aliases: Vec<ParameterAlias>,
     pub special_values: Vec<SpecialValueRepair>,
 }
@@ -165,13 +260,13 @@ pub enum SpecialValueRepair {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCanonicalShape {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub ordered_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultPolicy {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub spill_stored_copy_only: bool,
     pub skip_result_truncation: bool,
     pub preserve_in_micro_compaction: bool,
@@ -184,7 +279,7 @@ pub struct ToolCompactionSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactSquashSemantics {
-    pub append_tool_name: String,
+    pub append_tool_name: ToolName,
     pub id_field: String,
     pub blocks_field: String,
     pub total_blocks_result_field: String,
@@ -197,7 +292,7 @@ pub struct ArtifactSquashSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolGreedyExtensionSemantics {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub extra_turns: u32,
 }
 
@@ -211,6 +306,12 @@ pub enum ToolSemanticsError {
         first_tool: String,
         second_tool: String,
     },
+    /// A semantics section references a tool that is neither a catalog tool
+    /// (canonical name or alias) nor an active schema name (ENC-299 D4).
+    UnknownToolReference {
+        section: String,
+        name: String,
+    },
     InvalidDiscoveryConfig {
         message: String,
     },
@@ -220,10 +321,6 @@ pub enum ToolSemanticsError {
     InvalidResultPolicy {
         message: String,
     },
-}
-
-pub(crate) fn normalize_tool_name(s: &str) -> String {
-    s.to_lowercase().replace(['-', ' '], "_")
 }
 
 #[cfg(test)]
@@ -244,25 +341,25 @@ pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
 }
 
 pub(crate) fn schema_hint_for_semantics(
-    tool_name: &str,
+    tool_name: &ToolName,
     config: &ToolSemanticsConfig,
 ) -> Option<ToolSchemaHint> {
     config
         .catalog
         .tools
         .iter()
-        .find(|tool| normalize_tool_name(&tool.name) == normalize_tool_name(tool_name))
+        .find(|tool| tool.name == *tool_name)
         .and_then(|tool| tool.schema_hint.clone())
 }
 
 pub(crate) fn result_policy_for<'a>(
     config: &'a ToolSemanticsConfig,
-    tool_name: &str,
+    tool_name: &ToolName,
 ) -> Option<&'a ToolResultPolicy> {
     config
         .result_policies
         .iter()
-        .find(|policy| normalize_tool_name(&policy.tool_name) == normalize_tool_name(tool_name))
+        .find(|policy| policy.tool_name == *tool_name)
 }
 
 #[cfg(test)]
@@ -272,11 +369,15 @@ mod catalog_split_tests {
     #[test]
     fn with_tool_semantics_builds_policy_catalog() {
         use crate::catalog::ToolSpec;
+        use crate::tool_name::ToolName;
+        fn tn(name: &str) -> ToolName {
+            ToolName::new(name).expect("test tool name must be valid")
+        }
         let semantics = ToolSemanticsConfig {
             catalog: ToolCatalogConfig {
                 tools: vec![ToolSpec {
-                    name: "web_search".to_string(),
-                    aliases: vec!["websearch".to_string()],
+                    name: tn("web_search"),
+                    aliases: vec![tn("websearch")],
                     reproducible: true,
                     schema_hint: None,
                 }],
@@ -287,8 +388,8 @@ mod catalog_split_tests {
             crate::session::AgentConfig::with_tool_semantics(semantics).expect("valid semantics");
         assert_eq!(config.tool_catalog.len(), 1);
         assert_eq!(
-            config.tool_catalog.resolve("websearch").unwrap().name,
-            "web_search"
+            config.tool_catalog.resolve(&tn("websearch")).unwrap().name,
+            tn("web_search")
         );
         assert!(!config.tool_catalog.is_empty());
     }
@@ -296,17 +397,21 @@ mod catalog_split_tests {
     #[test]
     fn with_tool_semantics_rejects_duplicate_tool_names() {
         use crate::catalog::ToolSpec;
+        use crate::tool_name::ToolName;
+        fn tn(name: &str) -> ToolName {
+            ToolName::new(name).expect("test tool name must be valid")
+        }
         let semantics = ToolSemanticsConfig {
             catalog: ToolCatalogConfig {
                 tools: vec![
                     ToolSpec {
-                        name: "web_search".to_string(),
+                        name: tn("web_search"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
                     },
                     ToolSpec {
-                        name: "web-search".to_string(),
+                        name: tn("web-search"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,

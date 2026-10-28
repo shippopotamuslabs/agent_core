@@ -14,8 +14,13 @@ use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::events::AgentError;
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::tool_name::ToolName;
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use serde_json::Value;
+
+fn tn(name: &str) -> ToolName {
+    ToolName::new(name).expect("test tool name must be valid")
+}
 
 fn io_large() -> SessionIoParams {
     SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
@@ -426,7 +431,7 @@ fn tb_08_json_array_result_appends_synthetic_budget_message() {
 fn tb_09_greedy_append_blocks_raises_limit_to_35() {
     let eng = AgentEngine::new();
     let h = new_session(&eng, enclave_test_agent_config());
-    h.integration_test_seed_guardrails(35, 0, 0, vec!["append_blocks".into()]);
+    h.integration_test_seed_guardrails(35, 0, 0, vec![tn("append_blocks")]);
 
     let _ = eng.next_action(&h);
     eng.submit_model_response(
@@ -443,7 +448,7 @@ fn tb_09_greedy_append_blocks_raises_limit_to_35() {
         },
     );
     // Non-append tool responses clear greedy flag; re-seed before budget injection.
-    h.integration_test_seed_guardrails(35, 0, 0, vec!["append_blocks".into()]);
+    h.integration_test_seed_guardrails(35, 0, 0, vec![tn("append_blocks")]);
     match eng.next_action(&h) {
         AgentAction::ExecuteTools(_) => {}
         other => panic!("TB-09 expected ExecuteTools, got {other:?}"),

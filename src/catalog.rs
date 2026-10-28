@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::tool_name::ToolName;
 use crate::tool_semantics::{ToolSemanticsConfig, ToolSemanticsError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +19,8 @@ pub struct ToolSchemaHint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
-    pub name: String,
-    pub aliases: Vec<String>,
+    pub name: ToolName,
+    pub aliases: Vec<ToolName>,
     pub reproducible: bool,
     pub schema_hint: Option<ToolSchemaHint>,
 }
@@ -36,19 +37,24 @@ struct CatalogFile {
 /// (via [`ToolCatalog::from_semantics`]) and re-synced at session creation by
 /// [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics);
 /// per-turn engine code borrows it and never rebuilds it.
+///
+/// Identity is [`ToolName`] equality: specs and aliases are already canonical
+/// at construction, so lookup performs no folding of its own (ENC-299: the
+/// old per-site `normalize` fold is deleted; the fold lives in
+/// [`ToolName::new`]).
 #[derive(Debug, Clone, Default)]
 pub struct ToolCatalog {
     tools: Vec<ToolSpec>,
-    index: HashMap<String, usize>,
+    index: HashMap<ToolName, usize>,
 }
 
 impl ToolCatalog {
     pub(crate) fn from_specs(tools: Vec<ToolSpec>) -> Self {
         let mut index = HashMap::new();
         for (i, spec) in tools.iter().enumerate() {
-            index.insert(normalize(&spec.name), i);
+            index.insert(spec.name.clone(), i);
             for alias in &spec.aliases {
-                index.entry(normalize(alias)).or_insert(i);
+                index.entry(alias.clone()).or_insert(i);
             }
         }
         ToolCatalog { tools, index }
@@ -60,8 +66,10 @@ impl ToolCatalog {
     }
 
     /// Returns the canonical `ToolSpec` for `name` or any registered alias.
-    pub fn resolve(&self, name: &str) -> Option<&ToolSpec> {
-        self.index.get(&normalize(name)).map(|&i| &self.tools[i])
+    /// The caller passes an already-canonical [`ToolName`] (raw model output
+    /// is canonicalized by the repair pipeline first).
+    pub fn resolve(&self, name: &ToolName) -> Option<&ToolSpec> {
+        self.index.get(name).map(|&i| &self.tools[i])
     }
 
     pub fn all(&self) -> &[ToolSpec] {
@@ -78,13 +86,13 @@ impl ToolCatalog {
     }
 }
 
-fn normalize(s: &str) -> String {
-    s.to_lowercase().replace(['-', ' '], "_")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tn(name: &str) -> ToolName {
+        ToolName::new(name).expect("test tool name must be valid")
+    }
 
     fn fixture_catalog() -> ToolCatalog {
         let raw = include_str!("../resources/tool_catalog.json");
@@ -99,41 +107,41 @@ mod tests {
     #[test]
     fn discovery_tool_in_global_catalog_has_no_legacy_alias() {
         let catalog = fixture_catalog();
-        let spec = catalog.resolve("tool_discovery_tool").unwrap();
+        let spec = catalog.resolve(&tn("tool_discovery_tool")).unwrap();
         assert!(spec.reproducible);
         let hint = spec.schema_hint.as_ref().unwrap();
         assert!(hint
             .required_fields
             .iter()
             .any(|field| field.name == "capability"));
-        assert!(catalog.resolve("search_tools").is_none());
+        assert!(catalog.resolve(&tn("search_tools")).is_none());
     }
 
     #[test]
     fn resolve_canonical_name() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("web_search").unwrap();
-        assert_eq!(spec.name, "web_search");
+        let spec = cat.resolve(&tn("web_search")).unwrap();
+        assert_eq!(spec.name.as_str(), "web_search");
         assert!(spec.reproducible);
     }
 
     #[test]
     fn resolve_alias() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("websearch").unwrap();
-        assert_eq!(spec.name, "web_search");
+        let spec = cat.resolve(&tn("websearch")).unwrap();
+        assert_eq!(spec.name.as_str(), "web_search");
     }
 
     #[test]
     fn resolve_web_fetch_alias() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("web_fetch").unwrap();
-        assert_eq!(spec.name, "web_extract");
+        let spec = cat.resolve(&tn("web_fetch")).unwrap();
+        assert_eq!(spec.name.as_str(), "web_extract");
     }
 
     #[test]
     fn resolve_unknown_returns_none() {
-        assert!(fixture_catalog().resolve("does_not_exist").is_none());
+        assert!(fixture_catalog().resolve(&tn("does_not_exist")).is_none());
     }
 
     #[test]
@@ -160,13 +168,13 @@ mod tests {
         ];
         for name in &reproducible {
             assert!(
-                cat.resolve(name).unwrap().reproducible,
+                cat.resolve(&tn(name)).unwrap().reproducible,
                 "{name} should be reproducible"
             );
         }
         for name in &non_reproducible {
             assert!(
-                !cat.resolve(name).unwrap().reproducible,
+                !cat.resolve(&tn(name)).unwrap().reproducible,
                 "{name} should not be reproducible"
             );
         }
@@ -175,7 +183,7 @@ mod tests {
     #[test]
     fn start_artifact_schema_hint() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("start_artifact").unwrap();
+        let spec = cat.resolve(&tn("start_artifact")).unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         let fields: Vec<&str> = hint
             .required_fields
@@ -188,7 +196,7 @@ mod tests {
     #[test]
     fn append_blocks_default_is_complete_false() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("append_blocks").unwrap();
+        let spec = cat.resolve(&tn("append_blocks")).unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         assert_eq!(
             hint.defaults.get("isComplete"),
@@ -199,7 +207,7 @@ mod tests {
     #[test]
     fn search_x_recent_schema_hint_covers_boolean_defaults() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("search_x_recent").unwrap();
+        let spec = cat.resolve(&tn("search_x_recent")).unwrap();
         let hint = spec.schema_hint.as_ref().unwrap();
         assert_eq!(
             hint.defaults.get("has_geo"),
@@ -212,16 +220,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_is_case_and_separator_insensitive() {
+    fn resolve_is_case_and_separator_insensitive() {
+        // The (b)-fold lives in ToolName::new, not in resolve: lookup itself
+        // performs no folding.
         let cat = fixture_catalog();
-        assert!(cat.resolve("Web_Search").is_some());
-        assert!(cat.resolve("WEB-SEARCH").is_some());
+        assert!(cat.resolve(&tn("Web_Search")).is_some());
+        assert!(cat.resolve(&tn("WEB-SEARCH")).is_some());
     }
 
     #[test]
     fn x_search_alias_resolves() {
         let cat = fixture_catalog();
-        let spec = cat.resolve("x_search").unwrap();
-        assert_eq!(spec.name, "search_x_recent");
+        let spec = cat.resolve(&tn("x_search")).unwrap();
+        assert_eq!(spec.name.as_str(), "search_x_recent");
     }
 }

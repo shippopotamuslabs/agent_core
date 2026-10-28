@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::loop_metrics::LoopMetrics;
 use crate::session::{AgentConfig, SessionCapabilities};
+use crate::tool_name::ToolName;
 
 /// A single tool-schema entry: the lossless parsed value plus its name.
 ///
@@ -48,12 +49,16 @@ use crate::session::{AgentConfig, SessionCapabilities};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "serde_json::Value", into = "serde_json::Value")]
 pub struct SchemaEntry {
-    /// Tool name from the entry's `"name"` field (`""` when absent/non-string).
+    /// Canonical tool name from the entry's `"name"` field (the
+    /// [`ToolName::from_raw_lenient`] empty sentinel when absent/non-string).
     ///
     /// Construction through [`ToolSchemaSet::parse`] validates the name
     /// (present, a string, non-empty, unique per channel) before an entry is
     /// built; direct serde construction keeps this lenient extraction.
-    pub name: String,
+    /// Serde for [`ToolName`] itself is strict (blank is an error); only this
+    /// `From<Value>` path uses the lenient sentinel, so unvalidated entries
+    /// still construct and the parser can reject them with entry context.
+    pub name: ToolName,
     /// Full entry value, preserved losslessly.
     pub value: serde_json::Value,
 }
@@ -68,8 +73,8 @@ impl From<serde_json::Value> for SchemaEntry {
         let name = value
             .get("name")
             .and_then(|name| name.as_str())
-            .unwrap_or_default()
-            .to_string();
+            .map(ToolName::from_raw_lenient)
+            .unwrap_or_else(|| ToolName::from_raw_lenient(""));
         Self { name, value }
     }
 }
@@ -85,10 +90,14 @@ impl SchemaEntry {
     /// tool (ENC-296: the registry lookup is gone; the host wires the full
     /// schema provider-side), matching the legacy `render_active_schema_json`
     /// stub shape.
-    pub fn stub(name: &str) -> Self {
+    ///
+    /// m4: the stub value embeds the canonical name (callers pass the
+    /// [`ToolName` identity, never raw text), so renders keyed off the
+    /// value agree with renders keyed off the name.
+    pub fn stub(name: &ToolName) -> Self {
         Self {
-            name: name.to_string(),
-            value: serde_json::json!({"name": name}),
+            name: name.clone(),
+            value: serde_json::json!({"name": name.as_str()}),
         }
     }
 
@@ -195,10 +204,13 @@ pub(crate) enum EntryNameError {
 }
 
 /// Stateful checker for one channel's entry sequence: feed each
-/// entry's name in order.
+/// entry's name in order. Validation and dedupe run on the canonical
+/// [`ToolName`] (ENC-299 m1): `Web-Search` + `web_search` in one channel
+/// is a DuplicateName (raw-string dedupe let both pass), and the
+/// reported duplicate name is canonical, hence order-independent.
 #[derive(Debug, Default)]
 pub(crate) struct EntryNameChecker {
-    seen: std::collections::HashSet<String>,
+    seen: std::collections::HashSet<ToolName>,
 }
 
 impl EntryNameChecker {
@@ -207,12 +219,10 @@ impl EntryNameChecker {
     }
 
     pub(crate) fn check(&mut self, index: usize, name: &str) -> Result<(), EntryNameError> {
-        if name.trim().is_empty() {
-            return Err(EntryNameError::InvalidName { index });
-        }
-        if !self.seen.insert(name.to_string()) {
+        let name = ToolName::new(name).map_err(|_| EntryNameError::InvalidName { index })?;
+        if !self.seen.insert(name.clone()) {
             return Err(EntryNameError::DuplicateName {
-                name: name.to_string(),
+                name: name.as_str().to_string(),
             });
         }
         Ok(())
@@ -223,17 +233,19 @@ fn validate_entries(
     channel: &'static str,
     items: Vec<serde_json::Value>,
 ) -> Result<Vec<SchemaEntry>, ToolSchemaError> {
+    // m1 semantics via the shared checker: canonical-ToolName
+    // validation + dedupe, identical to the typed FFI entries path.
     let mut names = EntryNameChecker::new();
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.into_iter().enumerate() {
         if !item.is_object() {
             return Err(ToolSchemaError::EntryNotObject { channel, index });
         }
-        let name = item
+        let raw = item
             .get("name")
             .and_then(|name| name.as_str())
             .ok_or(ToolSchemaError::InvalidName { channel, index })?;
-        names.check(index, name).map_err(|error| match error {
+        names.check(index, raw).map_err(|error| match error {
             EntryNameError::InvalidName { index } => {
                 ToolSchemaError::InvalidName { channel, index }
             }
@@ -311,7 +323,7 @@ impl ToolSchemaSet {
 
     /// Initial active tool names, in channel order (replaces the
     /// session-construction `parse_tool_names_from_schema` parse).
-    pub fn initial_active_names(&self) -> Vec<String> {
+    pub fn initial_active_names(&self) -> Vec<ToolName> {
         self.active
             .iter()
             .filter(|entry| !entry.name.is_empty())
@@ -326,18 +338,18 @@ impl ToolSchemaSet {
     /// activated-but-not-active tool renders as a name stub here). Same
     /// shaping as the legacy `render_active_schema_json`; serialize with
     /// [`entries_json`].
-    pub fn render_active_schemas(&self, active_names: &[String]) -> Vec<SchemaEntry> {
-        let by_name: std::collections::HashMap<&str, &SchemaEntry> = self
+    pub fn render_active_schemas(&self, active_names: &[ToolName]) -> Vec<SchemaEntry> {
+        let by_name: std::collections::HashMap<&ToolName, &SchemaEntry> = self
             .active
             .iter()
             .filter(|entry| !entry.name.is_empty())
-            .map(|entry| (entry.name.as_str(), entry))
+            .map(|entry| (&entry.name, entry))
             .collect();
         active_names
             .iter()
             .map(|name| {
                 by_name
-                    .get(name.as_str())
+                    .get(name)
                     .map(|entry| (*entry).clone())
                     .unwrap_or_else(|| SchemaEntry::stub(name))
             })
@@ -412,7 +424,10 @@ mod tests {
         // catalog presence comes from the typed ToolCatalog.
         let set =
             ToolSchemaSet::parse(&format!("[{}]", entry("web_search"))).expect("valid channel");
-        assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
+        assert_eq!(
+            set.initial_active_names(),
+            vec![ToolName::new("web_search").expect("valid test name")]
+        );
         assert_eq!(set.active_json(), &format!("[{}]", entry("web_search")));
     }
 
@@ -460,7 +475,10 @@ mod tests {
     #[test]
     fn parse_lenient_degrades_bad_channel_to_empty() {
         let set = ToolSchemaSet::parse_lenient(&format!("[{}]", entry("web_search")));
-        assert_eq!(set.initial_active_names(), vec!["web_search".to_string()]);
+        assert_eq!(
+            set.initial_active_names(),
+            vec![ToolName::new("web_search").expect("valid test name")]
+        );
         // A malformed active channel degrades to empty (raw text normalized).
         let set = ToolSchemaSet::parse_lenient("{bogus");
         assert!(set.active.is_empty());
@@ -488,8 +506,10 @@ mod tests {
         // fill provider-side.
         let set = ToolSchemaSet::parse(&format!("[{},{}]", entry("b_tool"), entry("a_tool")))
             .expect("valid channel");
-        let rendered =
-            set.render_active_schemas(&["a_tool".to_string(), "missing_tool".to_string()]);
+        let rendered = set.render_active_schemas(&[
+            ToolName::new("a_tool").expect("valid test name"),
+            ToolName::new("missing_tool").expect("valid test name"),
+        ]);
         // Full entry values are preserved (legacy Value filter-then-stringify
         // shaping, hence sorted keys); missing tools become name stubs.
         assert_eq!(
@@ -521,7 +541,7 @@ mod tests {
     fn schema_entry_roundtrip_is_lossless() {
         let raw = entry("web_search");
         let parsed: SchemaEntry = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.name, "web_search");
+        assert_eq!(parsed.name.as_str(), "web_search");
         assert_eq!(parsed.description(), "d");
         assert!(parsed.reproducible());
         assert!(parsed.deferrable());
@@ -533,5 +553,28 @@ mod tests {
             r#"{"description":"d","name":"web_search","parameters":{"type":"object"}}"#
         );
         assert!(raw.contains("\"name\":\"web_search\""));
+    }
+
+    #[test]
+    fn case_variant_duplicates_are_rejected() {
+        // m1: dedupe runs on the canonical ToolName — `Web-Search` and
+        // `web_search` collide (raw-string dedupe let both pass).
+        let channel = format!("[{},{}]", entry("Web-Search"), entry("web_search"));
+        assert!(
+            matches!(
+                ToolSchemaSet::parse(&channel),
+                Err(ToolSchemaError::DuplicateName { channel, name })
+                if channel == "tools_schema_json" && name == "web_search"
+            ),
+            "Web-Search + web_search must be a DuplicateName"
+        );
+    }
+
+    #[test]
+    fn stub_embeds_canonical_name_in_value() {
+        // m4: the stub value carries the canonical name, not raw text.
+        let stub = SchemaEntry::stub(&ToolName::new("Web-Search").expect("valid test name"));
+        assert_eq!(stub.name.as_str(), "web_search");
+        assert_eq!(stub.value, serde_json::json!({"name": "web_search"}));
     }
 }

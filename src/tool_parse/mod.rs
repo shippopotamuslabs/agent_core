@@ -28,6 +28,7 @@ use crate::canonicalize::{
     CanonicalizeToolCallOutcome, ToolCallCanonicalizeMode,
 };
 use crate::catalog::{ToolCatalog, ToolSchemaHint};
+use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::tool_stream_gate::normalize_spaced_dsml;
 use crate::turn_io::RawToolCall;
@@ -122,7 +123,7 @@ pub fn has_local_tool_contract(system_prompt: &str, catalog: &ToolCatalog) -> bo
         && catalog
             .all()
             .iter()
-            .any(|tool| system_prompt.contains(&tool.name))
+            .any(|tool| system_prompt.contains(tool.name.as_str()))
 }
 
 fn build_batch_with_semantics(
@@ -166,8 +167,14 @@ fn parse_extracted_envelope_with_semantics(
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
 ) -> Result<ToolParseField, ToolParseFailureReason> {
-    let canonical_name = catalog
-        .resolve(&envelope.tool_name)
+    // Raw envelope text enters the canonical identity space here. The
+    // envelope name is model-emitted text (extraction captures it as
+    // written), so it takes the model-output constructor — the same
+    // prefix-strip + snake repair intake applies to structured call
+    // names — not the fold-only boundary constructor.
+    let canonical_name = ToolName::from_model_output(&envelope.tool_name)
+        .ok()
+        .and_then(|name| catalog.resolve(&name))
         .map(|spec| spec.name.clone())
         .ok_or_else(|| ToolParseFailureReason::UnknownTool {
             name: envelope.tool_name.clone(),
@@ -189,14 +196,14 @@ fn parse_extracted_envelope_with_semantics(
         semantics,
         ToolCallCanonicalizeMode::ProviderIngress,
     )
-    .map_err(|error| map_canonicalize_error(&canonical_name, &error.to_string()))?;
+    .map_err(|error| map_canonicalize_error(canonical_name.as_str(), &error.to_string()))?;
 
     repairs.extend(canonicalized.repairs);
     validate_unknown_and_duplicate(&canonical_name, &canonicalized.value, catalog)?;
     validate_required(&canonical_name, &canonicalized.value, catalog, semantics)?;
 
     Ok(ToolParseField {
-        tool_name: canonical_name,
+        tool_name: canonical_name.as_str().to_string(),
         arguments_json: canonicalized.arguments_json,
         repaired: canonicalized.repaired || !repairs.is_empty(),
         repairs,
@@ -204,7 +211,7 @@ fn parse_extracted_envelope_with_semantics(
 }
 
 fn validate_unknown_and_duplicate(
-    tool: &str,
+    tool: &ToolName,
     value: &Value,
     catalog: &ToolCatalog,
 ) -> Result<(), ToolParseFailureReason> {
@@ -236,7 +243,7 @@ fn validate_unknown_and_duplicate(
 }
 
 fn validate_required(
-    tool: &str,
+    tool: &ToolName,
     value: &Value,
     catalog: &ToolCatalog,
     semantics: &ToolSemanticsConfig,
@@ -246,7 +253,7 @@ fn validate_required(
     };
     for required in required_parameters(tool, catalog) {
         let missing = if semantics.artifact.as_ref().is_some_and(|artifact| {
-            artifact.append_tool_name == tool && required == artifact.append_blocks_field
+            artifact.append_tool_name == *tool && required == artifact.append_blocks_field
         }) {
             object.get(&required).is_none()
         } else {
@@ -274,7 +281,7 @@ fn is_missing_value(value: &Value) -> bool {
     }
 }
 
-fn allowed_parameters(tool: &str, catalog: &ToolCatalog) -> HashSet<String> {
+fn allowed_parameters(tool: &ToolName, catalog: &ToolCatalog) -> HashSet<String> {
     let Some(spec) = catalog.resolve(tool) else {
         return HashSet::new();
     };
@@ -284,7 +291,7 @@ fn allowed_parameters(tool: &str, catalog: &ToolCatalog) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn required_parameters(tool: &str, catalog: &ToolCatalog) -> Vec<String> {
+fn required_parameters(tool: &ToolName, catalog: &ToolCatalog) -> Vec<String> {
     let Some(spec) = catalog.resolve(tool) else {
         return Vec::new();
     };

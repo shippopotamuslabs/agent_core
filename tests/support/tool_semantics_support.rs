@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 
 use agent_core::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
+use agent_core::tool_name::ToolName;
+
+pub fn tn(name: &str) -> ToolName {
+    ToolName::new(name).expect("test tool name must be valid")
+}
 use agent_core::tool_semantics::{
     ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
     ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
@@ -10,7 +15,7 @@ use serde_json::json;
 
 pub fn tool(name: &str) -> ToolSpec {
     ToolSpec {
-        name: name.to_string(),
+        name: tn(name),
         aliases: Vec::new(),
         reproducible: true,
         schema_hint: None,
@@ -24,13 +29,13 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
         catalog: agent_core::tool_semantics::ToolCatalogConfig {
             tools: vec![
                 ToolSpec {
-                    name: "begin_doc".to_string(),
+                    name: tn("begin_doc"),
                     aliases: Vec::new(),
                     reproducible: false,
                     schema_hint: None,
                 },
                 ToolSpec {
-                    name: "write_doc".to_string(),
+                    name: tn("write_doc"),
                     aliases: Vec::new(),
                     reproducible: false,
                     schema_hint: Some(ToolSchemaHint {
@@ -56,14 +61,14 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
             ],
         },
         discovery: Some(ToolDiscoverySemantics {
-            tool_name: "open_tools".to_string(),
+            tool_name: tn("open_tools"),
             request_field_name: "names".to_string(),
             always_callable: true,
             companion_callable_tools: Vec::new(),
         }),
         artifact: Some(ArtifactToolSemantics {
-            start_tool_name: "begin_doc".to_string(),
-            append_tool_name: "write_doc".to_string(),
+            start_tool_name: tn("begin_doc"),
+            append_tool_name: tn("write_doc"),
             id_field: "docId".to_string(),
             append_blocks_field: "chunks".to_string(),
             completion_field: "done".to_string(),
@@ -74,7 +79,7 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
         }),
         argument_repairs: vec![
             ToolArgumentRepairRule {
-                tool_name: "write_doc".to_string(),
+                tool_name: tn("write_doc"),
                 aliases: vec![
                     ParameterAlias {
                         alias: "artifact_id".to_string(),
@@ -94,7 +99,7 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
                 }],
             },
             ToolArgumentRepairRule {
-                tool_name: "memory_search".to_string(),
+                tool_name: tn("memory_search"),
                 aliases: Vec::new(),
                 special_values: vec![SpecialValueRepair::ScalarToArray {
                     source: "query".to_string(),
@@ -104,23 +109,23 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
         ],
         canonical_shapes: vec![
             ToolCanonicalShape {
-                tool_name: "write_doc".to_string(),
+                tool_name: tn("write_doc"),
                 ordered_fields: vec!["docId".to_string(), "chunks".to_string(), "done".to_string()],
             },
             ToolCanonicalShape {
-                tool_name: "memory_search".to_string(),
+                tool_name: tn("memory_search"),
                 ordered_fields: vec!["queries".to_string()],
             },
         ],
         result_policies: vec![ToolResultPolicy {
-            tool_name: "write_doc".to_string(),
+            tool_name: tn("write_doc"),
             spill_stored_copy_only: true,
             skip_result_truncation: true,
             preserve_in_micro_compaction: true,
         }],
         compaction: ToolCompactionSemantics {
             artifact_squash: Some(ArtifactSquashSemantics {
-                append_tool_name: "write_doc".to_string(),
+                append_tool_name: tn("write_doc"),
                 id_field: "docId".to_string(),
                 blocks_field: "chunks".to_string(),
                 total_blocks_result_field: "chunkCount".to_string(),
@@ -132,7 +137,7 @@ pub fn custom_semantics() -> ToolSemanticsConfig {
             }),
         },
         greedy_extension_tools: vec![ToolGreedyExtensionSemantics {
-            tool_name: "write_doc".to_string(),
+            tool_name: tn("write_doc"),
             extra_turns: 20,
         }],
     }

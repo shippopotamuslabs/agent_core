@@ -3,6 +3,7 @@
 use crate::agent_tool_budget::AgentToolBudgetMeta;
 use crate::parsed_tool_args::ParsedToolResult;
 use crate::session::AgentConfig;
+use crate::tool_name::ToolName;
 use log::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,11 +39,12 @@ impl GuardrailState {
     pub fn effective_max_tool_calls(
         &self,
         config: &AgentConfig,
-        last_model_response_tool_names: &[String],
+        last_model_response_tool_names: &[ToolName],
     ) -> u32 {
         let mut cap = config.max_turns;
         for last in last_model_response_tool_names {
             for greedy in &config.tool_semantics.greedy_extension_tools {
+                // Both sides are canonical identities: plain equality (m3).
                 if greedy.tool_name == *last {
                     cap = cap.max(self.tool_calls_executed.saturating_add(greedy.extra_turns));
                 }
@@ -54,7 +56,7 @@ impl GuardrailState {
     pub fn allow_tool_call(
         &self,
         config: &AgentConfig,
-        last_model_response_tool_names: &[String],
+        last_model_response_tool_names: &[ToolName],
     ) -> bool {
         self.tool_calls_executed
             < self.effective_max_tool_calls(config, last_model_response_tool_names)
@@ -86,7 +88,7 @@ impl GuardrailState {
     pub fn tool_budget_snapshot(
         &self,
         config: &AgentConfig,
-        last_model_response_tool_names: &[String],
+        last_model_response_tool_names: &[ToolName],
     ) -> AgentToolBudgetMeta {
         let limit = self.effective_max_tool_calls(config, last_model_response_tool_names);
         let used = self.tool_calls_executed;
@@ -153,7 +155,7 @@ mod tests {
     fn greedy_cfg() -> AgentConfig {
         let mut config = AgentConfig::default();
         config.tool_semantics.greedy_extension_tools = vec![ToolGreedyExtensionSemantics {
-            tool_name: "append_blocks".into(),
+            tool_name: crate::tool_name::ToolName::new("append_blocks").expect("valid name"),
             extra_turns: 20,
         }];
         config
@@ -223,10 +225,10 @@ mod tests {
         g.count_tool_executed(15);
         let mut c = greedy_cfg();
         c.max_turns = 20;
-        assert!(g.allow_tool_call(&c, &["append_blocks".into()]));
+        assert!(g.allow_tool_call(&c, &[ToolName::new("append_blocks").expect("valid name")]));
         g.count_tool_executed(5);
         assert!(!g.allow_tool_call(&c, &[]));
-        assert!(g.allow_tool_call(&c, &["append_blocks".into()]));
+        assert!(g.allow_tool_call(&c, &[ToolName::new("append_blocks").expect("valid name")]));
     }
 
     #[test]
@@ -294,7 +296,8 @@ mod tests {
             ..GuardrailState::default()
         };
         let c = greedy_cfg();
-        let snapshot = g.tool_budget_snapshot(&c, &["append_blocks".into()]);
+        let snapshot =
+            g.tool_budget_snapshot(&c, &[ToolName::new("append_blocks").expect("valid name")]);
         assert_eq!(snapshot.tool_calls_limit, 41);
         assert_eq!(snapshot.tool_calls_used, 21);
         assert_eq!(snapshot.tool_calls_remaining, 20);

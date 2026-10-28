@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::tool_name::ToolName;
 use crate::turn_io::RawToolCall;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,8 +473,10 @@ pub struct ToolResultRecord {
     pub result_json: String,
     pub truncated: bool,
     pub soft_failure: bool,
+    // m3: host-reported activations travel as canonical identities.
+    // (`ToolCallRecord.name` stays `String`: it is a history record.)
     #[serde(default)]
-    pub activated_tool_names: Vec<String>,
+    pub activated_tool_names: Vec<ToolName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_metadata: Option<ToolResultMetadata>,
 }

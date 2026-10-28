@@ -49,6 +49,7 @@ use crate::policy::resolve_context_policy;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
@@ -65,9 +66,12 @@ pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
+/// Merge canonical tool identities into the active set in first-seen order,
+/// deduped (m3: the generic String/ToolName bridge is deleted now that every
+/// side is `ToolName`).
 pub(super) fn merge_active_tool_names(
-    active_tool_names: &mut Vec<String>,
-    names: impl IntoIterator<Item = String>,
+    active_tool_names: &mut Vec<ToolName>,
+    names: impl IntoIterator<Item = ToolName>,
 ) {
     for name in names {
         if !active_tool_names.iter().any(|existing| existing == &name) {
@@ -78,7 +82,7 @@ pub(super) fn merge_active_tool_names(
 
 pub(super) fn is_companion_callable_tool(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
-    tool_name: &str,
+    tool_name: &ToolName,
 ) -> bool {
     discovery
         .as_ref()
@@ -87,12 +91,17 @@ pub(super) fn is_companion_callable_tool(
 }
 
 pub(super) fn activate_tools_for_spill_reference(
-    active_tool_names: &mut Vec<String>,
+    active_tool_names: &mut Vec<ToolName>,
     result: &mut ToolResultRecord,
     reference: &ContextReference,
 ) {
-    let hinted = activation_tools_from_retrieval_hint(&reference.retrieval_hint);
-    merge_active_tool_names(active_tool_names, hinted.iter().cloned());
+    // Host-declared boundary names (retrieval-hint text): ToolName::new,
+    // no snake-splitting. Both merges now take ToolName directly (m3).
+    let hinted: Vec<ToolName> = activation_tools_from_retrieval_hint(&reference.retrieval_hint)
+        .iter()
+        .filter_map(|name| ToolName::new(name).ok())
+        .collect();
+    merge_active_tool_names(active_tool_names, hinted.clone());
     merge_active_tool_names(&mut result.activated_tool_names, hinted);
 }
 
@@ -124,7 +133,10 @@ impl AgentEngine {
     /// Fallible (ENC-297 J1): re-syncs the policy catalog from the
     /// construction-time semantics and fails on invalid struct-literal /
     /// serde configs (duplicate tool names, alias collisions) instead of
-    /// running the session with a stale or empty catalog. Returns
+    /// running the session with a stale or empty catalog. ENC-299 D4 also
+    /// fails session creation when a semantics section references a tool
+    /// that is neither a catalog tool nor an active schema
+    /// ([`ToolSemanticsError::UnknownToolReference`]). Returns
     /// [`ToolSemanticsError`] so every caller decides how to surface it.
     pub fn create_session(
         &self,
@@ -139,6 +151,18 @@ impl AgentEngine {
         // ENC-297 J1: propagate — no `let _` discard. An invalid literal
         // config fails session creation; no live session exists on error.
         config.prepare_tool_semantics()?;
+        // ENC-299 D4: referential validation runs here, where the policy
+        // catalog and the parsed schema set meet for the first time. Known
+        // names are the catalog (canonical + aliases) union the active
+        // schemas; sections that are absent/empty are skipped, so the
+        // agnostic config passes.
+        // Single session-construction parse: names come from the parsed set
+        // (m4: one binding shared by referential validation and the active
+        // set below).
+        let initial_active_tool_names = io.schemas.initial_active_names();
+        config
+            .tool_semantics
+            .validate_references(&config.tool_catalog, &initial_active_tool_names)?;
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -148,8 +172,6 @@ impl AgentEngine {
         }
 
         let initial_msg_count = initial_messages.len() as u32;
-        // Single session-construction parse: names come from the parsed set.
-        let initial_active_tool_names = io.schemas.initial_active_names();
         let session_context = session_context.into();
         let pending_work_items: Vec<PendingWorkItem> = session_context
             .pending_work
@@ -507,6 +529,7 @@ impl AgentEngine {
         let turn_order = std::mem::take(&mut g.pending.tool_turn_request_order);
         let mut reject_by_call_id = std::mem::take(&mut g.pending.reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
+        // Both sides are ToolName now: no re-folding (m3).
         for res in &results {
             merge_active_tool_names(
                 &mut g.active_tool_names,
@@ -770,7 +793,13 @@ impl AgentEngine {
         let spill_tokens_before = g
             .estimate_pressure(CompactionTrigger::PostToolResult)
             .total_tokens;
-        let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+        // J1: policy lookup over the call-record name goes through the
+        // model-output constructor (punctuated input resolves instead of
+        // silently missing policy); a blank name matches no policy.
+        let call_tool = ToolName::from_model_output(&call.name).ok();
+        let policy = call_tool
+            .as_ref()
+            .and_then(|name| result_policy_for(&g.config.tool_semantics, name));
         let skip_result_truncation = policy
             .map(|policy| policy.skip_result_truncation)
             .unwrap_or(false);
@@ -973,7 +1002,10 @@ pub(super) fn session_has_append_context(
         return false;
     }
     messages.iter().any(|message| {
-        crate::compact::artifact_squash::metadata_has_tool(message, &squash.append_tool_name)
+        crate::compact::artifact_squash::metadata_has_tool(
+            message,
+            squash.append_tool_name.as_str(),
+        )
     })
 }
 
@@ -2349,13 +2381,13 @@ mod tests {
             catalog: ToolCatalogConfig {
                 tools: vec![
                     ToolSpec {
-                        name: "web_search".into(),
+                        name: crate::tool_name::ToolName::new("web_search").expect("valid name"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
                     },
                     ToolSpec {
-                        name: "web-search".into(),
+                        name: crate::tool_name::ToolName::new("web-search").expect("valid name"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
@@ -2392,7 +2424,10 @@ mod tests {
         total_blocks_result_field: &str,
     ) -> ArtifactSquashSemantics {
         ArtifactSquashSemantics {
-            append_tool_name: append_tool_name.into(),
+            // The empty-name test exercises the never-engage guard via the
+            // lenient sentinel; every other caller passes a valid name.
+            append_tool_name: crate::tool_name::ToolName::new(append_tool_name)
+                .unwrap_or_else(|_| crate::tool_name::ToolName::from_raw_lenient(append_tool_name)),
             id_field: "docId".into(),
             blocks_field: "chunks".into(),
             total_blocks_result_field: total_blocks_result_field.into(),

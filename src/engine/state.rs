@@ -17,6 +17,7 @@ use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
@@ -109,11 +110,11 @@ pub(crate) struct InnerSession {
     pub(super) turn_index: u32,
     pub(super) cancelled: bool,
     pub(super) terminal_action: Option<AgentAction>,
-    pub(super) last_model_response_greedy_tool_names: Vec<String>,
+    pub(super) last_model_response_greedy_tool_names: Vec<ToolName>,
     pub(super) tools_blocked_nudges_this_turn: u32,
     /// Active tool names for the current session. Updated on tool_discovery_tool activations.
     /// Initially populated from the session's parsed [`ToolSchemaSet`].
-    pub(super) active_tool_names: Vec<String>,
+    pub(super) active_tool_names: Vec<ToolName>,
     pub(super) sidecar_builder: SidecarBuilder,
     /// Telemetry: number of compaction passes run this user turn (reset on turn start).
     pub(super) compaction_passes_this_turn: u32,
@@ -229,7 +230,7 @@ impl SessionHandle {
         tool_calls_executed: u32,
         consecutive_soft_failure_turns: u32,
         consecutive_envelope_parse_failures: u32,
-        last_model_response_greedy_tool_names: Vec<String>,
+        last_model_response_greedy_tool_names: Vec<ToolName>,
     ) {
         let mut inner = self.lock_inner();
         inner.guardrails.tool_calls_executed = tool_calls_executed;

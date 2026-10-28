@@ -109,12 +109,12 @@ fn tsd_26_default_semantics_reference_search_tools() {
     let discovery = semantics
         .discovery
         .expect("enclave default semantics must configure discovery");
-    assert_eq!(discovery.tool_name, "tool_discovery_tool");
+    assert_eq!(discovery.tool_name.as_str(), "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
     assert!(discovery.always_callable);
-    assert!(discovery
-        .companion_callable_tools
-        .contains(&"read_context_reference".to_string()));
+    assert!(discovery.companion_callable_tools.contains(
+        &agent_core::tool_name::ToolName::new("read_context_reference").expect("valid test name")
+    ));
 }
 
 #[test]
@@ -122,6 +122,38 @@ fn tsd_catalog_includes_search_tools_not_disclose() {
     let catalog = include_str!("../resources/tool_catalog.json");
     assert!(catalog.contains("\"name\": \"tool_discovery_tool\""));
     assert!(!catalog.contains("\"name\": \"disclose_tool_schemas\""));
+}
+
+#[test]
+fn tsd_camelcase_model_name_gates_active_without_soft_failure() {
+    // J1: the model emitting `webSearch` resolves through the same
+    // model-output constructor as the repair pipeline, so the gate sees the
+    // active `web_search` — no spurious "not active" soft-failure.
+    let eng = engine();
+    let handle = create_session(&eng);
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![RawToolCall {
+                id: Some("call-1".into()),
+                name: "webSearch".into(),
+                arguments_json: r#"{"query":"x"}"#.into(),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "web_search");
+        }
+        other => panic!("expected ExecuteTools for camelCase active tool, got {other:?}"),
+    }
 }
 
 #[test]

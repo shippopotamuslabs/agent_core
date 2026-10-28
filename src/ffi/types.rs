@@ -485,12 +485,18 @@ pub struct FfiToolResultRecord {
 
 impl From<FfiToolResultRecord> for crate::message::ToolResultRecord {
     fn from(t: FfiToolResultRecord) -> Self {
+        // Host-declared boundary names: ToolName::new, no snake-splitting;
+        // blank entries are dropped (the submit-time merge dedupes anyway).
         Self {
             call_id: t.call_id,
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
-            activated_tool_names: t.activated_tool_names,
+            activated_tool_names: t
+                .activated_tool_names
+                .iter()
+                .filter_map(|name| crate::tool_name::ToolName::new(name).ok())
+                .collect(),
             result_metadata: None,
         }
     }
@@ -503,7 +509,11 @@ impl From<crate::message::ToolResultRecord> for FfiToolResultRecord {
             result_json: t.result_json,
             truncated: t.truncated,
             soft_failure: t.soft_failure,
-            activated_tool_names: t.activated_tool_names,
+            activated_tool_names: t
+                .activated_tool_names
+                .iter()
+                .map(|name| name.as_str().to_string())
+                .collect(),
         }
     }
 }
