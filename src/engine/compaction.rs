@@ -10,8 +10,10 @@
 //! the pipeline-outcome decision
 //! ([`InnerSession::decide_pipeline_outcome`]), and the shared summary
 //! staging ([`InnerSession::attach_summary_staging`]). The field-bundle
-//! idiom is fully gone from this module: no input/effect bags remain —
-//! only owned per-pass state and plain call-shape values
+//! idiom is gone from this module: no input/effect bags remain —
+//! persistent and per-pass state live in owned state types with private
+//! fields and behavior methods ([`CompactionState`],
+//! [`CompactionPassState`]), alongside plain call-shape values
 //! ([`PipelinePassContext`]).
 //!
 //! `run_compaction_pass` keeps the loop. The pure entry gate lives in
@@ -30,7 +32,6 @@ use crate::message::AgentMessage;
 use crate::session::AgentSession;
 use crate::session::Pressure;
 use crate::tool_semantics::ArtifactSquashSemantics;
-use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::SummaryRequest;
 
 /// Persistent compaction state for a session (ENC-306 D1): the per-turn
@@ -90,12 +91,63 @@ impl CompactionState {
 /// Per-pass working state for one `run_compaction_pass` invocation
 /// (ENC-306 D3). Owns its fields outright (no lifetimes, no mirrors of
 /// `InnerSession` fields); constructed by `run_compaction_pass` and lent
-/// `&mut` to the pass operations.
+/// `&mut` to the pass operations. Like [`CompactionState`], the fields
+/// stay private and every reader/writer goes through these methods.
 pub(super) struct CompactionPassState {
-    pub sync_applied: bool,
-    pub last_history_ref: Option<String>,
-    pub destructive_tiers: Vec<CompactionTier>,
-    pub message_count_before: u32,
+    sync_applied: bool,
+    last_history_ref: Option<String>,
+    destructive_tiers: Vec<CompactionTier>,
+    message_count_before: u32,
+}
+
+impl CompactionPassState {
+    pub(super) fn new(message_count_before: u32) -> Self {
+        Self {
+            sync_applied: false,
+            last_history_ref: None,
+            destructive_tiers: Vec::new(),
+            message_count_before,
+        }
+    }
+
+    /// Record that a sync (spill/snapshot or pipeline-applied) compaction
+    /// took effect during this pass.
+    pub(super) fn mark_sync_applied(&mut self) {
+        self.sync_applied = true;
+    }
+
+    pub(super) fn sync_applied(&self) -> bool {
+        self.sync_applied
+    }
+
+    /// Remember the history-snapshot ref produced by the sync spill pass.
+    pub(super) fn remember_history_ref(&mut self, history_ref: String) {
+        self.last_history_ref = Some(history_ref);
+    }
+
+    pub(super) fn last_history_ref(&self) -> Option<&String> {
+        self.last_history_ref.as_ref()
+    }
+
+    /// Take the remembered history ref, leaving `None` behind (the pass
+    /// loop's early-exit branch hands it to `emit_post_compact`).
+    pub(super) fn take_history_ref(&mut self) -> Option<String> {
+        self.last_history_ref.take()
+    }
+
+    /// Record one destructive tier applied by the pipeline during this
+    /// pass, in application order.
+    pub(super) fn record_tier(&mut self, tier: CompactionTier) {
+        self.destructive_tiers.push(tier);
+    }
+
+    pub(super) fn destructive_tiers(&self) -> &[CompactionTier] {
+        &self.destructive_tiers
+    }
+
+    pub(super) fn message_count_before(&self) -> u32 {
+        self.message_count_before
+    }
 }
 
 impl InnerSession {
@@ -103,7 +155,7 @@ impl InnerSession {
     /// history snapshot against `self` and applies the effects directly,
     /// in the exact order the old collect/apply pair produced them — the
     /// spill and snapshot first run (spill, snapshot ids, snapshot), then
-    /// the spill event is pushed/emitted and `pass.sync_applied` set, then,
+    /// the spill event is pushed/emitted and the pass marked sync-applied, then,
     /// under a history ref, the snapshot ids are remembered, the ref goes
     /// to the state ledger, and the snapshot event is pushed/emitted. The
     /// caller keeps the `enable_context_store` guard, as before.
@@ -140,11 +192,11 @@ impl InnerSession {
         if let Some(event) = spill_event {
             self.session.push_compaction_event(event.clone());
             self.emit(AgentEvent::CompactionApplied(event));
-            pass.sync_applied = true;
+            pass.mark_sync_applied();
         }
         if let Some(reference) = snapshot_reference {
             let history_ref = reference.id.clone();
-            pass.last_history_ref = Some(history_ref.clone());
+            pass.remember_history_ref(history_ref.clone());
             self.remember_history_snapshot_ids(snapshot_ids);
             if self.config.enable_state_ledger {
                 self.state_ledger.add_history_ref(&history_ref);
@@ -213,10 +265,10 @@ impl InnerSession {
                 // If we forced MidTurn context for non-ratio compaction,
                 // restore the original trigger in the SummaryRequest.
                 if pass_ctx.forced_by_non_ratio {
-                    req.trigger = pass_ctx.trigger;
+                    req.trigger = pass_ctx.loop_ctx.trigger;
                 }
                 // Shared staging: session replace + history/ledger refs.
-                let req = self.attach_summary_staging(sess, req, pass_ctx.trigger);
+                let req = self.attach_summary_staging(sess, req, pass_ctx.loop_ctx.trigger);
                 self.pending.summary_req = Some(req.clone());
                 self.pending.summary_ctx = Some(pass_ctx.loop_ctx);
                 self.phase = EnginePhase::AwaitingSummary;
@@ -225,12 +277,12 @@ impl InnerSession {
             CompactionOutcome::Applied(sess, ev) => {
                 let destructive = is_destructive_compaction_tier(&ev.tier);
                 if destructive {
-                    pass.destructive_tiers.push(ev.tier.clone());
+                    pass.record_tier(ev.tier.clone());
                 }
                 self.compaction.record_applied(destructive);
                 self.session = sess;
                 self.emit(AgentEvent::CompactionApplied(ev.clone()));
-                pass.sync_applied = true;
+                pass.mark_sync_applied();
                 if self.capabilities.kv_fixed {
                     self.emit(AgentEvent::KvCacheInvalidated {
                         reason: format!("Compacted: {}", ev.tier),
@@ -245,7 +297,7 @@ impl InnerSession {
                     .expect("post pressure for NotApplicable");
                 if exceeds_hard_prompt_ceiling(&post_pressure)
                     && !pass_ctx.entered_for_long_loop_only
-                    && !pass.sync_applied
+                    && !pass.sync_applied()
                     && !pass_ctx.defer_compaction_failure
                 {
                     return Err(AgentError::CompactionFailed {
@@ -254,23 +306,14 @@ impl InnerSession {
                             .into(),
                     });
                 }
-                if pass.sync_applied {
-                    // Inline `emit_post_compact(trigger, None, history_ref, tiers, count)`.
-                    if !pass.destructive_tiers.is_empty() {
-                        let boundary = record_destructive_compaction_boundary(
-                            &mut self.session,
-                            pass_ctx.trigger,
-                            pass.destructive_tiers.clone(),
-                            pass.message_count_before,
-                        );
-                        self.emit(AgentEvent::CompactionBoundary(boundary));
-                    }
-                    self.emit(AgentEvent::PostCompact {
-                        trigger: pass_ctx.trigger,
-                        summary_ref: None,
-                        history_ref: pass.last_history_ref.clone(),
-                        transcript_revision_after: self.session.transcript_revision,
-                    });
+                if pass.sync_applied() {
+                    self.emit_post_compact(
+                        pass_ctx.loop_ctx.trigger,
+                        None,
+                        pass.last_history_ref().cloned(),
+                        pass.destructive_tiers(),
+                        pass.message_count_before(),
+                    );
                 }
                 Ok(Flow::Done(None))
             }
@@ -347,12 +390,12 @@ pub(super) enum Flow {
 
 /// Call-shape data for one pipeline iteration (ENC-306 D4): plain owned
 /// values computed by `run_compaction_pass`'s loop for this iteration —
-/// the trigger, the loop's `CompactionContext`, the entry-gate flags, the
-/// failure-deferral flag, and the post pressure read only for the
-/// `NotApplicable` arm. No borrows and no `InnerSession` mirrors: like
-/// `FireConditionInputs`, this is per-call data, not state.
+/// the loop's `CompactionContext` (which carries the trigger), the
+/// entry-gate flags, the failure-deferral flag, and the post pressure
+/// read only for the `NotApplicable` arm. No borrows and no
+/// `InnerSession` mirrors: like `FireConditionInputs`, this is per-call
+/// data, not state.
 pub(super) struct PipelinePassContext {
-    pub trigger: CompactionTrigger,
     pub loop_ctx: CompactionContext,
     pub forced_by_non_ratio: bool,
     pub entered_for_long_loop_only: bool,

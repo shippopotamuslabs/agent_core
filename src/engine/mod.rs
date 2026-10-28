@@ -53,7 +53,7 @@ use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
 use crate::transcript_revision::record_destructive_compaction_boundary;
-use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
+use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession, PendingToolTurn};
 
@@ -957,7 +957,7 @@ impl AgentEngine {
             CompactionOutcome::NeedsHostCall(req, sess) => {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
                 // Shared staging: session replace + history/ledger refs.
-                let req = InnerSession::stage_summary_request(&mut g, sess, req, trigger);
+                let req = g.attach_summary_staging(sess, req, trigger);
                 g.pending.summary_req = Some(req.clone());
                 g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
@@ -1013,17 +1013,6 @@ pub(super) fn session_has_append_context(
 }
 
 impl InnerSession {
-    /// Manual-compact entry to the shared `NeedsHostCall` staging, which is
-    /// an `InnerSession` method in the compaction module (ENC-306 D2).
-    fn stage_summary_request(
-        g: &mut InnerSession,
-        sess: AgentSession,
-        req: SummaryRequest,
-        trigger: CompactionTrigger,
-    ) -> SummaryRequest {
-        g.attach_summary_staging(sess, req, trigger)
-    }
-
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
@@ -1120,12 +1109,7 @@ impl InnerSession {
         &mut self,
         trigger: CompactionTrigger,
     ) -> Result<Option<AgentAction>, AgentError> {
-        let mut pass = compaction::CompactionPassState {
-            sync_applied: false,
-            last_history_ref: None,
-            destructive_tiers: Vec::new(),
-            message_count_before: self.session.messages.len() as u32,
-        };
+        let mut pass = compaction::CompactionPassState::new(self.session.messages.len() as u32);
         loop {
             let ctx = self.make_ctx(trigger);
             let policy = resolve_context_policy(
@@ -1203,13 +1187,13 @@ impl InnerSession {
             let forced_by_non_ratio = fire.forced_by_non_ratio;
 
             if !fire.should_enter {
-                if pass.sync_applied {
+                if pass.sync_applied() {
                     self.emit_post_compact(
                         trigger,
                         None,
-                        pass.last_history_ref.take(),
-                        &pass.destructive_tiers,
-                        pass.message_count_before,
+                        pass.take_history_ref(),
+                        pass.destructive_tiers(),
+                        pass.message_count_before(),
                     );
                 }
                 return Ok(None);
@@ -1264,7 +1248,6 @@ impl InnerSession {
                 outcome,
                 &mut pass,
                 compaction::PipelinePassContext {
-                    trigger,
                     loop_ctx: ctx,
                     forced_by_non_ratio,
                     entered_for_long_loop_only,
