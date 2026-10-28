@@ -66,6 +66,7 @@ pub mod tool_schema;
 pub mod tool_schema_activation;
 pub mod tool_semantics;
 pub mod tool_stream_gate;
+pub mod tool_universe;
 pub mod transcript_revision;
 pub mod truncate;
 pub mod turn_io;
