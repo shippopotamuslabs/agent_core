@@ -34,7 +34,7 @@
 //!   is created. Hosts always send arrays of named schema objects; anything
 //!   else is a contract violation, not a render case.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::loop_metrics::LoopMetrics;
 use crate::session::{AgentConfig, SessionCapabilities};
@@ -149,6 +149,38 @@ pub struct ToolSchemaSet {
     /// Untouched session-level raw text backing pressure/budget/FFI
     /// paths, so those stay byte-identical.
     raw_active: String,
+}
+
+/// Serde for [`ToolSchemaSet`] (ENC-305 snapshot support): only the
+/// entries cross the wire. `raw_active` is derived state and is NOT
+/// serialized; on deserialize it is rebuilt exactly as
+/// [`ToolSchemaSet::from_entries`] builds it (`raw_active =
+/// entries_json(entries)`), so a round-tripped set's `active_json()` is
+/// the canonical synthesized channel text — the same text the typed
+/// `from_entries` construction produces, not necessarily the raw text a
+/// `parse`d set carried.
+impl Serialize for ToolSchemaSet {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            active: &'a [SchemaEntry],
+        }
+        Wire {
+            active: &self.active,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolSchemaSet {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            active: Vec<SchemaEntry>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self::from_entries(wire.active))
+    }
 }
 
 /// Why a tool-schema channel was rejected at session construction.

@@ -18,6 +18,8 @@ pub use summary::{apply_summary_result, SummaryCompactionTier, SUMMARY_INSTRUCTI
 pub use text_truncate::TextTruncateCompactionTier;
 pub use tool_spill::ToolSpillCompactionTier;
 
+use serde::{Deserialize, Serialize};
+
 use crate::budget::{PromptBudgetParts, TokenLedger};
 
 use crate::events::{
@@ -27,7 +29,7 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::turn_io::SummaryRequest;
 
 /// Context passed to every compaction tier on each pipeline run.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionContext {
     /// Provider name for `AgentConfig.token_correction` lookup (e.g. `"anthropic"`).
     pub provider: String,

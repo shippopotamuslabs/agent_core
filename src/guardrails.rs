@@ -12,6 +12,7 @@ use crate::parsed_tool_args::ParsedToolResult;
 use crate::session::AgentConfig;
 use crate::tool_name::ToolName;
 use log::warn;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnBookkeepingResult {
@@ -30,7 +31,7 @@ pub fn is_soft_failure_result_json(result_json: &str) -> bool {
     ParsedToolResult::parse(result_json).is_soft_failure()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GuardrailState {
     /// Total tool executions in the current session loop (Kotlin `toolCallCount`).
     pub tool_calls_executed: u32,

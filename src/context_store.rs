@@ -50,7 +50,7 @@ pub struct ContextReference {
     pub retrieval_hint: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStoreEntry {
     pub reference: ContextReference,
     pub content: String,
@@ -109,7 +109,7 @@ pub fn make_preview(content: &str) -> String {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStore {
     /// Stable insertion-ordered map keyed by reference id.
     entries: BTreeMap<String, ContextStoreEntry>,

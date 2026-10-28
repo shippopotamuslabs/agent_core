@@ -22,6 +22,7 @@ use crate::tool_name::ToolName;
 use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
 use crate::tool_universe::ToolUniverse;
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
+use serde::{Deserialize, Serialize};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
 ///
@@ -67,8 +68,8 @@ pub struct SessionHandle {
     pub(super) inner: Arc<Mutex<InnerSession>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EnginePhase {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnginePhase {
     Idle,
     AwaitingModel,
     AwaitingTools,
@@ -78,8 +79,8 @@ pub(super) enum EnginePhase {
 /// Tool-turn transient state, written by model-response intake and consumed by
 /// tool-results submission (ENC-286 slice 7). Grouped so the rest of
 /// `InnerSession` is the stable machine state.
-#[derive(Default)]
-pub(crate) struct PendingToolTurn {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PendingToolTurn {
     pub(super) call_model: Option<ModelRequest>,
     pub(super) execute: Option<Vec<ToolCallRecord>>,
     pub(super) execute_skip_guardrail_count: bool,
