@@ -100,10 +100,11 @@ impl ToolUniverse {
     /// The schema entry for `name`, or the typed lookup error on a miss
     /// (the ENC-305 seam).
     pub fn require_entry(&self, name: &ToolName) -> Result<&SchemaEntry, ToolSemanticsError> {
-        self.entry(name).ok_or_else(|| ToolSemanticsError::UnknownToolReference {
-            section: "lookup".to_string(),
-            name: name.as_str().to_string(),
-        })
+        self.entry(name)
+            .ok_or_else(|| ToolSemanticsError::UnknownToolReference {
+                section: "lookup".to_string(),
+                name: name.as_str().to_string(),
+            })
     }
 
     /// The catalog spec for `name` (canonical name or declared alias).
@@ -150,7 +151,8 @@ impl ToolUniverse {
         capabilities: &SessionCapabilities,
         metrics: &LoopMetrics,
     ) -> Vec<SchemaEntry> {
-        self.schemas.render_runtime_view(config, capabilities, metrics)
+        self.schemas
+            .render_runtime_view(config, capabilities, metrics)
     }
 
     /// Merge names into the active set in first-seen order, deduped
@@ -181,7 +183,11 @@ impl ToolUniverse {
         // (AliasCollision) — the same variants and field conventions
         // `ToolSemanticsConfig::validate` applies to a catalog.
         if self.schema_index.contains_key(&entry_name)
-            || self.catalog.all().iter().any(|tool| tool.name == entry_name)
+            || self
+                .catalog
+                .all()
+                .iter()
+                .any(|tool| tool.name == entry_name)
         {
             return Err(ToolSemanticsError::DuplicateToolName {
                 normalized_name: entry_name.as_str().to_string(),
@@ -304,9 +310,15 @@ mod tests {
         }];
         let universe = ToolUniverse::build(schemas(&["web_search", "read_file"]), semantics)
             .expect("valid world builds");
-        assert_eq!(universe.active_names(), &[tn("web_search"), tn("read_file")]);
         assert_eq!(
-            universe.entry(&tn("web_search")).expect("entry").description(),
+            universe.active_names(),
+            &[tn("web_search"), tn("read_file")]
+        );
+        assert_eq!(
+            universe
+                .entry(&tn("web_search"))
+                .expect("entry")
+                .description(),
             "d"
         );
         assert!(universe.entry(&tn("ghost")).is_none());
@@ -318,12 +330,20 @@ mod tests {
             tn("read_file")
         );
         // Spec lookup resolves canonical names and aliases alike.
-        assert_eq!(universe.spec(&tn("web_search")).expect("spec").name, tn("web_search"));
-        assert_eq!(universe.spec(&tn("websearch")).expect("alias spec").name, tn("web_search"));
-        assert!(universe
-            .result_policy(&tn("web_search"))
-            .expect("policy")
-            .spill_stored_copy_only);
+        assert_eq!(
+            universe.spec(&tn("web_search")).expect("spec").name,
+            tn("web_search")
+        );
+        assert_eq!(
+            universe.spec(&tn("websearch")).expect("alias spec").name,
+            tn("web_search")
+        );
+        assert!(
+            universe
+                .result_policy(&tn("web_search"))
+                .expect("policy")
+                .spill_stored_copy_only
+        );
         assert!(universe.result_policy(&tn("read_file")).is_none());
         assert!(universe.schema_hint(&tn("web_search")).is_some());
         assert!(universe.schema_hint(&tn("read_file")).is_none());
@@ -365,11 +385,9 @@ mod tests {
 
     #[test]
     fn require_entry_miss_is_unknown_tool_reference() {
-        let universe = ToolUniverse::build(
-            schemas(&["web_search"]),
-            ToolSemanticsConfig::agnostic(),
-        )
-        .expect("agnostic world builds");
+        let universe =
+            ToolUniverse::build(schemas(&["web_search"]), ToolSemanticsConfig::agnostic())
+                .expect("agnostic world builds");
         let error = universe
             .require_entry(&tn("ghost_tool"))
             .expect_err("missing entry must error");
@@ -384,11 +402,9 @@ mod tests {
 
     #[test]
     fn activate_dedupes_and_keeps_first_seen_order() {
-        let mut universe = ToolUniverse::build(
-            schemas(&["a_tool"]),
-            ToolSemanticsConfig::agnostic(),
-        )
-        .expect("agnostic world builds");
+        let mut universe =
+            ToolUniverse::build(schemas(&["a_tool"]), ToolSemanticsConfig::agnostic())
+                .expect("agnostic world builds");
         // Host-owns-registry: names with no entry/spec still merge.
         universe.activate([tn("b_tool"), tn("a_tool"), tn("c_tool")]);
         universe.activate([tn("b_tool"), tn("d_tool")]);
@@ -406,18 +422,27 @@ mod tests {
         )
         .expect("world builds");
         universe
-            .admit(entry("fetch_page"), Some(spec("fetch_page", &["fetchpage"])))
+            .admit(
+                entry("fetch_page"),
+                Some(spec("fetch_page", &["fetchpage"])),
+            )
             .expect("admission succeeds");
         assert_eq!(
             universe.entry(&tn("fetch_page")).expect("entry").name,
             tn("fetch_page")
         );
-        assert_eq!(universe.spec(&tn("fetchpage")).expect("spec").name, tn("fetch_page"));
+        assert_eq!(
+            universe.spec(&tn("fetchpage")).expect("spec").name,
+            tn("fetch_page")
+        );
         assert!(universe.active_json().contains("fetch_page"));
         // Admission != activation.
         assert_eq!(universe.active_names(), &[tn("web_search")]);
         universe.activate([tn("fetch_page")]);
-        assert_eq!(universe.active_names(), &[tn("web_search"), tn("fetch_page")]);
+        assert_eq!(
+            universe.active_names(),
+            &[tn("web_search"), tn("fetch_page")]
+        );
         // The admitted entry renders as a full entry, not a stub.
         let rendered = universe.render_active_schemas();
         assert_eq!(rendered[1].description(), "d");
@@ -466,7 +491,10 @@ mod tests {
         )
         .expect("world builds");
         let error = universe
-            .admit(entry("fetch_page"), Some(spec("fetch_page", &["web_search"])))
+            .admit(
+                entry("fetch_page"),
+                Some(spec("fetch_page", &["web_search"])),
+            )
             .expect_err("alias shadowing a canonical name must fail");
         assert!(matches!(
             error,
@@ -480,11 +508,9 @@ mod tests {
 
     #[test]
     fn admit_spec_naming_a_different_tool_rejected() {
-        let mut universe = ToolUniverse::build(
-            schemas(&["web_search"]),
-            ToolSemanticsConfig::agnostic(),
-        )
-        .expect("world builds");
+        let mut universe =
+            ToolUniverse::build(schemas(&["web_search"]), ToolSemanticsConfig::agnostic())
+                .expect("world builds");
         assert!(universe
             .admit(entry("fetch_page"), Some(spec("other_tool", &[])))
             .is_err());

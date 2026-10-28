@@ -97,7 +97,11 @@ pub(super) fn activate_tools_for_spill_reference(
     // Result-record side: keep merging into `activated_tool_names` as today
     // (first-seen order, deduped — the former merge helper's semantics).
     for name in hinted {
-        if !result.activated_tool_names.iter().any(|existing| existing == &name) {
+        if !result
+            .activated_tool_names
+            .iter()
+            .any(|existing| existing == &name)
+        {
             result.activated_tool_names.push(name);
         }
     }
@@ -534,7 +538,8 @@ impl AgentEngine {
         // Both sides are ToolName now: no re-folding (m3).
         // ENC-304 D5: activation goes through the tool universe.
         for res in &results {
-            g.universe.activate(res.activated_tool_names.iter().cloned());
+            g.universe
+                .activate(res.activated_tool_names.iter().cloned());
         }
 
         // FRG-47 stage 1 (pure): pair host results to calls.
