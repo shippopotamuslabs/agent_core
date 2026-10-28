@@ -330,7 +330,7 @@ fn enc301_set_semantics_dedupe_and_retirement_tags() {
     assert_eq!(l.open_questions.len(), 1);
     l.observe_user_message(&user_msg("Resolved: retention policy?"));
     assert!(l.open_questions.is_empty());
-    assert_eq!(l.retired, vec!["retention policy?".to_string()]);
+    assert_eq!(l.retired, vec!["retention policy".to_string()]);
     // supersedes: retires a matching constraint.
     l.observe_user_message(&user_msg("Constraint: do not edit contracts."));
     l.observe_user_message(&user_msg("Supersedes: do not edit contracts."));
@@ -370,4 +370,104 @@ fn enc301_live_reassert_clears_tombstone_and_restores() {
     l.add_history_ref("h-1");
     l.add_history_ref("h-1");
     assert_eq!(l.history_refs, vec!["h-1".to_string()]);
+}
+
+#[test]
+fn enc301_summary_retirement_tags_are_ignored_entirely() {
+    // J1: retirement arms Live observations only. A summary reversal/resolved
+    // must neither retire a live entry nor append anything (the live original
+    // was already observed incrementally).
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg("Open question: retention policy?"));
+    l.merge_summary(
+        "Reversal: use FIFO. Resolved: retention policy?",
+        Some("s-1"),
+    );
+    assert_eq!(l.decisions, vec!["use FIFO".to_string()]);
+    assert_eq!(l.open_questions, vec!["retention policy?".to_string()]);
+    assert!(l.retired.is_empty());
+    // An unmatched summary reversal appends nothing either.
+    l.merge_summary("Reversal: something entirely new.", Some("s-2"));
+    assert_eq!(l.decisions, vec!["use FIFO".to_string()]);
+    assert!(l.retired.is_empty());
+}
+
+#[test]
+fn enc301_tag_match_requires_left_word_boundary() {
+    // J2: `Unresolved:` / `Indecision:` must not false-fire on the
+    // `resolved:` / `decision:` suffix.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Unresolved: flaky harness."));
+    assert!(l.decisions.is_empty());
+    assert!(l.open_questions.is_empty());
+    let mut l2 = StateLedger::default();
+    l2.observe_user_message(&user_msg("Indecision: which cache."));
+    assert!(l2.decisions.is_empty());
+    // An inline ". Decision:" (non-alphanumeric predecessor) still fires.
+    let mut l3 = StateLedger::default();
+    l3.observe_user_message(&user_msg("First thought. Decision: ship it."));
+    assert_eq!(l3.decisions, vec!["ship it".to_string()]);
+}
+
+#[test]
+fn enc301_nested_quoted_tags_do_not_rescan_but_multitag_lines_do() {
+    // J3: the scanner advances past the extracted value span, so a tag quoted
+    // inside a value never re-scans and retires a live fact.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg(
+        "Decision: she called it \"Reversal: use FIFO\" yesterday.",
+    ));
+    assert_eq!(
+        l.decisions,
+        vec![
+            "use FIFO".to_string(),
+            "she called it \"Reversal: use FIFO\" yesterday".to_string()
+        ]
+    );
+    assert!(l.retired.is_empty());
+    // Multi-tag lines still extract every tag.
+    let mut m = StateLedger::default();
+    m.observe_user_message(&user_msg("Decision: use FIFO. Decision: keep cache."));
+    assert_eq!(
+        m.decisions,
+        vec!["use FIFO".to_string(), "keep cache".to_string()]
+    );
+}
+
+#[test]
+fn enc301_repeat_unmatched_reversal_is_noop() {
+    // m3: an unmatched reversal appends visibly; repeating it must not
+    // self-cancel the appended entry.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Reversal: drop the cache entirely."));
+    assert_eq!(l.decisions, vec!["drop the cache entirely".to_string()]);
+    l.observe_user_message(&user_msg("Reversal: drop the cache entirely."));
+    assert_eq!(l.decisions, vec!["drop the cache entirely".to_string()]);
+    // Same rule for unmatched resolved.
+    l.observe_user_message(&user_msg("Resolved: unknown blocker?"));
+    assert!(l.decisions.contains(&"unknown blocker?".to_string()));
+    l.observe_user_message(&user_msg("Resolved: unknown blocker?"));
+    assert!(l.decisions.contains(&"unknown blocker?".to_string()));
+}
+
+#[test]
+fn enc301_retirement_matching_is_case_insensitive() {
+    // m4: `REVERSAL: USE fifo` retires `Decision: use FIFO`.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Decision: use FIFO."));
+    l.observe_user_message(&user_msg("REVERSAL: USE fifo."));
+    assert!(l.decisions.is_empty());
+    assert_eq!(l.retired, vec!["use fifo".to_string()]);
+}
+
+#[test]
+fn enc301_resolved_matches_trailing_question_mark_variant() {
+    // m2: `Resolved: retention policy` (no `?`) retires the stored
+    // `retention policy?` via trailing-punctuation-insensitive keys.
+    let mut l = StateLedger::default();
+    l.observe_user_message(&user_msg("Open question: retention policy?"));
+    l.observe_user_message(&user_msg("Resolved: retention policy"));
+    assert!(l.open_questions.is_empty());
 }
