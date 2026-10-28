@@ -1,5 +1,6 @@
 //! Tentative-hold stream gate: disambiguate prose vs tool syntax (TH-SG-*).
 
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_stream_gate::ToolStreamGate;
 
 fn visible_after_push(gate: &mut ToolStreamGate, chunk: &str) -> String {
@@ -21,7 +22,7 @@ fn push_chunked(gate: &mut ToolStreamGate, raw: &str, chunk_size: usize) -> Stri
 
 #[test]
 fn th_sg_01_call_colon_prose_flushes_on_disambiguation() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let mut visible = String::new();
     visible.push_str(&visible_after_push(&mut gate, "Here is the answer. To "));
     assert_eq!(visible, "Here is the answer. To ", "TH-SG-01a preamble");
@@ -46,7 +47,7 @@ fn th_sg_01_call_colon_prose_flushes_on_disambiguation() {
 #[test]
 fn th_sg_02_call_colon_prose_chunked_single_char() {
     let text = "To call: the API";
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let mut visible = String::new();
     for ch in text.chars() {
         visible.push_str(&gate.push(&ch.to_string()).emitted_prefix);
@@ -59,7 +60,7 @@ fn th_sg_02_call_colon_prose_chunked_single_char() {
 
 #[test]
 fn th_sg_03_lt_comparison_flushes_as_prose() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let visible = visible_after_push(&mut gate, "Use values where x < 100 and y > 50.");
     assert_eq!(
         visible, "Use values where x < 100 and y > 50.",
@@ -71,7 +72,7 @@ fn th_sg_03_lt_comparison_flushes_as_prose() {
 
 #[test]
 fn th_sg_04_json_prose_still_streams_through() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::RawJson);
     let text = r#"Here is {"name":"demo"} ok"#;
     let visible = visible_after_push(&mut gate, text);
     assert_eq!(visible, text, "TH-SG-04 visible");
@@ -79,7 +80,7 @@ fn th_sg_04_json_prose_still_streams_through() {
 
 #[test]
 fn th_sg_04b_non_tool_json_at_start_streams_after_first_key_disambiguates() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::RawJson);
     let text = r#"{"status":"ok","name":"demo"}"#;
     let visible = visible_after_push(&mut gate, text);
     assert_eq!(visible, text, "TH-SG-04b visible");
@@ -94,7 +95,7 @@ fn th_sg_04b_non_tool_json_at_start_streams_after_first_key_disambiguates() {
 #[test]
 fn th_sg_05_broken_tool_call_hidden_at_eof() {
     let broken = r#"<tool_call>{"name":"append_blocks","arg"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let emitted = visible_after_push(&mut gate, broken);
     assert_eq!(emitted, "", "TH-SG-05 emitted during stream");
     let finish = gate.finish(false);
@@ -109,7 +110,7 @@ fn th_sg_05_broken_tool_call_hidden_at_eof() {
 
 #[test]
 fn th_sg_06_broken_partial_tool_prefix_hidden_at_eof() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let emitted = visible_after_push(&mut gate, "Summary.<tool_call>{\"name\"");
     assert_eq!(emitted, "Summary.", "TH-SG-06 preamble only");
     let finish = gate.finish(false);
@@ -120,7 +121,7 @@ fn th_sg_06_broken_partial_tool_prefix_hidden_at_eof() {
 #[test]
 fn th_sg_07_call_ident_without_brace_stays_hidden_at_eof() {
     let text = "call: append_blocks";
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let emitted = visible_after_push(&mut gate, text);
     assert_eq!(emitted, "", "TH-SG-07 emitted");
     let finish = gate.finish(false);
@@ -131,7 +132,7 @@ fn th_sg_07_call_ident_without_brace_stays_hidden_at_eof() {
 #[test]
 fn th_sg_08_chunked_dsml_leak_still_hidden() {
     let raw = r#"< | DSML | | tool_calls>< | DSML | | invoke name="web_search"></ | DSML | | tool_calls>"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::Dsml);
     let emitted = push_chunked(&mut gate, raw, 13);
     assert_eq!(emitted, "", "TH-SG-08 emitted");
     let finish = gate.finish(false);
@@ -146,7 +147,7 @@ fn th_sg_08_chunked_dsml_leak_still_hidden() {
 #[test]
 fn th_sg_09_confirmed_tool_call_never_emitted() {
     let raw = r#"<tool_call>{"name":"web_search","arguments":{"query":"kotlin"}}</tool_call>"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let emitted = push_chunked(&mut gate, raw, 11);
     assert_eq!(emitted, "", "TH-SG-09 emitted");
     let finish = gate.finish(false);
@@ -157,7 +158,7 @@ fn th_sg_09_confirmed_tool_call_never_emitted() {
 #[test]
 fn th_sg_10_litert_call_syntax_confirmed_and_hidden() {
     let raw = r#"call:append_blocks{artifactId:"art-1",blocks:[]}"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::CallBrace);
     let emitted = push_chunked(&mut gate, raw, 7);
     assert_eq!(emitted, "", "TH-SG-10 emitted");
     let finish = gate.finish(false);
@@ -167,7 +168,7 @@ fn th_sg_10_litert_call_syntax_confirmed_and_hidden() {
 #[test]
 fn th_sg_10b_bare_json_tool_call_is_hidden_when_chunked() {
     let raw = r#"{"name":"web_search","arguments":{"query":"kotlin"}}"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::RawJson);
     let emitted = push_chunked(&mut gate, raw, 1);
     assert_eq!(emitted, "", "TH-SG-10b emitted");
     let finish = gate.finish(false);
@@ -177,7 +178,7 @@ fn th_sg_10b_bare_json_tool_call_is_hidden_when_chunked() {
 
 #[test]
 fn th_sg_11_native_tools_flush_preamble_before_partial_marker() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let emitted = visible_after_push(&mut gate, "Let me try with a simpler <tool");
     assert_eq!(emitted, "Let me try with a simpler ", "TH-SG-11 emitted");
     let finish = gate.finish(true);
@@ -187,7 +188,7 @@ fn th_sg_11_native_tools_flush_preamble_before_partial_marker() {
 
 #[test]
 fn th_sg_12_native_tools_flush_preamble_before_confirmed_tool_call() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     let emitted = visible_after_push(&mut gate, r#"Summary.<tool_call>{"name":"x"}"#);
     assert_eq!(emitted, "Summary.", "TH-SG-12 emitted");
     let finish = gate.finish(true);
@@ -202,14 +203,14 @@ fn th_sg_12_native_tools_flush_preamble_before_confirmed_tool_call() {
 #[test]
 fn th_sg_13_buffered_text_always_retains_raw_stream() {
     let raw = r#"<tool_call>{"name":"web_search"}</tool_call>"#;
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::XmlToolCall);
     gate.push(raw);
     assert_eq!(gate.buffered_text(), raw, "TH-SG-13 buffered_text");
 }
 
 #[test]
 fn th_sg_14_allow_tool_call_false_still_hides_confirmed_leak() {
-    let mut gate = ToolStreamGate::new(false);
+    let mut gate = ToolStreamGate::new(false, ToolCallFormat::XmlToolCall);
     let emitted = visible_after_push(&mut gate, r#"<tool_call>{"name":"web_search"}"#);
     assert_eq!(emitted, "", "TH-SG-14 emitted");
     let finish = gate.finish(false);
@@ -219,7 +220,7 @@ fn th_sg_14_allow_tool_call_false_still_hides_confirmed_leak() {
 
 #[test]
 fn th_sg_15_plain_text_flushes_during_stream() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::Structured);
     let emitted = visible_after_push(&mut gate, "All done.");
     assert_eq!(emitted, "All done.", "TH-SG-15 emitted during stream");
     let finish = gate.finish(false);
@@ -229,7 +230,7 @@ fn th_sg_15_plain_text_flushes_during_stream() {
 
 #[test]
 fn th_sg_16_mistral_tool_calls_bracket_holdback() {
-    let mut gate = ToolStreamGate::new(true);
+    let mut gate = ToolStreamGate::new(true, ToolCallFormat::BracketArray);
     let emitted = visible_after_push(&mut gate, "See [TOOL_CALLS][");
     assert_eq!(emitted, "See ", "TH-SG-16 emitted");
     let finish = gate.finish(false);

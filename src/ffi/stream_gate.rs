@@ -46,9 +46,14 @@ fn lock_tool_stream_gate(
 }
 
 #[uniffi::export]
-pub fn create_tool_stream_gate(allow_tool_call: bool) -> std::sync::Arc<FfiToolStreamGate> {
+pub fn create_tool_stream_gate(
+    allow_tool_call: bool,
+    tool_call_format: super::types::FfiToolCallFormat,
+) -> std::sync::Arc<FfiToolStreamGate> {
+    // ENC-300 D5: the host declares the stream's format per gate.
+    let format = crate::tool_call_format::ToolCallFormat::from(tool_call_format);
     std::sync::Arc::new(FfiToolStreamGate {
-        inner: Mutex::new(ToolStreamGate::new(allow_tool_call)),
+        inner: Mutex::new(ToolStreamGate::new(allow_tool_call, format)),
     })
 }
 

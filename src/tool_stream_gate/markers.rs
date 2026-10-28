@@ -488,8 +488,8 @@ pub fn normalize_spaced_dsml(text: &str) -> String {
 }
 
 /// Legacy helper retained for gradual migration; prefer [gate_state::reconcile_after_push].
-pub fn safe_emit_end(buffered: &str) -> usize {
-    let result = super::gate_state::reconcile_after_push(buffered, 0, None);
+pub fn safe_emit_end(buffered: &str, format: ToolCallFormat) -> usize {
+    let result = super::gate_state::reconcile_after_push(buffered, 0, None, format);
     result.emit_exclusive_end
 }
 
@@ -591,7 +591,7 @@ mod tests {
         let suffix =
             "📄 **Title** some more text to make this buffer long enough to exceed 64 bytes tail";
         let buffered = format!("{}{}", prefix, suffix);
-        let end = safe_emit_end(&buffered);
+        let end = safe_emit_end(&buffered, ToolCallFormat::Structured);
         assert!(
             buffered.is_char_boundary(end),
             "end={end} is not a char boundary"

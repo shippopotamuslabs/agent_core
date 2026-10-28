@@ -1,5 +1,6 @@
 //! Char-boundary safety for tool_stream_gate streaming.
 
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::tool_stream_gate::{first_strong_tool_marker_start, ToolStreamGate};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -25,7 +26,7 @@ fn emoji_cot_with_spaced_dsml_and_chunked_push_does_not_panic() {
     for chunk_size in 1..=12 {
         let text = text.to_string();
         let ok = catch_unwind(AssertUnwindSafe(|| {
-            let mut gate = ToolStreamGate::new(true);
+            let mut gate = ToolStreamGate::new(true, ToolCallFormat::Dsml);
             push_chunked_bytes(&mut gate, &text, chunk_size);
             gate.finish(false);
         }));

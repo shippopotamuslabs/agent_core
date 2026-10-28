@@ -4,12 +4,15 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use support::enclave_test_agent_config::enclave_test_agent_config;
+use support::enclave_test_agent_config::{
+    enclave_test_agent_config, enclave_test_agent_config_for,
+};
 
 use agent_core::action::AgentAction;
 use agent_core::engine::{AgentEngine, SessionIoParams, SessionTestSnapshot};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta, ToolResultRecord};
 use agent_core::session::SessionCapabilities;
+use agent_core::tool_call_format::ToolCallFormat;
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 
 const VALID_DSML_WEB_SEARCH: &str = concat!(
@@ -389,7 +392,22 @@ fn etr_r_08_unknown_tool_zzzzz_reject_empty_raw_tool_calls() {
 #[test]
 fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
     let eng = AgentEngine::new();
-    let h = new_session(&eng);
+    // ENC-300: this turn feeds DSML text, so the session declares Dsml
+    // (the default Structured config never mines body text).
+    let h = eng
+        .create_session(
+            vec![user_msg()],
+            enclave_test_agent_config_for(ToolCallFormat::Dsml),
+            SessionCapabilities {
+                summarization_allowed: false,
+                kv_fixed: false,
+                tool_result_budget_tokens: None,
+                ..Default::default()
+            },
+            serde_json::Value::Null,
+            io_large(),
+        )
+        .expect("valid config creates session");
     let _ = eng.next_action(&h);
     eng.submit_model_response(
         &h,
