@@ -88,7 +88,8 @@ fn s12_model_request_includes_state_ledger_anchors_after_compaction() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid test io params"),
     );
     match eng.next_action(&handle) {
         AgentAction::RequestSummary(req) => {

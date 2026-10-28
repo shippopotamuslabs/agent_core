@@ -30,7 +30,8 @@ fn main() {
             "[]".into(),
             "[]".into(),
             "sys".into(),
-        ),
+        )
+        .expect("valid example io params"),
     );
     assert!(matches!(eng.next_action(&h), AgentAction::CallModel(_)));
     eng.submit_model_response(

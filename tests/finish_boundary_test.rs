@@ -31,6 +31,7 @@ fn io() -> SessionIoParams {
         "[]".into(),
         "sys".into(),
     )
+    .expect("valid test io params")
 }
 
 fn submit_no_tool_response(

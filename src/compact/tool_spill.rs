@@ -152,8 +152,7 @@ pub fn spill_tool_messages_in_session(
             expires_after_turn: Some(turn_index + DEFAULT_TOOL_OUTPUT_TTL_TURNS),
         };
         let inserted = store.insert_entry(entry);
-        message.content = spill_envelope(&inserted);
-        message.metadata.mark_spilled();
+        message.set_spilled_content(spill_envelope(&inserted));
         changed = true;
     }
 

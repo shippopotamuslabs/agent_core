@@ -43,7 +43,7 @@ fn build_semantic_summary_line(
         .replace("{snippet}", &snippet)
 }
 
-fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
+pub(crate) fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
     msg.metadata
         .raw_tool_calls()
         .iter()

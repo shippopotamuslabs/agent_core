@@ -81,7 +81,8 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
             "[]".into(),
             "[]".into(),
             system,
-        ),
+        )
+        .expect("valid test io params"),
     );
 
     let before = eng.drain_events(&handle);
