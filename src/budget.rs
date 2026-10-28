@@ -1,7 +1,5 @@
-use once_cell::sync::Lazy;
-use tiktoken_rs::CoreBPE;
-
 use crate::session::{AgentConfig, AgentSession, Pressure, SessionCapabilities};
+use crate::token_counter::{default_counter, TokenCounter};
 
 /// Approximate bytes per token for local budget conversion.
 pub(crate) const AVG_BYTES_PER_TOKEN: usize = 4;
@@ -18,11 +16,15 @@ const CHAT_TEMPLATE_ASSISTANT_PRIMER_TOKENS: u32 = 4;
 /// Extra ChatML markers used by the on-device Llama JNI path.
 const CHATML_EXTRA_OVERHEAD_TOKENS: u32 = 6;
 
-static ENCODER: Lazy<CoreBPE> =
-    Lazy::new(|| tiktoken_rs::cl100k_base().expect("tiktoken cl100k_base failed to load"));
-
+/// Token count via the process-default counter ([`crate::token_counter`]).
+/// Identical to the pre-ENC-292 direct `tiktoken` call.
 pub(crate) fn count_tokens(text: &str) -> u32 {
-    ENCODER.encode_with_special_tokens(text).len() as u32
+    default_counter().count_tokens(text)
+}
+
+/// Token count via an explicit host-supplied [`TokenCounter`] (ENC-292 port).
+pub fn count_tokens_with(counter: &dyn TokenCounter, text: &str) -> u32 {
+    counter.count_tokens(text)
 }
 
 pub(crate) fn apply_correction(raw_tokens: u32, provider: &str, config: &AgentConfig) -> u32 {
@@ -34,12 +36,12 @@ pub(crate) fn apply_correction(raw_tokens: u32, provider: &str, config: &AgentCo
     (raw_tokens as f32 * factor).round() as u32
 }
 
-fn count_session_tokens(session: &AgentSession) -> u32 {
+fn count_session_tokens_with(counter: &dyn TokenCounter, session: &AgentSession) -> u32 {
     session
         .messages
         .iter()
         .filter(|m| !m.metadata.is_superseded())
-        .map(|m| count_tokens(&m.content))
+        .map(|m| count_tokens_with(counter, &m.content))
         .sum()
 }
 
@@ -130,14 +132,26 @@ impl TokenLedger {
         config: &AgentConfig,
         parts: &PromptBudgetParts<'_>,
     ) -> Pressure {
-        let message_tokens = count_session_tokens(session);
-        let system_tokens = count_tokens(parts.system_prompt);
+        Self::estimate_with(default_counter(), session, config, parts)
+    }
+
+    /// [`estimate`](Self::estimate) counted with an explicit host-supplied
+    /// [`TokenCounter`] (ENC-292 port). Identical to [`estimate`](Self::estimate)
+    /// when passed [`crate::token_counter::default_counter`].
+    pub fn estimate_with(
+        counter: &dyn TokenCounter,
+        session: &AgentSession,
+        config: &AgentConfig,
+        parts: &PromptBudgetParts<'_>,
+    ) -> Pressure {
+        let message_tokens = count_session_tokens_with(counter, session);
+        let system_tokens = count_tokens_with(counter, parts.system_prompt);
         let sidecar_tokens = if parts.context_sidecars.is_empty() {
             estimate_context_sidecar_tokens(config, parts.context_window_tokens)
         } else {
-            count_tokens(parts.context_sidecars)
+            count_tokens_with(counter, parts.context_sidecars)
         };
-        let schema_tokens = count_tokens(parts.tools_schema_json);
+        let schema_tokens = count_tokens_with(counter, parts.tools_schema_json);
         let template_tokens =
             estimate_chat_template_overhead_tokens(parts.provider, active_message_count(session));
 

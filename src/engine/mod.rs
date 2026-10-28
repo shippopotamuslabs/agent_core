@@ -33,7 +33,7 @@ use crate::compact::{
     compaction_pipeline_for_plan, estimate_session_pressure,
     policy::{
         build_compaction_plan, mid_turn_stall_error, ratio_threshold_tokens_for_plan,
-        should_enter_compaction, FireConditionInputs,
+        should_enter_compaction, FireConditionInputs, MidTurnStallGate,
     },
     tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
@@ -1161,11 +1161,13 @@ impl InnerSession {
 
             if let Some(err) = mid_turn_stall_error(
                 trigger,
-                self.config.allow_fifo_on_mid_turn,
-                self.capabilities.summarization_allowed,
-                self.session.compaction_log.is_empty(),
-                defer_compaction_failure,
-                true,
+                MidTurnStallGate {
+                    allow_fifo_on_mid_turn: self.config.allow_fifo_on_mid_turn,
+                    summarization_allowed: self.capabilities.summarization_allowed,
+                    compaction_log_is_empty: self.session.compaction_log.is_empty(),
+                    defer_compaction_failure,
+                    require_nonempty_log: true,
+                },
             ) {
                 return Err(err);
             }
@@ -1207,11 +1209,13 @@ impl InnerSession {
 
             if let Some(err) = mid_turn_stall_error(
                 trigger,
-                self.config.allow_fifo_on_mid_turn,
-                self.capabilities.summarization_allowed,
-                self.session.compaction_log.is_empty(),
-                defer_compaction_failure,
-                false,
+                MidTurnStallGate {
+                    allow_fifo_on_mid_turn: self.config.allow_fifo_on_mid_turn,
+                    summarization_allowed: self.capabilities.summarization_allowed,
+                    compaction_log_is_empty: self.session.compaction_log.is_empty(),
+                    defer_compaction_failure,
+                    require_nonempty_log: false,
+                },
             ) {
                 return Err(err);
             }
@@ -1515,11 +1519,7 @@ mod tests {
             .find(|message| message.role == AgentRole::Assistant)
             .expect("assistant message");
         assert_eq!(
-            assistant
-                .metadata
-                .extra("provider_reasoning")
-                .and_then(|value| value.get("reasoning_content"))
-                .and_then(|value| value.as_str()),
+            assistant.metadata.provider_reasoning_content(),
             Some("need tool output first"),
         );
     }

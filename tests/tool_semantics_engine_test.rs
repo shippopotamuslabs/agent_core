@@ -236,10 +236,7 @@ fn ts_024_custom_append_result_skips_truncation() {
     assert_eq!(tool.content, result_json);
     let result: Value = serde_json::from_str(&tool.content).unwrap();
     assert_eq!(result["data"].as_str().unwrap().len(), 2048);
-    assert_eq!(
-        tool.metadata.extra("truncated").and_then(|v| v.as_bool()),
-        Some(false)
-    );
+    assert!(!tool.metadata.truncated());
 }
 
 #[test]
@@ -287,10 +284,7 @@ fn ts_025_non_exempt_large_result_is_truncated() {
         .unwrap();
 
     assert!(tool.content.contains("truncated"));
-    assert_eq!(
-        tool.metadata.extra("truncated").and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    assert!(tool.metadata.truncated());
 }
 
 #[test]

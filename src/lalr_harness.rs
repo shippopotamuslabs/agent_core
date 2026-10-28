@@ -204,7 +204,7 @@ pub fn run_destructive_micro_preflight_pass(
     test_config.preflight_token_threshold = Some(1);
     test_config.micro_keep_recent = 0;
 
-    let engine = noop_transport_engine();
+    let engine = test_engine();
 
     let initial = if session.messages.is_empty() {
         vec![tool_message("tool-msg-1", "web_search", &"x".repeat(500))]
@@ -241,7 +241,7 @@ pub fn run_two_destructive_compaction_passes(session: &mut AgentSession) -> (u64
     config.micro_keep_recent = 0;
     let caps = SessionCapabilities::default();
 
-    let engine = noop_transport_engine();
+    let engine = test_engine();
 
     let messages = vec![tool_message("tool-pass-0", "web_search", &"x".repeat(500))];
 
@@ -500,7 +500,7 @@ pub fn config_with_long_loop(long_loop: LongLoopPolicy) -> AgentConfig {
     }
 }
 
-pub fn noop_transport_engine() -> AgentEngine {
+pub fn test_engine() -> AgentEngine {
     AgentEngine::new()
 }
 
