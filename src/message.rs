@@ -563,8 +563,13 @@ pub struct AgentMessage {
     pub id: String,
     pub role: AgentRole,
     pub content: String,
-    /// Opaque host-provided metadata (e.g. vision asset refs, turn tags).
-    /// Defaults to JSON null; no required keys.
+    /// Message metadata — a closed, typed schema ([`MessageMeta`]): the
+    /// keys the engine reads and writes are its typed fields, and that
+    /// set is complete. At FFI ingress an unknown key is a typed error
+    /// naming the key; in stored state an unknown key is dropped at the
+    /// read seam. Host annotations are not carried here — they stay
+    /// host-side, keyed by message ID, and the host reattaches them to
+    /// engine emissions itself. Defaults to JSON null when empty.
     ///
     /// ## Compaction Metadata Conventions:
     /// - `rewrite_of`: ID of the original message that this message replaces/rewrites.
