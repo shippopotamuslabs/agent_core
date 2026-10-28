@@ -34,7 +34,7 @@ pub fn record_artifact_progress_with_parsed(
     let Some(artifact) = &semantics.artifact else {
         return;
     };
-    if tool_name == artifact.start_tool_name {
+    if tool_name == artifact.start_tool_name.as_str() {
         if let Some(id) = extract_success_field(
             result.value(),
             &artifact.status_field,
@@ -43,7 +43,7 @@ pub fn record_artifact_progress_with_parsed(
         ) {
             pending.insert(id);
         }
-    } else if tool_name == artifact.append_tool_name {
+    } else if tool_name == artifact.append_tool_name.as_str() {
         let Some(complete) = parse_success_bool_field(
             result,
             &artifact.status_field,
@@ -128,7 +128,7 @@ pub fn synthetic_finalize_calls_with_semantics(
             let arguments_json = finalize_arguments_json(artifact, id);
             ToolCallRecord {
                 call_id: format!("{}{}", artifact.synthetic_call_id_prefix, id),
-                name: artifact.append_tool_name.clone(),
+                name: artifact.append_tool_name.as_str().to_string(),
                 arguments_json,
                 attempt_metadata: None,
                 repair_metadata: None,

@@ -111,7 +111,7 @@ fn extract_last_block_text_with_field(content: &str, field: &str) -> Option<Stri
 /// already covered it, and substring matching misfires on prose mentions).
 fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSemantics) -> bool {
     if msg.role == AgentRole::Assistant {
-        return metadata_has_tool(msg, &semantics.append_tool_name);
+        return metadata_has_tool(msg, semantics.append_tool_name.as_str());
     }
     if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
         return semantic_success_total_blocks(&msg.content, semantics).is_some();
@@ -124,7 +124,7 @@ fn artifact_id_from_assistant_metadata(
     semantics: &ArtifactSquashSemantics,
 ) -> Option<String> {
     msg.metadata.raw_tool_calls().iter().find_map(|call| {
-        if call.name != semantics.append_tool_name {
+        if call.name.as_str() != semantics.append_tool_name.as_str() {
             return None;
         }
         // ENC-288: single ingress parse; typed accessor instead of re-parsing.

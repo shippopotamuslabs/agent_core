@@ -21,6 +21,7 @@ use crate::message::{AgentMessage, AgentRole, MessageMeta};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::turn_io::FinishReason;
 
 /// Disjoint-field view of `InnerSession` needed by the finish path.
@@ -38,7 +39,7 @@ pub(super) struct FinishState<'a> {
     pub state_ledger: &'a mut StateLedger,
     pub context_store: &'a mut ContextStore,
     pub sidecar_builder: &'a mut SidecarBuilder,
-    pub active_tool_names: &'a [String],
+    pub active_tool_names: &'a [ToolName],
     pub turn_index: u32,
     pub model_requests_this_turn: &'a mut u32,
     pub compaction_passes_this_turn: u32,

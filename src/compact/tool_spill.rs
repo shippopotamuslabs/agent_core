@@ -198,7 +198,8 @@ mod tests {
 
     fn frg14_squash(append_tool_name: &str, total_field: &str) -> ArtifactSquashSemantics {
         ArtifactSquashSemantics {
-            append_tool_name: append_tool_name.into(),
+            append_tool_name: crate::tool_name::ToolName::new(append_tool_name)
+                .unwrap_or_else(|_| crate::tool_name::ToolName::from_raw_lenient(append_tool_name)),
             id_field: "docId".into(),
             blocks_field: "chunks".into(),
             total_blocks_result_field: total_field.into(),

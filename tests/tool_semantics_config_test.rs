@@ -10,6 +10,11 @@ use agent_core::canonicalize::{
     canonicalize_raw_arguments_with_semantics, ToolCallCanonicalizeMode,
 };
 use agent_core::catalog::{FieldHint, ToolCatalog, ToolSchemaHint, ToolSpec};
+use agent_core::tool_name::ToolName;
+
+fn tn(name: &str) -> ToolName {
+    ToolName::new(name).expect("test tool name must be valid")
+}
 use agent_core::guardrails::GuardrailState;
 use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
 use agent_core::session::AgentConfig;
@@ -25,7 +30,7 @@ use support::enclave_test_semantics::{enclave_test_catalog, enclave_test_semanti
 
 fn tool(name: &str) -> ToolSpec {
     ToolSpec {
-        name: name.to_string(),
+        name: tn(name),
         aliases: Vec::new(),
         reproducible: true,
         schema_hint: None,
@@ -39,13 +44,13 @@ fn custom_semantics() -> ToolSemanticsConfig {
         catalog: agent_core::tool_semantics::ToolCatalogConfig {
             tools: vec![
                 ToolSpec {
-                    name: "begin_doc".to_string(),
+                    name: tn("begin_doc"),
                     aliases: Vec::new(),
                     reproducible: false,
                     schema_hint: None,
                 },
                 ToolSpec {
-                    name: "write_doc".to_string(),
+                    name: tn("write_doc"),
                     aliases: Vec::new(),
                     reproducible: false,
                     schema_hint: Some(ToolSchemaHint {
@@ -71,14 +76,14 @@ fn custom_semantics() -> ToolSemanticsConfig {
             ],
         },
         discovery: Some(ToolDiscoverySemantics {
-            tool_name: "open_tools".to_string(),
+            tool_name: tn("open_tools"),
             request_field_name: "names".to_string(),
             always_callable: true,
             companion_callable_tools: Vec::new(),
         }),
         artifact: Some(ArtifactToolSemantics {
-            start_tool_name: "begin_doc".to_string(),
-            append_tool_name: "write_doc".to_string(),
+            start_tool_name: tn("begin_doc"),
+            append_tool_name: tn("write_doc"),
             id_field: "docId".to_string(),
             append_blocks_field: "chunks".to_string(),
             completion_field: "done".to_string(),
@@ -89,7 +94,7 @@ fn custom_semantics() -> ToolSemanticsConfig {
         }),
         argument_repairs: vec![
             ToolArgumentRepairRule {
-                tool_name: "write_doc".to_string(),
+                tool_name: tn("write_doc"),
                 aliases: vec![
                     ParameterAlias {
                         alias: "artifact_id".to_string(),
@@ -109,7 +114,7 @@ fn custom_semantics() -> ToolSemanticsConfig {
                 }],
             },
             ToolArgumentRepairRule {
-                tool_name: "memory_search".to_string(),
+                tool_name: tn("memory_search"),
                 aliases: Vec::new(),
                 special_values: vec![SpecialValueRepair::ScalarToArray {
                     source: "query".to_string(),
@@ -119,23 +124,23 @@ fn custom_semantics() -> ToolSemanticsConfig {
         ],
         canonical_shapes: vec![
             ToolCanonicalShape {
-                tool_name: "write_doc".to_string(),
+                tool_name: tn("write_doc"),
                 ordered_fields: vec!["docId".to_string(), "chunks".to_string(), "done".to_string()],
             },
             ToolCanonicalShape {
-                tool_name: "memory_search".to_string(),
+                tool_name: tn("memory_search"),
                 ordered_fields: vec!["queries".to_string()],
             },
         ],
         result_policies: vec![ToolResultPolicy {
-            tool_name: "write_doc".to_string(),
+            tool_name: tn("write_doc"),
             spill_stored_copy_only: true,
             skip_result_truncation: true,
             preserve_in_micro_compaction: true,
         }],
         compaction: ToolCompactionSemantics {
             artifact_squash: Some(ArtifactSquashSemantics {
-                append_tool_name: "write_doc".to_string(),
+                append_tool_name: tn("write_doc"),
                 id_field: "docId".to_string(),
                 blocks_field: "chunks".to_string(),
                 total_blocks_result_field: "chunkCount".to_string(),
@@ -147,7 +152,7 @@ fn custom_semantics() -> ToolSemanticsConfig {
             }),
         },
         greedy_extension_tools: vec![ToolGreedyExtensionSemantics {
-            tool_name: "write_doc".to_string(),
+            tool_name: tn("write_doc"),
             extra_turns: 20,
         }],
     }
@@ -177,10 +182,10 @@ fn ts_002_enclave_compatibility_config_preserves_existing_semantic_names() {
     let discovery = semantics.discovery.expect("discovery semantics");
     let artifact = semantics.artifact.expect("artifact semantics");
 
-    assert_eq!(discovery.tool_name, "tool_discovery_tool");
+    assert_eq!(discovery.tool_name.as_str(), "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
-    assert_eq!(artifact.start_tool_name, "start_artifact");
-    assert_eq!(artifact.append_tool_name, "append_blocks");
+    assert_eq!(artifact.start_tool_name.as_str(), "start_artifact");
+    assert_eq!(artifact.append_tool_name.as_str(), "append_blocks");
     assert_eq!(artifact.id_field, "artifactId");
     assert_eq!(artifact.completion_field, "isComplete");
 }
@@ -190,9 +195,15 @@ fn ts_003_catalog_builds_from_host_semantics_without_global_catalog() {
     let semantics = custom_semantics();
     let catalog = ToolCatalog::from_semantics(&semantics).expect("catalog");
 
-    assert_eq!(catalog.resolve("begin_doc").unwrap().name, "begin_doc");
-    assert_eq!(catalog.resolve("write_doc").unwrap().name, "write_doc");
-    assert!(catalog.resolve("append_blocks").is_none());
+    assert_eq!(
+        catalog.resolve(&tn("begin_doc")).unwrap().name.as_str(),
+        "begin_doc"
+    );
+    assert_eq!(
+        catalog.resolve(&tn("write_doc")).unwrap().name.as_str(),
+        "write_doc"
+    );
+    assert!(catalog.resolve(&tn("append_blocks")).is_none());
 }
 
 #[test]
@@ -211,9 +222,9 @@ fn ts_004_duplicate_canonical_tool_names_are_rejected() {
 #[test]
 fn ts_005_alias_collisions_are_rejected() {
     let mut first = tool("write_doc");
-    first.aliases = vec!["writer".to_string()];
+    first.aliases = vec![tn("writer")];
     let mut second = tool("compose_doc");
-    second.aliases = vec!["writer".to_string()];
+    second.aliases = vec![tn("writer")];
     let mut semantics = ToolSemanticsConfig::agnostic();
     semantics.catalog.tools = vec![first, second];
 
@@ -228,15 +239,34 @@ fn ts_005_alias_collisions_are_rejected() {
 }
 
 #[test]
-fn ts_006_invalid_artifact_config_is_rejected() {
-    let mut semantics = custom_semantics();
-    semantics.artifact.as_mut().unwrap().append_tool_name = String::new();
-
-    assert_eq!(
-        semantics.validate(),
-        Err(ToolSemanticsError::InvalidArtifactConfig {
-            message: "artifact append_tool_name must not be empty".to_string(),
-        }),
+fn ts_006_blank_artifact_tool_name_is_rejected_at_parse() {
+    // ENC-299: ToolName construction is fallible, so a blank tool_name never
+    // reaches validate() — serde rejects it at the JSON boundary instead.
+    let json = serde_json::json!({
+        "catalog": {"tools": []},
+        "discovery": null,
+        "artifact": {
+            "start_tool_name": "begin_doc",
+            "append_tool_name": "",
+            "id_field": "docId",
+            "append_blocks_field": "chunks",
+            "completion_field": "done",
+            "status_field": "status",
+            "success_status_value": "success",
+            "synthetic_call_id_prefix": "auto-close-",
+            "empty_append_payload_value": []
+        },
+        "argument_repairs": [],
+        "canonical_shapes": [],
+        "result_policies": [],
+        "compaction": {"artifact_squash": null},
+        "greedy_extension_tools": []
+    });
+    let raw = serde_json::to_string(&json).expect("test JSON serializes");
+    let result = ToolSemanticsConfig::from_json(&raw);
+    assert!(
+        result.is_err(),
+        "blank append_tool_name must fail at parse, got {result:?}"
     );
 }
 
@@ -245,7 +275,7 @@ fn ts_007_global_catalog_remains_compatibility_only() {
     let catalog = enclave_test_catalog();
 
     assert_eq!(
-        catalog.resolve("append_blocks").unwrap().name,
+        catalog.resolve(&tn("append_blocks")).unwrap().name.as_str(),
         "append_blocks"
     );
     assert_eq!(ToolSemanticsConfig::agnostic().catalog.tools.len(), 0);
@@ -255,7 +285,7 @@ fn ts_007_global_catalog_remains_compatibility_only() {
 fn ts_008_custom_alias_normalizes_artifact_id_field() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "write_doc",
+        &tn("write_doc"),
         r#"{"artifact_id":"doc-1","chunks":[]}"#,
         &catalog_from(&semantics),
         &semantics,
@@ -276,7 +306,7 @@ fn ts_008_custom_alias_normalizes_artifact_id_field() {
 fn ts_009_custom_completion_alias_normalizes_completion_field() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "write_doc",
+        &tn("write_doc"),
         r#"{"docId":"doc-1","chunks":[],"complete":true}"#,
         &catalog_from(&semantics),
         &semantics,
@@ -297,7 +327,7 @@ fn ts_009_custom_completion_alias_normalizes_completion_field() {
 fn ts_010_custom_default_injects_completion_false() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "write_doc",
+        &tn("write_doc"),
         r#"{"docId":"doc-1","chunks":[]}"#,
         &catalog_from(&semantics),
         &semantics,
@@ -316,7 +346,7 @@ fn ts_010_custom_default_injects_completion_false() {
 fn ts_011_stringified_custom_blocks_array_is_accepted() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "write_doc",
+        &tn("write_doc"),
         r#"{"docId":"doc-1","chunks":"[{\"text\":\"Hello\"}]","done":false}"#,
         &catalog_from(&semantics),
         &semantics,
@@ -337,7 +367,7 @@ fn ts_011_stringified_custom_blocks_array_is_accepted() {
 fn ts_012_malformed_stringified_custom_blocks_array_is_rejected() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "write_doc",
+        &tn("write_doc"),
         r#"{"docId":"doc-1","chunks":"[{not valid json","done":false}"#,
         &catalog_from(&semantics),
         &semantics,
@@ -354,7 +384,7 @@ fn ts_012_malformed_stringified_custom_blocks_array_is_rejected() {
 fn ts_013_custom_scalar_query_normalizes_to_queries_array() {
     let semantics = custom_semantics();
     let result = canonicalize_raw_arguments_with_semantics(
-        "memory_search",
+        &tn("memory_search"),
         r#"{"query":"budget"}"#,
         &catalog_from(&semantics),
         &semantics,

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::catalog::{ToolSchemaHint, ToolSpec};
+use crate::tool_name::ToolName;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSemanticsConfig {
@@ -36,33 +37,31 @@ impl ToolSemanticsConfig {
     }
 
     pub fn validate(&self) -> Result<(), ToolSemanticsError> {
-        let mut names: HashMap<String, String> = HashMap::new();
+        // Identity is ToolName equality: specs and aliases arrive canonical,
+        // so validation compares directly with no per-site folding (ENC-299:
+        // the fold lives in ToolName::new).
+        let mut names: HashMap<&ToolName, &ToolName> = HashMap::new();
         for tool in &self.catalog.tools {
-            let normalized = normalize_tool_name(&tool.name);
-            if names
-                .insert(normalized.clone(), tool.name.clone())
-                .is_some()
-            {
+            if names.insert(&tool.name, &tool.name).is_some() {
                 return Err(ToolSemanticsError::DuplicateToolName {
-                    normalized_name: normalized,
+                    normalized_name: tool.name.as_str().to_string(),
                 });
             }
         }
 
-        let mut aliases: HashMap<String, String> = HashMap::new();
+        let mut aliases: HashMap<&ToolName, &ToolName> = HashMap::new();
         for tool in &self.catalog.tools {
             for alias in &tool.aliases {
-                let normalized = normalize_tool_name(alias);
-                if let Some(first) = aliases.get(&normalized) {
-                    if first != &tool.name {
+                if let Some(first) = aliases.get(alias) {
+                    if *first != &tool.name {
                         return Err(ToolSemanticsError::AliasCollision {
-                            alias: alias.clone(),
-                            first_tool: first.clone(),
-                            second_tool: tool.name.clone(),
+                            alias: alias.as_str().to_string(),
+                            first_tool: first.as_str().to_string(),
+                            second_tool: tool.name.as_str().to_string(),
                         });
                     }
                 } else {
-                    aliases.insert(normalized, tool.name.clone());
+                    aliases.insert(alias, &tool.name);
                 }
             }
         }
@@ -81,14 +80,25 @@ impl ToolSemanticsConfig {
         }
 
         if let Some(artifact) = &self.artifact {
-            for (name, value) in [
-                ("start_tool_name", &artifact.start_tool_name),
-                ("append_tool_name", &artifact.append_tool_name),
-                ("id_field", &artifact.id_field),
-                ("append_blocks_field", &artifact.append_blocks_field),
-                ("completion_field", &artifact.completion_field),
+            // ToolName fields are non-empty by construction (blank is a
+            // boundary error); the wire-name fields keep the explicit check.
+            for (name, empty) in [
+                (
+                    "start_tool_name",
+                    artifact.start_tool_name.as_str().is_empty(),
+                ),
+                (
+                    "append_tool_name",
+                    artifact.append_tool_name.as_str().is_empty(),
+                ),
+                ("id_field", artifact.id_field.is_empty()),
+                (
+                    "append_blocks_field",
+                    artifact.append_blocks_field.is_empty(),
+                ),
+                ("completion_field", artifact.completion_field.is_empty()),
             ] {
-                if value.is_empty() {
+                if empty {
                     return Err(ToolSemanticsError::InvalidArtifactConfig {
                         message: format!("artifact {name} must not be empty"),
                     });
@@ -121,18 +131,18 @@ pub struct ToolCatalogConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDiscoverySemantics {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub request_field_name: String,
     pub always_callable: bool,
     /// Tools that may be called without a prior `tool_discovery_tool` activation (e.g. context retrieval).
     #[serde(default)]
-    pub companion_callable_tools: Vec<String>,
+    pub companion_callable_tools: Vec<ToolName>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactToolSemantics {
-    pub start_tool_name: String,
-    pub append_tool_name: String,
+    pub start_tool_name: ToolName,
+    pub append_tool_name: ToolName,
     pub id_field: String,
     pub append_blocks_field: String,
     pub completion_field: String,
@@ -144,7 +154,7 @@ pub struct ArtifactToolSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolArgumentRepairRule {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub aliases: Vec<ParameterAlias>,
     pub special_values: Vec<SpecialValueRepair>,
 }
@@ -165,13 +175,13 @@ pub enum SpecialValueRepair {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCanonicalShape {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub ordered_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultPolicy {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub spill_stored_copy_only: bool,
     pub skip_result_truncation: bool,
     pub preserve_in_micro_compaction: bool,
@@ -184,7 +194,7 @@ pub struct ToolCompactionSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactSquashSemantics {
-    pub append_tool_name: String,
+    pub append_tool_name: ToolName,
     pub id_field: String,
     pub blocks_field: String,
     pub total_blocks_result_field: String,
@@ -197,7 +207,7 @@ pub struct ArtifactSquashSemantics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolGreedyExtensionSemantics {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub extra_turns: u32,
 }
 
@@ -222,10 +232,6 @@ pub enum ToolSemanticsError {
     },
 }
 
-pub(crate) fn normalize_tool_name(s: &str) -> String {
-    s.to_lowercase().replace(['-', ' '], "_")
-}
-
 #[cfg(test)]
 pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
     let mut semantics: ToolSemanticsConfig =
@@ -244,25 +250,25 @@ pub(crate) fn test_fixture_enclave_semantics() -> ToolSemanticsConfig {
 }
 
 pub(crate) fn schema_hint_for_semantics(
-    tool_name: &str,
+    tool_name: &ToolName,
     config: &ToolSemanticsConfig,
 ) -> Option<ToolSchemaHint> {
     config
         .catalog
         .tools
         .iter()
-        .find(|tool| normalize_tool_name(&tool.name) == normalize_tool_name(tool_name))
+        .find(|tool| tool.name == *tool_name)
         .and_then(|tool| tool.schema_hint.clone())
 }
 
 pub(crate) fn result_policy_for<'a>(
     config: &'a ToolSemanticsConfig,
-    tool_name: &str,
+    tool_name: &ToolName,
 ) -> Option<&'a ToolResultPolicy> {
     config
         .result_policies
         .iter()
-        .find(|policy| normalize_tool_name(&policy.tool_name) == normalize_tool_name(tool_name))
+        .find(|policy| policy.tool_name == *tool_name)
 }
 
 #[cfg(test)]
@@ -272,11 +278,15 @@ mod catalog_split_tests {
     #[test]
     fn with_tool_semantics_builds_policy_catalog() {
         use crate::catalog::ToolSpec;
+        use crate::tool_name::ToolName;
+        fn tn(name: &str) -> ToolName {
+            ToolName::new(name).expect("test tool name must be valid")
+        }
         let semantics = ToolSemanticsConfig {
             catalog: ToolCatalogConfig {
                 tools: vec![ToolSpec {
-                    name: "web_search".to_string(),
-                    aliases: vec!["websearch".to_string()],
+                    name: tn("web_search"),
+                    aliases: vec![tn("websearch")],
                     reproducible: true,
                     schema_hint: None,
                 }],
@@ -287,8 +297,8 @@ mod catalog_split_tests {
             crate::session::AgentConfig::with_tool_semantics(semantics).expect("valid semantics");
         assert_eq!(config.tool_catalog.len(), 1);
         assert_eq!(
-            config.tool_catalog.resolve("websearch").unwrap().name,
-            "web_search"
+            config.tool_catalog.resolve(&tn("websearch")).unwrap().name,
+            tn("web_search")
         );
         assert!(!config.tool_catalog.is_empty());
     }
@@ -296,17 +306,21 @@ mod catalog_split_tests {
     #[test]
     fn with_tool_semantics_rejects_duplicate_tool_names() {
         use crate::catalog::ToolSpec;
+        use crate::tool_name::ToolName;
+        fn tn(name: &str) -> ToolName {
+            ToolName::new(name).expect("test tool name must be valid")
+        }
         let semantics = ToolSemanticsConfig {
             catalog: ToolCatalogConfig {
                 tools: vec![
                     ToolSpec {
-                        name: "web_search".to_string(),
+                        name: tn("web_search"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
                     },
                     ToolSpec {
-                        name: "web-search".to_string(),
+                        name: tn("web-search"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,

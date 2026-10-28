@@ -49,6 +49,7 @@ use crate::policy::resolve_context_policy;
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
@@ -65,9 +66,9 @@ pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
-pub(super) fn merge_active_tool_names(
-    active_tool_names: &mut Vec<String>,
-    names: impl IntoIterator<Item = String>,
+pub(super) fn merge_active_tool_names<T: PartialEq>(
+    active_tool_names: &mut Vec<T>,
+    names: impl IntoIterator<Item = T>,
 ) {
     for name in names {
         if !active_tool_names.iter().any(|existing| existing == &name) {
@@ -78,7 +79,7 @@ pub(super) fn merge_active_tool_names(
 
 pub(super) fn is_companion_callable_tool(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
-    tool_name: &str,
+    tool_name: &ToolName,
 ) -> bool {
     discovery
         .as_ref()
@@ -87,12 +88,15 @@ pub(super) fn is_companion_callable_tool(
 }
 
 pub(super) fn activate_tools_for_spill_reference(
-    active_tool_names: &mut Vec<String>,
+    active_tool_names: &mut Vec<ToolName>,
     result: &mut ToolResultRecord,
     reference: &ContextReference,
 ) {
     let hinted = activation_tools_from_retrieval_hint(&reference.retrieval_hint);
-    merge_active_tool_names(active_tool_names, hinted.iter().cloned());
+    merge_active_tool_names(
+        active_tool_names,
+        hinted.iter().filter_map(|name| ToolName::new(name).ok()),
+    );
     merge_active_tool_names(&mut result.activated_tool_names, hinted);
 }
 
@@ -510,7 +514,9 @@ impl AgentEngine {
         for res in &results {
             merge_active_tool_names(
                 &mut g.active_tool_names,
-                res.activated_tool_names.iter().cloned(),
+                res.activated_tool_names
+                    .iter()
+                    .filter_map(|name| ToolName::new(name).ok()),
             );
         }
 
@@ -770,7 +776,12 @@ impl AgentEngine {
         let spill_tokens_before = g
             .estimate_pressure(CompactionTrigger::PostToolResult)
             .total_tokens;
-        let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+        // Executed call names come from the repair pipeline (already
+        // canonical); a blank name simply matches no policy.
+        let call_tool = ToolName::new(&call.name).ok();
+        let policy = call_tool
+            .as_ref()
+            .and_then(|name| result_policy_for(&g.config.tool_semantics, name));
         let skip_result_truncation = policy
             .map(|policy| policy.skip_result_truncation)
             .unwrap_or(false);
@@ -973,7 +984,10 @@ pub(super) fn session_has_append_context(
         return false;
     }
     messages.iter().any(|message| {
-        crate::compact::artifact_squash::metadata_has_tool(message, &squash.append_tool_name)
+        crate::compact::artifact_squash::metadata_has_tool(
+            message,
+            squash.append_tool_name.as_str(),
+        )
     })
 }
 
@@ -2349,13 +2363,13 @@ mod tests {
             catalog: ToolCatalogConfig {
                 tools: vec![
                     ToolSpec {
-                        name: "web_search".into(),
+                        name: crate::tool_name::ToolName::new("web_search").expect("valid name"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
                     },
                     ToolSpec {
-                        name: "web-search".into(),
+                        name: crate::tool_name::ToolName::new("web-search").expect("valid name"),
                         aliases: Vec::new(),
                         reproducible: true,
                         schema_hint: None,
@@ -2392,7 +2406,10 @@ mod tests {
         total_blocks_result_field: &str,
     ) -> ArtifactSquashSemantics {
         ArtifactSquashSemantics {
-            append_tool_name: append_tool_name.into(),
+            // The empty-name test exercises the never-engage guard via the
+            // lenient sentinel; every other caller passes a valid name.
+            append_tool_name: crate::tool_name::ToolName::new(append_tool_name)
+                .unwrap_or_else(|_| crate::tool_name::ToolName::from_raw_lenient(append_tool_name)),
             id_field: "docId".into(),
             blocks_field: "chunks".into(),
             total_blocks_result_field: total_blocks_result_field.into(),

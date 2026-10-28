@@ -223,7 +223,7 @@ mod tests {
     fn core_spec_type_still_convertible_for_policy_tests() {
         // Keeps the core ToolSpec import load-bearing for policy tests.
         let core = ToolSpec {
-            name: "x".into(),
+            name: crate::tool_name::ToolName::new("x").expect("valid name"),
             aliases: Vec::new(),
             reproducible: true,
             schema_hint: None,

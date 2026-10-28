@@ -6,7 +6,12 @@ use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::policy::ContextPolicyTier;
 use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::tool_name::ToolName;
 use agent_core::tool_semantics::{ToolCatalogConfig, ToolSemanticsConfig};
+
+fn tn(name: &str) -> ToolName {
+    ToolName::new(name).expect("test tool name must be valid")
+}
 
 const SCHEMAS_JSON: &str = r#"[
   {"name":"web_search","description":"Search the web for information","parameters":{}},
@@ -305,13 +310,13 @@ fn enc_297_nonempty_typed_catalog_shows_active_schemas() {
         catalog: ToolCatalogConfig {
             tools: vec![
                 ToolSpec {
-                    name: "web_search".into(),
+                    name: tn("web_search"),
                     aliases: Vec::new(),
                     reproducible: true,
                     schema_hint: None,
                 },
                 ToolSpec {
-                    name: "append_blocks".into(),
+                    name: tn("append_blocks"),
                     aliases: Vec::new(),
                     reproducible: false,
                     schema_hint: None,

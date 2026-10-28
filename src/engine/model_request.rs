@@ -16,6 +16,7 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
 use crate::state_ledger::StateLedger;
 use crate::tool_context::build_tool_context_index_from_set;
+use crate::tool_name::ToolName;
 use crate::turn_io::ModelRequest;
 
 /// Disjoint-field view of `InnerSession` needed to build a `ModelRequest`.
@@ -27,7 +28,7 @@ pub(super) struct ModelRequestInputs<'a> {
     pub config: &'a AgentConfig,
     pub capabilities: &'a SessionCapabilities,
     pub io: &'a SessionIoParams,
-    pub active_tool_names: &'a [String],
+    pub active_tool_names: &'a [ToolName],
     pub context_store: &'a mut ContextStore,
     pub state_ledger: &'a StateLedger,
     pub sidecar_builder: &'a mut SidecarBuilder,

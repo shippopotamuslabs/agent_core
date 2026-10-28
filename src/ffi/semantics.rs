@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use crate::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
+use crate::tool_name::ToolName;
 use crate::tool_semantics::{
     ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
     ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
@@ -27,6 +28,23 @@ fn parse_json_value(field: &str, json: &str) -> Result<serde_json::Value, AgentE
     serde_json::from_str(json).map_err(|error| AgentException::Internal {
         detail: format!("{field} is not valid JSON: {error}"),
     })
+}
+
+/// Build a core [`ToolName`] at the typed FFI edge: blank input is a typed
+/// `AgentException` naming the field, never a silent empty identity
+/// (ENC-299: core `ToolName` construction is fallible, and FFI records keep
+/// `String` fields so the failure surfaces here).
+fn tool_name_from_ffi(field: &str, raw: &str) -> Result<ToolName, AgentException> {
+    ToolName::new(raw).map_err(|_| AgentException::Internal {
+        detail: format!("{field} must not be blank"),
+    })
+}
+
+/// Build core [`ToolName`]s for a `Vec<String>` FFI field.
+fn tool_names_from_ffi(field: &str, raw: Vec<String>) -> Result<Vec<ToolName>, AgentException> {
+    raw.into_iter()
+        .map(|name| tool_name_from_ffi(field, &name))
+        .collect()
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -127,8 +145,12 @@ pub struct FfiToolSpec {
 impl From<&ToolSpec> for FfiToolSpec {
     fn from(spec: &ToolSpec) -> Self {
         Self {
-            name: spec.name.clone(),
-            aliases: spec.aliases.clone(),
+            name: spec.name.as_str().to_string(),
+            aliases: spec
+                .aliases
+                .iter()
+                .map(|alias| alias.as_str().to_string())
+                .collect(),
             reproducible: spec.reproducible,
             schema_hint: spec.schema_hint.as_ref().map(FfiToolSchemaHint::from),
         }
@@ -142,8 +164,8 @@ impl FfiToolSpec {
             .map(|hint| hint.into_core(&self.name))
             .transpose()?;
         Ok(ToolSpec {
-            name: self.name,
-            aliases: self.aliases,
+            name: tool_name_from_ffi("tool_specs[].name", &self.name)?,
+            aliases: tool_names_from_ffi("tool_specs[].aliases[]", self.aliases)?,
             reproducible: self.reproducible,
             schema_hint,
         })
@@ -223,20 +245,20 @@ pub struct FfiToolArgumentRepairRule {
 impl From<ToolArgumentRepairRule> for FfiToolArgumentRepairRule {
     fn from(rule: ToolArgumentRepairRule) -> Self {
         Self {
-            tool_name: rule.tool_name,
+            tool_name: rule.tool_name.as_str().to_string(),
             aliases: rule.aliases.into_iter().map(Into::into).collect(),
             special_values: rule.special_values.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-impl From<FfiToolArgumentRepairRule> for ToolArgumentRepairRule {
-    fn from(rule: FfiToolArgumentRepairRule) -> Self {
-        Self {
-            tool_name: rule.tool_name,
-            aliases: rule.aliases.into_iter().map(Into::into).collect(),
-            special_values: rule.special_values.into_iter().map(Into::into).collect(),
-        }
+impl FfiToolArgumentRepairRule {
+    fn into_core(self) -> Result<ToolArgumentRepairRule, AgentException> {
+        Ok(ToolArgumentRepairRule {
+            tool_name: tool_name_from_ffi("argument_repairs[].tool_name", &self.tool_name)?,
+            aliases: self.aliases.into_iter().map(Into::into).collect(),
+            special_values: self.special_values.into_iter().map(Into::into).collect(),
+        })
     }
 }
 
@@ -249,18 +271,18 @@ pub struct FfiToolCanonicalShape {
 impl From<ToolCanonicalShape> for FfiToolCanonicalShape {
     fn from(shape: ToolCanonicalShape) -> Self {
         Self {
-            tool_name: shape.tool_name,
+            tool_name: shape.tool_name.as_str().to_string(),
             ordered_fields: shape.ordered_fields,
         }
     }
 }
 
-impl From<FfiToolCanonicalShape> for ToolCanonicalShape {
-    fn from(shape: FfiToolCanonicalShape) -> Self {
-        Self {
-            tool_name: shape.tool_name,
-            ordered_fields: shape.ordered_fields,
-        }
+impl FfiToolCanonicalShape {
+    fn into_core(self) -> Result<ToolCanonicalShape, AgentException> {
+        Ok(ToolCanonicalShape {
+            tool_name: tool_name_from_ffi("canonical_shapes[].tool_name", &self.tool_name)?,
+            ordered_fields: self.ordered_fields,
+        })
     }
 }
 
@@ -275,7 +297,7 @@ pub struct FfiToolResultPolicy {
 impl From<ToolResultPolicy> for FfiToolResultPolicy {
     fn from(policy: ToolResultPolicy) -> Self {
         Self {
-            tool_name: policy.tool_name,
+            tool_name: policy.tool_name.as_str().to_string(),
             spill_stored_copy_only: policy.spill_stored_copy_only,
             skip_result_truncation: policy.skip_result_truncation,
             preserve_in_micro_compaction: policy.preserve_in_micro_compaction,
@@ -283,14 +305,14 @@ impl From<ToolResultPolicy> for FfiToolResultPolicy {
     }
 }
 
-impl From<FfiToolResultPolicy> for ToolResultPolicy {
-    fn from(policy: FfiToolResultPolicy) -> Self {
-        Self {
-            tool_name: policy.tool_name,
-            spill_stored_copy_only: policy.spill_stored_copy_only,
-            skip_result_truncation: policy.skip_result_truncation,
-            preserve_in_micro_compaction: policy.preserve_in_micro_compaction,
-        }
+impl FfiToolResultPolicy {
+    fn into_core(self) -> Result<ToolResultPolicy, AgentException> {
+        Ok(ToolResultPolicy {
+            tool_name: tool_name_from_ffi("result_policies[].tool_name", &self.tool_name)?,
+            spill_stored_copy_only: self.spill_stored_copy_only,
+            skip_result_truncation: self.skip_result_truncation,
+            preserve_in_micro_compaction: self.preserve_in_micro_compaction,
+        })
     }
 }
 
@@ -305,22 +327,29 @@ pub struct FfiToolDiscoverySemantics {
 impl From<ToolDiscoverySemantics> for FfiToolDiscoverySemantics {
     fn from(semantics: ToolDiscoverySemantics) -> Self {
         Self {
-            tool_name: semantics.tool_name,
+            tool_name: semantics.tool_name.as_str().to_string(),
             request_field_name: semantics.request_field_name,
             always_callable: semantics.always_callable,
-            companion_callable_tools: semantics.companion_callable_tools,
+            companion_callable_tools: semantics
+                .companion_callable_tools
+                .iter()
+                .map(|tool| tool.as_str().to_string())
+                .collect(),
         }
     }
 }
 
-impl From<FfiToolDiscoverySemantics> for ToolDiscoverySemantics {
-    fn from(semantics: FfiToolDiscoverySemantics) -> Self {
-        Self {
-            tool_name: semantics.tool_name,
-            request_field_name: semantics.request_field_name,
-            always_callable: semantics.always_callable,
-            companion_callable_tools: semantics.companion_callable_tools,
-        }
+impl FfiToolDiscoverySemantics {
+    fn into_core(self) -> Result<ToolDiscoverySemantics, AgentException> {
+        Ok(ToolDiscoverySemantics {
+            tool_name: tool_name_from_ffi("discovery.tool_name", &self.tool_name)?,
+            request_field_name: self.request_field_name,
+            always_callable: self.always_callable,
+            companion_callable_tools: tool_names_from_ffi(
+                "discovery.companion_callable_tools[]",
+                self.companion_callable_tools,
+            )?,
+        })
     }
 }
 
@@ -345,8 +374,8 @@ pub struct FfiArtifactToolSemantics {
 impl From<&ArtifactToolSemantics> for FfiArtifactToolSemantics {
     fn from(semantics: &ArtifactToolSemantics) -> Self {
         Self {
-            start_tool_name: semantics.start_tool_name.clone(),
-            append_tool_name: semantics.append_tool_name.clone(),
+            start_tool_name: semantics.start_tool_name.as_str().to_string(),
+            append_tool_name: semantics.append_tool_name.as_str().to_string(),
             id_field: semantics.id_field.clone(),
             append_blocks_field: semantics.append_blocks_field.clone(),
             completion_field: semantics.completion_field.clone(),
@@ -375,8 +404,11 @@ impl FfiArtifactToolSemantics {
             None => serde_json::Value::Null,
         };
         Ok(ArtifactToolSemantics {
-            start_tool_name: self.start_tool_name,
-            append_tool_name: self.append_tool_name,
+            start_tool_name: tool_name_from_ffi("artifact.start_tool_name", &self.start_tool_name)?,
+            append_tool_name: tool_name_from_ffi(
+                "artifact.append_tool_name",
+                &self.append_tool_name,
+            )?,
             id_field: self.id_field,
             append_blocks_field: self.append_blocks_field,
             completion_field: self.completion_field,
@@ -404,7 +436,7 @@ pub struct FfiArtifactSquashSemantics {
 impl From<ArtifactSquashSemantics> for FfiArtifactSquashSemantics {
     fn from(semantics: ArtifactSquashSemantics) -> Self {
         Self {
-            append_tool_name: semantics.append_tool_name,
+            append_tool_name: semantics.append_tool_name.as_str().to_string(),
             id_field: semantics.id_field,
             blocks_field: semantics.blocks_field,
             total_blocks_result_field: semantics.total_blocks_result_field,
@@ -418,20 +450,23 @@ impl From<ArtifactSquashSemantics> for FfiArtifactSquashSemantics {
     }
 }
 
-impl From<FfiArtifactSquashSemantics> for ArtifactSquashSemantics {
-    fn from(semantics: FfiArtifactSquashSemantics) -> Self {
-        Self {
-            append_tool_name: semantics.append_tool_name,
-            id_field: semantics.id_field,
-            blocks_field: semantics.blocks_field,
-            total_blocks_result_field: semantics.total_blocks_result_field,
-            status_field: semantics.status_field,
-            success_status_value: semantics.success_status_value,
-            summary_template: semantics.summary_template,
-            continuation_instruction: semantics.continuation_instruction,
+impl FfiArtifactSquashSemantics {
+    fn into_core(self) -> Result<ArtifactSquashSemantics, AgentException> {
+        Ok(ArtifactSquashSemantics {
+            append_tool_name: tool_name_from_ffi(
+                "compaction.artifact_squash.append_tool_name",
+                &self.append_tool_name,
+            )?,
+            id_field: self.id_field,
+            blocks_field: self.blocks_field,
+            total_blocks_result_field: self.total_blocks_result_field,
+            status_field: self.status_field,
+            success_status_value: self.success_status_value,
+            summary_template: self.summary_template,
+            continuation_instruction: self.continuation_instruction,
             // ENC-297 M4: saturating conversion, never a truncating `as`.
-            snippet_max_chars: usize::try_from(semantics.snippet_max_chars).unwrap_or(usize::MAX),
-        }
+            snippet_max_chars: usize::try_from(self.snippet_max_chars).unwrap_or(usize::MAX),
+        })
     }
 }
 
@@ -448,11 +483,14 @@ impl From<ToolCompactionSemantics> for FfiToolCompactionSemantics {
     }
 }
 
-impl From<FfiToolCompactionSemantics> for ToolCompactionSemantics {
-    fn from(semantics: FfiToolCompactionSemantics) -> Self {
-        Self {
-            artifact_squash: semantics.artifact_squash.map(Into::into),
-        }
+impl FfiToolCompactionSemantics {
+    fn into_core(self) -> Result<ToolCompactionSemantics, AgentException> {
+        Ok(ToolCompactionSemantics {
+            artifact_squash: self
+                .artifact_squash
+                .map(FfiArtifactSquashSemantics::into_core)
+                .transpose()?,
+        })
     }
 }
 
@@ -465,18 +503,18 @@ pub struct FfiToolGreedyExtensionSemantics {
 impl From<ToolGreedyExtensionSemantics> for FfiToolGreedyExtensionSemantics {
     fn from(semantics: ToolGreedyExtensionSemantics) -> Self {
         Self {
-            tool_name: semantics.tool_name,
+            tool_name: semantics.tool_name.as_str().to_string(),
             extra_turns: semantics.extra_turns,
         }
     }
 }
 
-impl From<FfiToolGreedyExtensionSemantics> for ToolGreedyExtensionSemantics {
-    fn from(semantics: FfiToolGreedyExtensionSemantics) -> Self {
-        Self {
-            tool_name: semantics.tool_name,
-            extra_turns: semantics.extra_turns,
-        }
+impl FfiToolGreedyExtensionSemantics {
+    fn into_core(self) -> Result<ToolGreedyExtensionSemantics, AgentException> {
+        Ok(ToolGreedyExtensionSemantics {
+            tool_name: tool_name_from_ffi("greedy_extension_tools[].tool_name", &self.tool_name)?,
+            extra_turns: self.extra_turns,
+        })
     }
 }
 
@@ -566,20 +604,35 @@ impl FfiToolSemantics {
     pub(crate) fn into_core(self) -> Result<ToolSemanticsConfig, AgentException> {
         Ok(ToolSemanticsConfig {
             catalog: crate::tool_semantics::ToolCatalogConfig { tools: Vec::new() },
-            discovery: self.discovery.map(Into::into),
+            discovery: self
+                .discovery
+                .map(FfiToolDiscoverySemantics::into_core)
+                .transpose()?,
             artifact: self
                 .artifact
                 .map(|artifact| artifact.into_core())
                 .transpose()?,
-            argument_repairs: self.argument_repairs.into_iter().map(Into::into).collect(),
-            canonical_shapes: self.canonical_shapes.into_iter().map(Into::into).collect(),
-            result_policies: self.result_policies.into_iter().map(Into::into).collect(),
-            compaction: self.compaction.into(),
+            argument_repairs: self
+                .argument_repairs
+                .into_iter()
+                .map(FfiToolArgumentRepairRule::into_core)
+                .collect::<Result<Vec<_>, _>>()?,
+            canonical_shapes: self
+                .canonical_shapes
+                .into_iter()
+                .map(FfiToolCanonicalShape::into_core)
+                .collect::<Result<Vec<_>, _>>()?,
+            result_policies: self
+                .result_policies
+                .into_iter()
+                .map(FfiToolResultPolicy::into_core)
+                .collect::<Result<Vec<_>, _>>()?,
+            compaction: self.compaction.into_core()?,
             greedy_extension_tools: self
                 .greedy_extension_tools
                 .into_iter()
-                .map(Into::into)
-                .collect(),
+                .map(FfiToolGreedyExtensionSemantics::into_core)
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
@@ -827,7 +880,12 @@ mod tests {
         .expect("specs attach to agnostic base");
         assert_eq!(config.tool_catalog.len(), 1);
         assert_eq!(
-            config.tool_catalog.resolve("websearch").unwrap().name,
+            config
+                .tool_catalog
+                .resolve(&ToolName::new("websearch").expect("valid name"))
+                .unwrap()
+                .name
+                .as_str(),
             "web_search"
         );
     }

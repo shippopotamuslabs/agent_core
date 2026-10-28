@@ -23,6 +23,7 @@ use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord};
 use crate::repair::{RepairOutcome, ToolRepairPipeline};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
 use crate::turn_io::RawToolCall;
 
@@ -98,11 +99,16 @@ pub(super) fn append_assistant_message(
 
     *greedy_tool_names = merged_tool_calls
         .iter()
-        .map(|c| normalize_tool_name_hint(&c.name))
+        .filter_map(|c| gate_tool_name(&c.name))
+        .map(|name| name.as_str().to_string())
         .collect();
 }
 
-fn normalize_tool_name_hint(raw: &str) -> String {
+/// Gate identity for one raw model tool name: strip the provider/model
+/// namespace prefixes (raw-output repair, like the canonicalize pipeline),
+/// then enter the canonical identity space. The (b)-fold lives in
+/// [`ToolName::new`]; a blank result is not a name at all.
+fn gate_tool_name(raw: &str) -> Option<ToolName> {
     let mut s = raw.trim().to_string();
     loop {
         if let Some(r) = s.strip_prefix("functions.") {
@@ -113,7 +119,7 @@ fn normalize_tool_name_hint(raw: &str) -> String {
             break;
         }
     }
-    s.to_lowercase().replace(['-', ' '], "_")
+    ToolName::new(&s).ok()
 }
 
 /// Inputs for the repair/discovery loop. The catalog is built once by the
@@ -121,7 +127,7 @@ fn normalize_tool_name_hint(raw: &str) -> String {
 pub(super) struct RepairTurnInputs<'a> {
     pub semantics: &'a ToolSemanticsConfig,
     pub catalog: &'a ToolCatalog,
-    pub active_tool_names: &'a mut Vec<String>,
+    pub active_tool_names: &'a mut Vec<ToolName>,
     pub turn_index: u32,
     pub default_tool_timeout_ms: Option<u64>,
     pub tool_retry_limit: u32,
@@ -153,7 +159,7 @@ pub(super) fn repair_tool_turn(
     } = inputs;
     // Hoisted out of the per-call loop (was cloned + rebuilt per call).
     let discovery = semantics.discovery.clone();
-    let discovery_name = discovery.as_ref().map(|d| d.tool_name.as_str());
+    let discovery_name = discovery.as_ref().map(|d| d.tool_name.clone());
     let discovery_always_callable = discovery
         .as_ref()
         .map(|d| d.always_callable)
@@ -170,13 +176,21 @@ pub(super) fn repair_tool_turn(
         // the currently active set (the discovery tool itself is always callable).
         // Only enforce when active_tool_names has actually been initialized — empty
         // active set means the host has not opted into the new contract yet.
-        let companion_callable = is_companion_callable_tool(&discovery, &raw.name);
+        // Both sides are canonical identities, so this is plain equality.
+        let tool_name = gate_tool_name(&raw.name);
+        let companion_callable = tool_name
+            .as_ref()
+            .is_some_and(|name| is_companion_callable_tool(&discovery, name));
         if companion_callable {
-            merge_active_tool_names(active_tool_names, [raw.name.clone()]);
+            if let Some(name) = tool_name.clone() {
+                merge_active_tool_names(active_tool_names, [name]);
+            }
         }
         let callable_now = !active_tool_names.is_empty()
-            && (active_tool_names.iter().any(|n| n == &raw.name)
-                || (discovery_always_callable && Some(raw.name.as_str()) == discovery_name)
+            && (tool_name
+                .as_ref()
+                .is_some_and(|name| active_tool_names.iter().any(|active| active == name))
+                || (discovery_always_callable && tool_name.as_ref() == discovery_name.as_ref())
                 || companion_callable);
         if !active_tool_names.is_empty() && !callable_now {
             events.push(AgentEvent::ToolSoftFailure {
@@ -184,12 +198,12 @@ pub(super) fn repair_tool_turn(
                 turn_index,
             });
             let mut available = active_tool_names.clone();
-            if let Some(name) = discovery_name {
-                if !available.iter().any(|n| n == name) {
-                    available.insert(0, name.to_string());
+            if let Some(name) = discovery_name.clone() {
+                if !available.iter().any(|n| n == &name) {
+                    available.insert(0, name);
                 }
             }
-            let error = if let Some(name) = discovery_name {
+            let error = if let Some(name) = discovery_name.as_ref() {
                 format!("Tool '{}' is not active. Call {name} first.", raw.name)
             } else {
                 format!("Tool '{}' is not active.", raw.name)

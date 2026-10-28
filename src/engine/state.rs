@@ -17,6 +17,7 @@ use crate::message::{AgentMessage, ToolCallRecord};
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
+use crate::tool_name::ToolName;
 use crate::tool_schema::{ToolSchemaError, ToolSchemaSet};
 use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
@@ -113,7 +114,7 @@ pub(crate) struct InnerSession {
     pub(super) tools_blocked_nudges_this_turn: u32,
     /// Active tool names for the current session. Updated on tool_discovery_tool activations.
     /// Initially populated from the session's parsed [`ToolSchemaSet`].
-    pub(super) active_tool_names: Vec<String>,
+    pub(super) active_tool_names: Vec<ToolName>,
     pub(super) sidecar_builder: SidecarBuilder,
     /// Telemetry: number of compaction passes run this user turn (reset on turn start).
     pub(super) compaction_passes_this_turn: u32,

@@ -109,12 +109,12 @@ fn tsd_26_default_semantics_reference_search_tools() {
     let discovery = semantics
         .discovery
         .expect("enclave default semantics must configure discovery");
-    assert_eq!(discovery.tool_name, "tool_discovery_tool");
+    assert_eq!(discovery.tool_name.as_str(), "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
     assert!(discovery.always_callable);
-    assert!(discovery
-        .companion_callable_tools
-        .contains(&"read_context_reference".to_string()));
+    assert!(discovery.companion_callable_tools.contains(
+        &agent_core::tool_name::ToolName::new("read_context_reference").expect("valid test name")
+    ));
 }
 
 #[test]

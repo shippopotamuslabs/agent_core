@@ -46,7 +46,7 @@ fn micro_candidate(
         return None;
     }
     let raw_name = tool_name_from_message(&msg.metadata)?;
-    let spec = catalog.resolve(&raw_name)?;
+    let spec = catalog.resolve(&crate::tool_name::ToolName::new(&raw_name).ok()?)?;
     if !spec.reproducible {
         return None;
     }
@@ -65,7 +65,7 @@ fn micro_candidate(
     {
         return None;
     }
-    Some((spec.name.clone(), idx))
+    Some((spec.name.as_str().to_string(), idx))
 }
 
 /// Indices to replace: per tool, every index older than the `keep` most recent.

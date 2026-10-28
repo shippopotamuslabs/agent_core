@@ -43,7 +43,7 @@ impl GuardrailState {
         let mut cap = config.max_turns;
         for last in last_model_response_tool_names {
             for greedy in &config.tool_semantics.greedy_extension_tools {
-                if greedy.tool_name == *last {
+                if greedy.tool_name.as_str() == last {
                     cap = cap.max(self.tool_calls_executed.saturating_add(greedy.extra_turns));
                 }
             }
@@ -153,7 +153,7 @@ mod tests {
     fn greedy_cfg() -> AgentConfig {
         let mut config = AgentConfig::default();
         config.tool_semantics.greedy_extension_tools = vec![ToolGreedyExtensionSemantics {
-            tool_name: "append_blocks".into(),
+            tool_name: crate::tool_name::ToolName::new("append_blocks").expect("valid name"),
             extra_turns: 20,
         }];
         config

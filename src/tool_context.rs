@@ -89,7 +89,7 @@ pub fn build_tool_context_index_from_set(
     let summaries: Vec<ToolContextSummary> = advertised
         .into_iter()
         .map(|entry| ToolContextSummary {
-            name: entry.name.clone(),
+            name: entry.name.as_str().to_string(),
             description_preview: make_preview(entry.description()),
             reproducible: entry.reproducible(),
             deferrable: entry.deferrable(),

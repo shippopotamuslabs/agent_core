@@ -9,9 +9,14 @@ use agent_core::canonicalize::{
 };
 use agent_core::catalog::{ToolCatalog, ToolSpec};
 use agent_core::repair::{RepairOutcome, ToolRepairPipeline};
+use agent_core::tool_name::ToolName;
 use agent_core::tool_parse::coerce_provider_arguments_with_semantics;
 use agent_core::tool_semantics::ToolSemanticsConfig;
 use agent_core::turn_io::RawToolCall;
+
+fn tn(name: &str) -> ToolName {
+    ToolName::new(name).expect("test tool name must be valid")
+}
 use serde_json::Value;
 use support::enclave_test_semantics::{
     enclave_test_catalog, enclave_test_semantics, parse_enclave_tool_calls,
@@ -45,7 +50,7 @@ fn assert_blocks_array(arguments_json: &str, expected_text: &str, scenario: &str
 fn faal_cp_01_stringified_blocks_become_array() {
     let (catalog, semantics) = enclave_env();
     let result = canonicalize_raw_arguments_with_semantics(
-        "append_blocks",
+        &tn("append_blocks"),
         r#"{"artifactId":"art-cp-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hello\"}]","isComplete":false}"#,
         &catalog,
         &semantics,
@@ -127,7 +132,7 @@ fn faal_cp_03_provider_ingress_matches_execution_strict_arguments() {
 fn faal_cp_04_double_canonicalize_is_stable() {
     let (catalog, semantics) = enclave_env();
     let first = canonicalize_raw_arguments_with_semantics(
-        "append_blocks",
+        &tn("append_blocks"),
         r#"{"artifactId":"art-cp-4","blocks":"[{\"type\":\"paragraph\",\"text\":\"Stable\"}]","isComplete":false}"#,
         &catalog,
         &semantics,
@@ -138,7 +143,7 @@ fn faal_cp_04_double_canonicalize_is_stable() {
     let value = first.value;
 
     let second = canonicalize_raw_arguments_with_semantics(
-        "append_blocks",
+        &tn("append_blocks"),
         &serde_json::to_string(&value).expect("FAAL-CP-04 value json"),
         &catalog,
         &semantics,
@@ -229,13 +234,13 @@ fn frg14_slice1_no_shape_passthrough_preserves_extra_fields() {
     let mut semantics = ToolSemanticsConfig::agnostic();
     semantics.catalog.tools = vec![
         ToolSpec {
-            name: "web_search".to_string(),
+            name: tn("web_search"),
             aliases: Vec::new(),
             reproducible: true,
             schema_hint: None,
         },
         ToolSpec {
-            name: "web_extract".to_string(),
+            name: tn("web_extract"),
             aliases: Vec::new(),
             reproducible: true,
             schema_hint: None,
@@ -248,7 +253,7 @@ fn frg14_slice1_no_shape_passthrough_preserves_extra_fields() {
     let catalog = ToolCatalog::from_semantics(&semantics).expect("FRG14-SLICE1 catalog");
 
     let search = canonicalize_raw_arguments_with_semantics(
-        "web_search",
+        &tn("web_search"),
         r#"{"query":"x","extra":1}"#,
         &catalog,
         &semantics,
@@ -264,7 +269,7 @@ fn frg14_slice1_no_shape_passthrough_preserves_extra_fields() {
     );
 
     let extract = canonicalize_raw_arguments_with_semantics(
-        "web_extract",
+        &tn("web_extract"),
         r#"{"urls":["u"],"extra":true}"#,
         &catalog,
         &semantics,
