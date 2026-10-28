@@ -32,8 +32,9 @@ use crate::compact::{
     artifact_squash::extract_artifact_anchor,
     compaction_pipeline_for_plan, estimate_session_pressure,
     policy::{
-        build_compaction_plan, mid_turn_stall_error, ratio_threshold_tokens_for_plan,
-        should_enter_compaction, FireConditionInputs, MidTurnStallGate,
+        apply_confirmation_gate, build_compaction_plan, mid_turn_stall_error,
+        ratio_threshold_tokens_for_plan, should_enter_compaction, FireConditionInputs,
+        MidTurnStallGate,
     },
     tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
@@ -80,14 +81,17 @@ pub(super) fn merge_active_tool_names(
     }
 }
 
-pub(super) fn is_companion_callable_tool(
+/// Single decider for the discovery gate (ENC-303): whether `tool_name`
+/// carries a gate exemption, and if so whether it activates (merges into
+/// the active set). `None` means no exemption — plain active-set gating.
+pub(super) fn gate_exemption_for(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
     tool_name: &ToolName,
-) -> bool {
+) -> Option<bool> {
     discovery
         .as_ref()
-        .map(|d| d.companion_callable_tools.iter().any(|n| n == tool_name))
-        .unwrap_or(false)
+        .and_then(|d| d.gate_exemption_for(tool_name))
+        .map(|exemption| exemption.activates)
 }
 
 pub(super) fn activate_tools_for_spill_reference(
@@ -1169,7 +1173,8 @@ impl InnerSession {
                 &self.io.provider,
                 self.io.context_window_tokens,
             );
-            let plan = build_compaction_plan(
+            let pressure = self.estimate_pressure(trigger);
+            let mut plan = build_compaction_plan(
                 &self.config,
                 &self.capabilities,
                 &policy,
@@ -1177,10 +1182,15 @@ impl InnerSession {
                 self.io.context_window_tokens,
                 self.suppress_summary_tier,
             );
+            // ENC-303 Q2: ConfirmationGated tiers (Fifo, TextTruncate) stay
+            // in a ratio-triggered plan only on hard-ceiling pressure, a
+            // manual trigger, or (Fifo) an already-satisfied snapshot-first
+            // requirement. Pressure is plan-independent, so computing it
+            // first is a pure reorder.
+            apply_confirmation_gate(&mut plan, &pressure);
             let threshold_tokens = plan.threshold_tokens;
             let ratio_threshold_tokens =
                 ratio_threshold_tokens_for_plan(&self.config, self.io.context_window_tokens, &plan);
-            let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
             let session_has_tool_messages = self

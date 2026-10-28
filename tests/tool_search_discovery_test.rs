@@ -48,7 +48,13 @@ fn search_discovery_config() -> AgentConfig {
           "discovery": {
             "tool_name": "tool_discovery_tool",
             "request_field_name": "capability",
-            "always_callable": true
+            "gate_exemptions": [
+              {
+                "tool_name": "tool_discovery_tool",
+                "activates": false,
+                "reason": "discovery entry point"
+              }
+            ]
           },
           "argument_repairs": [],
           "canonical_shapes": [],
@@ -111,10 +117,19 @@ fn tsd_26_default_semantics_reference_search_tools() {
         .expect("enclave default semantics must configure discovery");
     assert_eq!(discovery.tool_name.as_str(), "tool_discovery_tool");
     assert_eq!(discovery.request_field_name, "capability");
-    assert!(discovery.always_callable);
-    assert!(discovery.companion_callable_tools.contains(
-        &agent_core::tool_name::ToolName::new("read_context_reference").expect("valid test name")
-    ));
+    let entry_point = discovery
+        .gate_exemption_for(
+            &agent_core::tool_name::ToolName::new("tool_discovery_tool").expect("valid test name"),
+        )
+        .expect("discovery tool must carry a gate exemption");
+    assert!(!entry_point.activates);
+    let activating_exemption = discovery
+        .gate_exemption_for(
+            &agent_core::tool_name::ToolName::new("read_context_reference")
+                .expect("valid test name"),
+        )
+        .expect("read_context_reference must carry a gate exemption");
+    assert!(activating_exemption.activates);
 }
 
 #[test]
@@ -229,7 +244,7 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
 }
 
 #[test]
-fn tsd_companion_read_context_reference_is_callable_without_search_tools() {
+fn tsd_exempt_read_context_reference_is_callable_without_search_tools() {
     let eng = engine();
     let handle = enclave_discovery_session(&eng, enclave_test_agent_config());
 
@@ -253,7 +268,7 @@ fn tsd_companion_read_context_reference_is_callable_without_search_tools() {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].name, "read_context_reference");
         }
-        other => panic!("expected ExecuteTools for companion tool, got {other:?}"),
+        other => panic!("expected ExecuteTools for exempt tool, got {other:?}"),
     }
 }
 
@@ -327,4 +342,286 @@ fn tsd_spill_retrieval_hint_activates_read_context_reference() {
         }
         other => panic!("expected ExecuteTools after spill hint activation, got {other:?}"),
     }
+}
+
+#[test]
+fn tsd_activating_exemption_merges_into_active_set() {
+    // ENC-303: `activates == true` merges the activating exemption into the active set,
+    // so a later rejection lists it in `available_tools`.
+    let eng = engine();
+    let handle = enclave_discovery_session(&eng, enclave_test_agent_config());
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![
+                RawToolCall {
+                    id: Some("call-read".into()),
+                    name: "read_context_reference".into(),
+                    arguments_json: r#"{"reference_id":"tool-output-call-1"}"#.into(),
+                },
+                RawToolCall {
+                    id: Some("call-append".into()),
+                    name: "append_blocks".into(),
+                    arguments_json: r#"{"artifactId":"a1","blocks":[]}"#.into(),
+                },
+            ],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "read_context_reference");
+        }
+        other => panic!("expected ExecuteTools for exempt tool, got {other:?}"),
+    }
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-read".into(),
+            result_json: r#"{"ok":true}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = handle.integration_test_snapshot();
+    let rejection = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == AgentRole::Tool && message.metadata.call_id() == Some("call-append")
+        })
+        .expect("append_blocks rejection must be stored as a tool message");
+    let payload: serde_json::Value =
+        serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
+    let available = payload["available_tools"]
+        .as_array()
+        .expect("rejection must list available_tools");
+    assert!(
+        available
+            .iter()
+            .any(|name| name == "read_context_reference"),
+        "activating exemption must merge into the active set, got {available:?}"
+    );
+}
+
+fn non_activating_probe_config() -> AgentConfig {
+    let mut semantics = agent_core::tool_semantics::ToolSemanticsConfig::from_json(
+        r#"{
+          "catalog": { "tools": [] },
+          "discovery": {
+            "tool_name": "tool_discovery_tool",
+            "request_field_name": "capability",
+            "gate_exemptions": [
+              {
+                "tool_name": "probe_a",
+                "activates": false,
+                "reason": "non-activating probe"
+              }
+            ]
+          },
+          "argument_repairs": [],
+          "canonical_shapes": [],
+          "result_policies": [],
+          "compaction": {},
+          "greedy_extension_tools": []
+        }"#,
+    )
+    .expect("probe semantics json must parse");
+    semantics.catalog.tools = serde_json::from_str(
+        r#"[
+          {"name":"tool_discovery_tool","aliases":[],"reproducible":true},
+          {"name":"probe_a","aliases":[],"reproducible":true},
+          {"name":"probe_b","aliases":[],"reproducible":true}
+        ]"#,
+    )
+    .expect("probe catalog json must parse as tool specs");
+    let mut config = enclave_test_agent_config();
+    config.tool_semantics = semantics;
+    config
+}
+
+#[test]
+fn tsd_non_activating_exemption_is_callable_without_merging() {
+    // ENC-303: `activates == false` makes the tool callable now but does NOT
+    // merge it into the active set — a later rejection omits it.
+    let eng = engine();
+    let handle = eng
+        .create_session(
+            vec![AgentMessage {
+                id: "u1".into(),
+                role: AgentRole::User,
+                content: "probe".into(),
+                metadata: MessageMeta::new(),
+            }],
+            non_activating_probe_config(),
+            capabilities(),
+            serde_json::Value::Null,
+            SessionIoParams::new(
+                "anthropic".into(),
+                200_000,
+                r#"[{"name":"tool_discovery_tool","parameters":{}}]"#.into(),
+                "sys".into(),
+            )
+            .expect("valid test io params"),
+        )
+        .expect("valid config creates session");
+
+    let _initial_request = model_request(&eng, &handle);
+    eng.submit_model_response(
+        &handle,
+        ModelResponse {
+            assistant_text: None,
+            tool_calls: vec![
+                RawToolCall {
+                    id: Some("call-a".into()),
+                    name: "probe_a".into(),
+                    arguments_json: r#"{}"#.into(),
+                },
+                RawToolCall {
+                    id: Some("call-b".into()),
+                    name: "probe_b".into(),
+                    arguments_json: r#"{}"#.into(),
+                },
+            ],
+            finish_reason: FinishReason::ToolUse,
+            provider_reasoning_content: None,
+        },
+    );
+
+    match eng.next_action(&handle) {
+        AgentAction::ExecuteTools(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "probe_a");
+        }
+        other => panic!("expected ExecuteTools for exempt tool, got {other:?}"),
+    }
+    eng.submit_tool_results(
+        &handle,
+        vec![ToolResultRecord {
+            call_id: "call-a".into(),
+            result_json: r#"{"ok":true}"#.into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: Vec::new(),
+            result_metadata: None,
+        }],
+    );
+
+    let snapshot = handle.integration_test_snapshot();
+    let rejection = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == AgentRole::Tool && message.metadata.call_id() == Some("call-b")
+        })
+        .expect("probe_b rejection must be stored as a tool message");
+    let payload: serde_json::Value =
+        serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");
+    assert_eq!(
+        payload["available_tools"],
+        serde_json::json!(["tool_discovery_tool"]),
+        "non-activating exemption must not merge into the active set"
+    );
+}
+
+const NO_DISCOVERY_ACTIVE_SCHEMA_JSON: &str = r#"[
+  {"name":"web_search","parameters":{}},
+  {"name":"web_extract","parameters":{}}
+]"#;
+
+fn try_search_session(
+    config: AgentConfig,
+    schemas: &str,
+) -> Result<agent_core::SessionHandle, agent_core::tool_semantics::ToolSemanticsError> {
+    engine().create_session(
+        vec![AgentMessage {
+            id: "u1".into(),
+            role: AgentRole::User,
+            content: "write".into(),
+            metadata: MessageMeta::new(),
+        }],
+        config,
+        capabilities(),
+        serde_json::Value::Null,
+        SessionIoParams::new("anthropic".into(), 200_000, schemas.into(), "sys".into())
+            .expect("valid test io params"),
+    )
+}
+
+#[test]
+fn tsd_lockout_discovery_without_exemption_or_schema_is_rejected() {
+    // ENC-303 J1: discovery section present, non-empty initial active set,
+    // discovery tool neither gate-exempt nor in the active schemas — the
+    // discovery tool could never be called, so construction fails naming
+    // the tool and the remediation.
+    let mut config = search_discovery_config();
+    config
+        .tool_semantics
+        .discovery
+        .as_mut()
+        .expect("search config has discovery")
+        .gate_exemptions = Vec::new();
+    let Err(agent_core::tool_semantics::ToolSemanticsError::InvalidDiscoveryConfig { message }) =
+        try_search_session(config, NO_DISCOVERY_ACTIVE_SCHEMA_JSON)
+    else {
+        panic!("expected InvalidDiscoveryConfig");
+    };
+    assert!(
+        message.contains("tool_discovery_tool"),
+        "error must name the discovery tool, got: {message}"
+    );
+    assert!(
+        message.contains("gate_exemptions") && message.contains("initial active schemas"),
+        "error must state the remediation, got: {message}"
+    );
+}
+
+#[test]
+fn tsd_exempt_discovery_outside_active_set_constructs() {
+    // ENC-303 J1: a self-exemption (activates == false) keeps the discovery
+    // tool callable even when the active schemas do not list it.
+    let config = search_discovery_config();
+    try_search_session(config, NO_DISCOVERY_ACTIVE_SCHEMA_JSON)
+        .expect("exempt discovery outside the active set must construct");
+}
+
+#[test]
+fn tsd_in_schema_discovery_without_exemption_constructs() {
+    // ENC-303 J1: a discovery tool listed in the initial active schemas
+    // needs no self-exemption.
+    let mut config = search_discovery_config();
+    config
+        .tool_semantics
+        .discovery
+        .as_mut()
+        .expect("search config has discovery")
+        .gate_exemptions = Vec::new();
+    try_search_session(config, SEARCH_ACTIVE_SCHEMA_JSON)
+        .expect("in-schema discovery without exemption must construct");
+}
+
+#[test]
+fn tsd_empty_active_set_disables_discovery_gate() {
+    // ENC-303 J1: an empty initial active set means the gate is disabled
+    // (host has not opted in), so a discovery tool with no exemption and no
+    // schema entry still constructs.
+    let mut config = search_discovery_config();
+    config
+        .tool_semantics
+        .discovery
+        .as_mut()
+        .expect("search config has discovery")
+        .gate_exemptions = Vec::new();
+    try_search_session(config, "[]").expect("empty active set must disable the gate");
 }

@@ -120,7 +120,7 @@ fn enc299_rule_referencing_schema_only_tool_constructs() {
 fn enc299_dangling_reference_rejected_in_every_section() {
     // m5: parametrized pin across ALL validated sections — a ghost name in
     // any one section (all others valid) fails construction naming that
-    // section. Sections: discovery, companions, artifact start/append,
+    // section. Sections: discovery, gate_exemptions, artifact start/append,
     // repairs, shapes, policies, squash, greedy.
     type Mutator = Box<dyn Fn(&mut ToolSemanticsConfig)>;
     let cases: Vec<(&str, Mutator)> = vec![
@@ -135,13 +135,17 @@ fn enc299_dangling_reference_rejected_in_every_section() {
             }),
         ),
         (
-            "discovery.companion_callable_tools",
+            "discovery.gate_exemptions",
             Box::new(|config| {
                 config
                     .discovery
                     .as_mut()
                     .expect("custom has discovery")
-                    .companion_callable_tools = vec![tn("ghost_tool")];
+                    .gate_exemptions = vec![agent_core::tool_semantics::DiscoveryGateExemption {
+                    tool_name: tn("ghost_tool"),
+                    activates: true,
+                    reason: "ghost exemption".to_string(),
+                }];
             }),
         ),
         (
@@ -216,18 +220,22 @@ fn enc299_dangling_reference_rejected_in_every_section() {
 }
 
 #[test]
-fn enc299_unknown_companion_callable_rejects_session() {
+fn enc299_unknown_gate_exemption_rejects_session() {
     let mut config = semantics::custom_semantics();
     config
         .discovery
         .as_mut()
         .expect("custom semantics has discovery")
-        .companion_callable_tools = vec![tn("ghost_tool")];
+        .gate_exemptions = vec![agent_core::tool_semantics::DiscoveryGateExemption {
+        tool_name: tn("ghost_tool"),
+        activates: true,
+        reason: "ghost exemption".to_string(),
+    }];
 
     assert_eq!(
         try_session_err(config, "[]"),
         ToolSemanticsError::UnknownToolReference {
-            section: "discovery.companion_callable_tools".to_string(),
+            section: "discovery.gate_exemptions".to_string(),
             name: "ghost_tool".to_string(),
         }
     );

@@ -97,6 +97,25 @@ impl ToolSemanticsConfig {
                     message: "discovery tool_name must not be empty".into(),
                 });
             }
+            let mut seen: HashSet<&ToolName> = HashSet::new();
+            for exemption in &discovery.gate_exemptions {
+                if exemption.reason.trim().is_empty() {
+                    return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                        message: format!(
+                            "discovery gate_exemptions entry for '{}' must carry a non-blank reason",
+                            exemption.tool_name.as_str()
+                        ),
+                    });
+                }
+                if !seen.insert(&exemption.tool_name) {
+                    return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                        message: format!(
+                            "duplicate discovery gate_exemptions entry for '{}'",
+                            exemption.tool_name.as_str()
+                        ),
+                    });
+                }
+            }
         }
 
         if let Some(artifact) = &self.artifact {
@@ -173,8 +192,36 @@ impl ToolSemanticsConfig {
         };
         if let Some(discovery) = &self.discovery {
             check("discovery.tool_name", &discovery.tool_name)?;
-            for companion in &discovery.companion_callable_tools {
-                check("discovery.companion_callable_tools", companion)?;
+            for exemption in &discovery.gate_exemptions {
+                check("discovery.gate_exemptions", &exemption.tool_name)?;
+            }
+            // ENC-303 J1: silent discovery self-lockout. With a non-empty
+            // initial active set the discovery gate is enabled: every call
+            // for a tool that is neither in the active set nor gate-exempt
+            // is rejected — including the discovery tool itself. A discovery
+            // tool that is neither exempt nor in the initial active schemas
+            // can therefore never be called, so fail construction naming the
+            // tool and the remediation. An empty active set means the gate
+            // is disabled (host has not opted in), so no check applies.
+            let active: Vec<&ToolName> = schema_names
+                .iter()
+                .filter(|name| !name.is_empty())
+                .collect();
+            if !active.is_empty()
+                && !active.iter().any(|name| **name == discovery.tool_name)
+                && discovery.gate_exemption_for(&discovery.tool_name).is_none()
+            {
+                return Err(ToolSemanticsError::InvalidDiscoveryConfig {
+                    message: format!(
+                        "discovery tool '{}' is not callable with a non-empty initial active set: \
+                         it is neither in the initial active schemas nor gate-exempt; add a \
+                         gate_exemptions entry for '{}' with activates=false, or include '{}' \
+                         in the initial active schemas",
+                        discovery.tool_name.as_str(),
+                        discovery.tool_name.as_str(),
+                        discovery.tool_name.as_str(),
+                    ),
+                });
             }
         }
         if let Some(artifact) = &self.artifact {
@@ -218,10 +265,33 @@ pub struct ToolCatalogConfig {
 pub struct ToolDiscoverySemantics {
     pub tool_name: ToolName,
     pub request_field_name: String,
-    pub always_callable: bool,
-    /// Tools that may be called without a prior `tool_discovery_tool` activation (e.g. context retrieval).
+    /// Per-tool gate exemptions replacing the old `always_callable` /
+    /// `companion_callable_tools` pair (ENC-303): an exemption makes the
+    /// tool callable without prior discovery activation, and
+    /// `activates == true` additionally merges it into the active set.
     #[serde(default)]
-    pub companion_callable_tools: Vec<ToolName>,
+    pub gate_exemptions: Vec<DiscoveryGateExemption>,
+}
+
+impl ToolDiscoverySemantics {
+    /// Single decider for the discovery gate: the exemption for `tool_name`, if any.
+    pub fn gate_exemption_for(&self, tool_name: &ToolName) -> Option<&DiscoveryGateExemption> {
+        self.gate_exemptions
+            .iter()
+            .find(|exemption| exemption.tool_name == *tool_name)
+    }
+}
+
+/// One entry of [`ToolDiscoverySemantics::gate_exemptions`] (ENC-303): a
+/// tool callable without prior discovery activation, with its reason
+/// recorded per tool. `activates == false` is discovery-entry-point style
+/// (callable now, no activation); `activates == true` is companion style
+/// (callable now, merged into the active set).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryGateExemption {
+    pub tool_name: ToolName,
+    pub activates: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +360,12 @@ pub struct ArtifactSquashSemantics {
     pub snippet_max_chars: usize,
 }
 
+/// Greedy-extension budget entry (ENC-303): a **budget mechanism, not a
+/// gate bypass**. When the last model response names this tool (matched by
+/// exact [`ToolName`] against the host-declared relevance list — the
+/// `greedy_extension_tools` entries — never by substring or alias), the
+/// tool-call cap grows by `extra_turns`. It never makes a tool callable:
+/// the discovery gate decides callability independently.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolGreedyExtensionSemantics {
     pub tool_name: ToolName,

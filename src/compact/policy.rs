@@ -1,9 +1,47 @@
 //! Compaction plan and per-trigger tier selection.
 //!
 //! See `plans/PLAN-agent-core-context-management/spec.md` — task 3.
+//!
+//! ## Pressure estimation and error budget (ENC-303)
+//!
+//! [`estimate_session_pressure`](super::estimate_session_pressure) projects the
+//! full prompt through the [`TokenCounter`](crate::token_counter::TokenCounter)
+//! port (default: `tiktoken` `cl100k_base`, so provider tokenizers disagree by
+//! a tokenizer-dependent margin) plus four modeled overheads: per-message
+//! chat-template tokens (`CHAT_TEMPLATE_OVERHEAD_PER_MESSAGE` = 8/message,
+//! assistant primer = 4, on-device Llama ChatML extra = 6), the tools-schema
+//! JSON, the system prompt, and the Kotlin context-sidecar estimate (or the
+//! live sidecar payload when present). The raw sum is scaled by the host's
+//! per-provider `token_correction` factor
+//! ([`AgentConfig::token_correction`](crate::session::AgentConfig::token_correction),
+//! default 1.0 — hosts calibrate it against their provider's tokenizer).
+//!
+//! ## Safety margin (ENC-303)
+//!
+//! The output reserve ([`effective_output_reserve_tokens`](crate::budget::effective_output_reserve_tokens):
+//! 5% of the window, clamped to `output_reserve_floor_tokens` = 4096 ..
+//! `output_reserve_max_tokens` = 16384, and capped at a quarter of windows
+//! under 8192) is subtracted from the window to form the hard ceiling
+//! ([`effective_hard_prompt_ceiling_tokens`](crate::budget::effective_hard_prompt_ceiling_tokens)).
+//! Ratio thresholds (preflight 0.80, mid-turn 0.93, post-tool-result 0.92,
+//! manual 0.80) fire routine compaction well before the ceiling; pressure at
+//! or above the ceiling ([`exceeds_hard_prompt_ceiling`](crate::budget::exceeds_hard_prompt_ceiling))
+//! means the reserve itself is threatened.
+//!
+//! ## Pressure-class rule table (ENC-303)
+//!
+//! | Class | Tiers | Ratio-triggered plan includes them when |
+//! |---|---|---|
+//! | `Reversible` | ToolSpill, ArtifactSquash, HistorySnapshot | always (non-destructive snapshot steps) |
+//! | `EstimateAllowed` | Micro, Summary | always (destructive but routine: reproducible drops / host round-trip) |
+//! | `ConfirmationGated` | Fifo, TextTruncate | hard ceiling exceeded, trigger is Manual, or (Fifo only) the snapshot-first requirement is already satisfied |
+//!
+//! The gate is [`apply_confirmation_gate`], applied by the dispatch after
+//! plan construction; the FIFO tier additionally enforces its snapshot
+//! requirement at apply time.
 
 use crate::budget::{
-    effective_hard_prompt_ceiling_tokens, effective_threshold_tokens,
+    effective_hard_prompt_ceiling_tokens, effective_threshold_tokens, exceeds_hard_prompt_ceiling,
     should_compact_at_token_threshold,
 };
 use crate::events::{AgentError, CompactionTier, CompactionTrigger};
@@ -21,6 +59,79 @@ pub struct CompactionPlan {
     pub allow_history_rewrite: bool,
     pub require_snapshot_before_destructive_drop: bool,
     pub max_prompt_tokens_after_plan: u32,
+}
+
+/// Pressure class per compaction tier (ENC-303 Q1): how much pressure
+/// evidence a tier needs before a ratio-triggered plan may include it.
+/// See the module-level rule table. Only `ConfirmationGated` gates plan inclusion; the other classes are documentary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureClass {
+    /// Non-destructive snapshot steps: safe to run once the plan fires.
+    Reversible,
+    /// Destructive but routine: a ratio trigger alone suffices.
+    EstimateAllowed,
+    /// Destructive and lossy: needs the hard ceiling, a manual trigger,
+    /// or (Fifo only) an already-satisfied snapshot-first requirement.
+    ConfirmationGated,
+}
+
+/// Maps each [`CompactionTier`] to its [`PressureClass`] (ENC-303 Q1).
+pub fn tier_pressure_class(tier: &CompactionTier) -> PressureClass {
+    match tier {
+        CompactionTier::ToolSpill
+        | CompactionTier::ArtifactSquash
+        | CompactionTier::HistorySnapshot => PressureClass::Reversible,
+        CompactionTier::Micro | CompactionTier::Summary => PressureClass::EstimateAllowed,
+        CompactionTier::Fifo | CompactionTier::TextTruncate => PressureClass::ConfirmationGated,
+    }
+}
+
+/// Confirmation gate for ratio-triggered plans (ENC-303 Q2): strips
+/// [`PressureClass::ConfirmationGated`] tiers from `plan.ordered_tiers`
+/// unless the plan may include them — hard ceiling exceeded (the output
+/// reserve is threatened), a manual trigger, or (Fifo only) the
+/// snapshot-first requirement already satisfied. Snapshot satisfaction is a
+/// plan-level pre-filter on `plan.require_snapshot_before_destructive_drop`:
+/// the requirement is off, or the plan already runs `HistorySnapshot` ahead
+/// of the destructive tiers (as [`build_compaction_plan`] always does on the
+/// ratio path). Enforcement stays at apply time — the FIFO tier keeps its
+/// own session-state snapshot gate (see `snapshot_gate_outcome` in
+/// [`super::fifo`]) regardless of what the pre-filter kept. A forced
+/// non-ratio entry (`forced_by_non_ratio`: absolute threshold, turn count,
+/// or turn-end) zeroes the plan ratio but still passes through this gate,
+/// so forced entry does not imply the destructive tiers survive it.
+///
+/// Manual plans are untouched: the host explicitly asked for full compaction.
+pub fn apply_confirmation_gate(plan: &mut CompactionPlan, pressure: &Pressure) {
+    if plan.trigger == CompactionTrigger::Manual {
+        return;
+    }
+    let hard_ceiling_exceeded = exceeds_hard_prompt_ceiling(pressure);
+    let snapshot_first_satisfied = !plan.require_snapshot_before_destructive_drop
+        || plan
+            .ordered_tiers
+            .contains(&CompactionTier::HistorySnapshot);
+    plan.ordered_tiers.retain(|tier| {
+        confirmation_gate_allows(tier, hard_ceiling_exceeded, snapshot_first_satisfied)
+    });
+}
+
+/// The confirmation gate as ONE predicate over (tier, conditions) — the
+/// gate does not re-discriminate tiers by class and then by identity.
+/// [`tier_pressure_class`] remains the documentary classification; this
+/// predicate is the behavior.
+fn confirmation_gate_allows(
+    tier: &CompactionTier,
+    hard_ceiling_exceeded: bool,
+    snapshot_first_satisfied: bool,
+) -> bool {
+    match tier {
+        // Fifo may also ride an already-satisfied snapshot-first
+        // requirement; TextTruncate has no such proxy.
+        CompactionTier::Fifo => hard_ceiling_exceeded || snapshot_first_satisfied,
+        CompactionTier::TextTruncate => hard_ceiling_exceeded,
+        _ => true,
+    }
 }
 
 /// Returns the configured pressure threshold for a given trigger.

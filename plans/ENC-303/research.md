@@ -1,0 +1,3 @@
+# ENC-303 Research (scouts)
+Part1: always_callable = discovery-only exempt (no activation); companion = exempt+activate (read_context_reference); greedy = budget only (judge: host list + last-response ToolName match). Fixture: discovery always true, companion [read_context_reference], greedy append_blocks+20.
+Part2: pressure = tiktoken cl100k estimate + template overhead + token_correction (default 1.0); thresholds .80/.93/.92/.80; hard ceiling = window - output_reserve (5%, 4096..16384); NO provider usage signal exists. Tiers: reversible Spill/Squash/Snapshot; destructive Micro(reproducible)/Summary(host RT)/FIFO(snapshot-first default)/TextTruncate(hard-ceiling). is_destructive={Micro,Fifo,Summary,TextTruncate}.

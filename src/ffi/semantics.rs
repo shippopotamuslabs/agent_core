@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use crate::catalog::{FieldHint, ToolSchemaHint, ToolSpec};
 use crate::tool_name::ToolName;
 use crate::tool_semantics::{
-    ArtifactSquashSemantics, ArtifactToolSemantics, ParameterAlias, SpecialValueRepair,
-    ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics, ToolDiscoverySemantics,
-    ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
+    ArtifactSquashSemantics, ArtifactToolSemantics, DiscoveryGateExemption, ParameterAlias,
+    SpecialValueRepair, ToolArgumentRepairRule, ToolCanonicalShape, ToolCompactionSemantics,
+    ToolDiscoverySemantics, ToolGreedyExtensionSemantics, ToolResultPolicy, ToolSemanticsConfig,
 };
 
 use super::types::AgentException;
@@ -317,11 +317,40 @@ impl FfiToolResultPolicy {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiDiscoveryGateExemption {
+    pub tool_name: String,
+    pub activates: bool,
+    pub reason: String,
+}
+
+impl From<DiscoveryGateExemption> for FfiDiscoveryGateExemption {
+    fn from(exemption: DiscoveryGateExemption) -> Self {
+        Self {
+            tool_name: exemption.tool_name.as_str().to_string(),
+            activates: exemption.activates,
+            reason: exemption.reason,
+        }
+    }
+}
+
+impl FfiDiscoveryGateExemption {
+    fn into_core(self) -> Result<DiscoveryGateExemption, AgentException> {
+        Ok(DiscoveryGateExemption {
+            tool_name: tool_name_from_ffi(
+                "discovery.gate_exemptions[].tool_name",
+                &self.tool_name,
+            )?,
+            activates: self.activates,
+            reason: self.reason,
+        })
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiToolDiscoverySemantics {
     pub tool_name: String,
     pub request_field_name: String,
-    pub always_callable: bool,
-    pub companion_callable_tools: Vec<String>,
+    pub gate_exemptions: Vec<FfiDiscoveryGateExemption>,
 }
 
 impl From<ToolDiscoverySemantics> for FfiToolDiscoverySemantics {
@@ -329,11 +358,10 @@ impl From<ToolDiscoverySemantics> for FfiToolDiscoverySemantics {
         Self {
             tool_name: semantics.tool_name.as_str().to_string(),
             request_field_name: semantics.request_field_name,
-            always_callable: semantics.always_callable,
-            companion_callable_tools: semantics
-                .companion_callable_tools
-                .iter()
-                .map(|tool| tool.as_str().to_string())
+            gate_exemptions: semantics
+                .gate_exemptions
+                .into_iter()
+                .map(Into::into)
                 .collect(),
         }
     }
@@ -344,11 +372,11 @@ impl FfiToolDiscoverySemantics {
         Ok(ToolDiscoverySemantics {
             tool_name: tool_name_from_ffi("discovery.tool_name", &self.tool_name)?,
             request_field_name: self.request_field_name,
-            always_callable: self.always_callable,
-            companion_callable_tools: tool_names_from_ffi(
-                "discovery.companion_callable_tools[]",
-                self.companion_callable_tools,
-            )?,
+            gate_exemptions: self
+                .gate_exemptions
+                .into_iter()
+                .map(FfiDiscoveryGateExemption::into_core)
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -848,6 +876,89 @@ mod tests {
             .expect("artifact converts")
             .empty_append_payload_value
             .is_null());
+    }
+
+    #[test]
+    fn gate_exemption_round_trips_tool_name_activates_reason() {
+        // ENC-303 m4: gate exemptions cross the FFI boundary field-for-field —
+        // core -> FFI -> core preserves tool_name, activates, and reason.
+        for activates in [false, true] {
+            let exemption = DiscoveryGateExemption {
+                tool_name: ToolName::new("open_tools").expect("valid test name"),
+                activates,
+                reason: format!("reason for activates={activates}"),
+            };
+            let round_tripped = FfiDiscoveryGateExemption::from(exemption.clone())
+                .into_core()
+                .expect("exemption converts");
+            assert_eq!(round_tripped.tool_name, exemption.tool_name);
+            assert_eq!(round_tripped.activates, exemption.activates);
+            assert_eq!(round_tripped.reason, exemption.reason);
+        }
+    }
+
+    #[test]
+    fn ffi_create_session_with_lockout_discovery_is_agent_exception() {
+        // ENC-303 J1: the typed FFI boundary propagates the discovery
+        // self-lockout failure through the existing create_session ->
+        // AgentException path (fixture discovery tool stripped of its
+        // self-exemption, active schemas non-empty without it).
+        use crate::ffi::{create_agent_engine, FfiAgentMessage, FfiAgentRole, FfiSessionIoParams};
+        use crate::ffi::{FfiSessionCapabilities, FfiToolSchemaEntry};
+
+        let mut tree = FfiToolSemantics::without_catalog(&legacy_semantics());
+        let discovery_name = tree
+            .discovery
+            .as_ref()
+            .expect("fixture has discovery")
+            .tool_name
+            .clone();
+        tree.discovery
+            .as_mut()
+            .expect("fixture has discovery")
+            .gate_exemptions
+            .retain(|exemption| exemption.tool_name != discovery_name);
+        let config = FfiAgentConfig {
+            tool_semantics: Some(tree),
+            tool_specs: legacy_specs().iter().map(FfiToolSpec::from).collect(),
+            ..Default::default()
+        };
+        let engine = create_agent_engine();
+        let error = match engine.create_session(
+            vec![FfiAgentMessage {
+                id: "u1".into(),
+                role: FfiAgentRole::User,
+                content: "hi".into(),
+                metadata_json: "{}".into(),
+            }],
+            config,
+            FfiSessionCapabilities::default(),
+            "null".to_string(),
+            FfiSessionIoParams {
+                provider: "anthropic".into(),
+                context_window_tokens: 200_000,
+                tool_schemas: vec![FfiToolSchemaEntry {
+                    name: "web_search".into(),
+                    description: None,
+                    reproducible: None,
+                    deferrable: None,
+                    max_result_bytes: None,
+                }],
+                system_prompt: "sys".into(),
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("lockout discovery must fail FFI session creation"),
+        };
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("InvalidDiscoveryConfig") && detail.contains(&discovery_name),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 
     #[test]
