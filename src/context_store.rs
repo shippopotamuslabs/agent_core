@@ -50,7 +50,7 @@ pub struct ContextReference {
     pub retrieval_hint: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStoreEntry {
     pub reference: ContextReference,
     pub content: String,
@@ -109,7 +109,7 @@ pub fn make_preview(content: &str) -> String {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStore {
     /// Stable insertion-ordered map keyed by reference id.
     entries: BTreeMap<String, ContextStoreEntry>,
@@ -139,6 +139,59 @@ impl ContextStore {
         let reference = entry.reference.clone();
         self.entries.insert(reference.id.clone(), entry);
         reference
+    }
+
+    /// Restore-time invariant check (ENC-305 fix pass, M3), run by
+    /// snapshot import before the store is installed in a live session.
+    ///
+    /// The live invariants [`ContextStore::insert_entry`] maintains are
+    /// re-checked, never re-established: every map key must equal its
+    /// entry's `reference.id`, and `next_seq` must be greater than every
+    /// numeric suffix `N` among keys shaped `ctxref-*-N` (the minted-ID
+    /// shape, see `sidecar_builder`), so a future minted ID can never
+    /// collide with — and silently overwrite — a restored entry.
+    /// Content dedup is deliberately NOT re-run and entries are NOT
+    /// replayed through `insert_entry`: entries are data, and replaying
+    /// could silently drop them.
+    pub fn validate_restored(&self) -> Result<(), crate::tool_semantics::ToolSemanticsError> {
+        use crate::tool_semantics::ToolSemanticsError;
+        for (key, entry) in &self.entries {
+            if key != &entry.reference.id {
+                return Err(ToolSemanticsError::InvalidSnapshot {
+                    message: format!(
+                        "context store key '{key}' does not match its entry reference id '{}'",
+                        entry.reference.id
+                    ),
+                });
+            }
+        }
+        let mut max_suffix: Option<u64> = None;
+        for key in self.entries.keys() {
+            let Some(rest) = key.strip_prefix("ctxref-") else {
+                continue;
+            };
+            let Some((_, suffix)) = rest.rsplit_once('-') else {
+                continue;
+            };
+            if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(n) = suffix.parse::<u64>() {
+                max_suffix = Some(max_suffix.map_or(n, |max: u64| max.max(n)));
+            }
+        }
+        if let Some(max_suffix) = max_suffix {
+            if self.next_seq <= max_suffix {
+                return Err(ToolSemanticsError::InvalidSnapshot {
+                    message: format!(
+                        "context store next_seq {} must be greater than the largest \
+                         ctxref suffix {max_suffix} among restored entry ids",
+                        self.next_seq
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn get(&self, id: &str) -> Option<&ContextStoreEntry> {
@@ -359,6 +412,83 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn validate_restored_accepts_live_invariants() {
+        // M3: a store built through insert_entry (plus minted-seq usage)
+        // passes restore validation.
+        let mut store = ContextStore::default();
+        store.insert_entry(entry(
+            "ctxref-sidecar-0",
+            ContextReferenceKind::ToolOutput,
+            "payload",
+        ));
+        let _ = store.next_sequence();
+        store.insert_entry(entry(
+            "term-1",
+            ContextReferenceKind::TerminalOutput,
+            "other",
+        ));
+        store.validate_restored().expect("live store must validate");
+    }
+
+    #[test]
+    fn validate_restored_rejects_key_id_mismatch() {
+        // M3: entries are installed verbatim by serde, bypassing
+        // insert_entry, so a key != reference.id store is constructible
+        // and must be caught here.
+        let mut store = ContextStore::default();
+        store.entries.insert(
+            "wrong-key".to_string(),
+            entry("real-id", ContextReferenceKind::ToolOutput, "payload"),
+        );
+        let error = store
+            .validate_restored()
+            .expect_err("key/id mismatch must fail");
+        assert!(
+            matches!(
+                error,
+                crate::tool_semantics::ToolSemanticsError::InvalidSnapshot { ref message }
+                if message.contains("wrong-key") && message.contains("real-id")
+            ),
+            "expected InvalidSnapshot naming key and id, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_restored_rejects_next_seq_behind_minted_suffix() {
+        // M3: next_seq reset to 0 would let a future minted
+        // ctxref-sidecar-0 overwrite the restored entry.
+        let mut store = ContextStore::default();
+        store.insert_entry(entry(
+            "ctxref-sidecar-3",
+            ContextReferenceKind::ToolOutput,
+            "payload",
+        ));
+        store.next_seq = 3;
+        let error = store
+            .validate_restored()
+            .expect_err("next_seq not ahead of suffixes must fail");
+        assert!(
+            matches!(
+                error,
+                crate::tool_semantics::ToolSemanticsError::InvalidSnapshot { .. }
+            ),
+            "expected InvalidSnapshot, got {error:?}"
+        );
+        store.next_seq = 4;
+        store.validate_restored().expect("next_seq ahead must pass");
+        // Non-ctxref keys and non-numeric suffixes impose no constraint.
+        store.next_seq = 0;
+        let mut store = ContextStore::default();
+        store.insert_entry(entry("term-9", ContextReferenceKind::TerminalOutput, "x"));
+        store.insert_entry(entry(
+            "ctxref-note-x",
+            ContextReferenceKind::ToolOutput,
+            "y",
+        ));
+        store.validate_restored().expect("unshaped keys must pass");
     }
 
     #[test]

@@ -1,13 +1,14 @@
 use crate::message::{ToolCallRecord, ToolResultRecord};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSignatureWindow {
     pub signature: String,
     pub repetition_count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingWorkItem {
     pub text: String,
 }
@@ -18,7 +19,7 @@ pub struct DoomLoopMatch {
     pub repetition_count: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoopMetrics {
     pub turn_count: u32,
     pub message_count: u32,

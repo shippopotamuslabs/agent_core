@@ -38,14 +38,14 @@ pub struct ProviderContextSnapshot {
 }
 
 /// Builds bounded JSON sidecar payloads per model call.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SidecarBuilder {
     generation: u32,
     rolling_cache: Vec<RollingCacheEntry>,
     last_ledger_json: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RollingCacheEntry {
     generation: u32,
     byte_len: usize,

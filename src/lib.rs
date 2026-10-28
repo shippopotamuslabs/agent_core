@@ -53,6 +53,7 @@ pub mod repair;
 pub mod request_pipeline;
 pub mod schema_coerce;
 pub mod session;
+pub mod session_snapshot;
 pub mod sidecar_builder;
 pub mod state_ledger;
 pub mod token_counter;
@@ -72,3 +73,4 @@ pub mod truncate;
 pub mod turn_io;
 
 pub use engine::{AgentEngine, SessionHandle, SessionIoParams};
+pub use session_snapshot::SessionSnapshot;

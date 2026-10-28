@@ -12,7 +12,9 @@ mod state;
 pub(super) mod tool_results;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
-pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
+pub use state::{
+    EnginePhase, PendingToolTurn, SessionHandle, SessionIoParams, SessionTestSnapshot,
+};
 
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +50,7 @@ use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
 
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
+use crate::session_snapshot::{SessionSnapshot, SNAPSHOT_VERSION};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
@@ -57,7 +60,7 @@ use crate::tool_universe::{merge_tool_names_deduped, ToolUniverse};
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
-use state::{EnginePhase, InnerSession, PendingToolTurn};
+use state::InnerSession;
 
 pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
@@ -163,6 +166,8 @@ impl AgentEngine {
         // boundary (`InnerSession::effective_tool_config`), never the
         // stored copies.
         let schemas = std::mem::replace(&mut io.schemas, ToolSchemaSet::from_entries(Vec::new()));
+        // `mem::take`: `ToolSemanticsConfig::default()` IS the agnostic
+        // bundle, matching import_snapshot's spelling (ENC-305 fix pass, m7).
         let semantics = std::mem::take(&mut config.tool_semantics);
         config.tool_catalog = ToolCatalog::default();
         let universe = ToolUniverse::build(schemas, semantics)?;
@@ -217,6 +222,219 @@ impl AgentEngine {
                 universe,
                 sidecar_builder: SidecarBuilder::new(),
                 compaction: compaction::CompactionState::new(),
+            })),
+        })
+    }
+
+    /// Export the session's full restorable state as a typed
+    /// [`SessionSnapshot`] (ENC-305 D6): an infallible projection from
+    /// the locked `InnerSession`. Tool data is sourced from the universe
+    /// (the live tool world): `config` is the effective config, so the
+    /// snapshot is self-describing, and `schemas` / `active_tool_names`
+    /// are the universe's entries and live active set. The io triple
+    /// comes from the stored `io` (whose schema set was consumed at
+    /// construction and holds no live data).
+    pub fn export_snapshot(&self, handle: &SessionHandle) -> SessionSnapshot {
+        let g = handle.lock_inner();
+        let effective_config = g.effective_tool_config();
+        // ENC-305 fix pass (m4): `InnerSession` is destructured by
+        // reference WITHOUT `..`, so adding a field to it is a compile
+        // error here until that field gets a snapshot decision. The
+        // three non-verbatim sources are bound explicitly:
+        // - `_stored_config`: NOT exported — the snapshot carries the
+        //   effective config (computed above from the universe).
+        // - `io`: consumed piecemeal as the restorable triple below;
+        //   its stored `schemas` holds no live data (consumed into the
+        //   universe at construction).
+        // - `universe`: consumed piecemeal as `schemas` +
+        //   `active_tool_names` below (plus the effective config's tool
+        //   fields above).
+        // - `compaction` (ENC-306 field): exported as its three
+        //   counter/flag values via the accessors; import rebuilds it
+        //   with `CompactionState::restore`.
+        let InnerSession {
+            session,
+            config: _stored_config,
+            capabilities,
+            io,
+            guardrails,
+            loop_metrics,
+            phase,
+            pending,
+            context_store,
+            state_ledger,
+            model_requests_this_turn,
+            events,
+            turn_index,
+            cancelled,
+            terminal_action,
+            last_model_response_greedy_tool_names,
+            tools_blocked_nudges_this_turn,
+            universe,
+            sidecar_builder,
+            compaction,
+        } = &*g;
+        SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            session: session.clone(),
+            config: effective_config,
+            capabilities: capabilities.clone(),
+            provider: io.provider.clone(),
+            context_window_tokens: io.context_window_tokens,
+            system_prompt: io.system_prompt.clone(),
+            schemas: universe.schemas().clone(),
+            active_tool_names: universe.active_names().to_vec(),
+            context_store: context_store.clone(),
+            state_ledger: state_ledger.clone(),
+            guardrails: guardrails.clone(),
+            loop_metrics: loop_metrics.clone(),
+            phase: *phase,
+            pending: pending.clone(),
+            sidecar_builder: sidecar_builder.clone(),
+            model_requests_this_turn: *model_requests_this_turn,
+            events: events.clone(),
+            turn_index: *turn_index,
+            cancelled: *cancelled,
+            terminal_action: terminal_action.clone(),
+            last_model_response_greedy_tool_names: last_model_response_greedy_tool_names.clone(),
+            tools_blocked_nudges_this_turn: *tools_blocked_nudges_this_turn,
+            compaction_passes_this_turn: compaction.passes_this_turn(),
+            destructive_tiers_this_turn: compaction.destructive_tiers_this_turn(),
+            suppress_summary_tier: compaction.suppress_summary_tier(),
+        }
+    }
+
+    /// Import a [`SessionSnapshot`] as a live session (ENC-305 D6).
+    ///
+    /// Validation is EXACTLY construction's, plus the snapshot-only
+    /// coherence gates (ENC-305 fix pass, M1/M3/m5), all BEFORE the
+    /// `InnerSession` is assembled — an incoherent snapshot is rejected
+    /// with [`ToolSemanticsError::InvalidSnapshot`], never coerced:
+    /// - `version` must equal [`SNAPSHOT_VERSION`];
+    /// - the (phase, pending) pair must be one construction can
+    ///   produce (`AwaitingModel` ⇒ `pending.call_model`,
+    ///   `AwaitingTools` ⇒ `pending.execute`, `AwaitingSummary` ⇒
+    ///   `pending.summary_req` AND `pending.summary_ctx`; `Idle`
+    ///   imposes no constraint) — the incoherent pairs otherwise panic
+    ///   on the first `next_action` poll;
+    /// - the context store must satisfy its restore invariants
+    ///   ([`ContextStore::validate_restored`]).
+    ///
+    /// The snapshot's schemas and the semantics carried by its config
+    /// then go through [`ToolUniverse::build`], and the captured active
+    /// set replaces the built universe's initial active set via
+    /// `restore_active`. Stored config/io are reset exactly as
+    /// `create_session` leaves them (semantics taken into the universe
+    /// — `mem::take` leaves the agnostic default, as
+    /// `ToolSemanticsConfig::default()` IS the agnostic bundle —
+    /// catalog defaulted, io schemas the empty set). The `InnerSession`
+    /// is assembled DIRECTLY from the snapshot: no ledger re-seeding,
+    /// no counter resets.
+    pub fn import_snapshot(
+        &self,
+        snapshot: SessionSnapshot,
+    ) -> Result<SessionHandle, ToolSemanticsError> {
+        let SessionSnapshot {
+            version,
+            session,
+            mut config,
+            capabilities,
+            provider,
+            context_window_tokens,
+            system_prompt,
+            schemas,
+            active_tool_names,
+            context_store,
+            state_ledger,
+            guardrails,
+            loop_metrics,
+            phase,
+            pending,
+            sidecar_builder,
+            model_requests_this_turn,
+            events,
+            turn_index,
+            cancelled,
+            terminal_action,
+            last_model_response_greedy_tool_names,
+            tools_blocked_nudges_this_turn,
+            compaction_passes_this_turn,
+            destructive_tiers_this_turn,
+            suppress_summary_tier,
+        } = snapshot;
+        // m5: the format version gate.
+        if version != SNAPSHOT_VERSION {
+            return Err(ToolSemanticsError::InvalidSnapshot {
+                message: format!(
+                    "unsupported snapshot version {version} (expected {SNAPSHOT_VERSION})"
+                ),
+            });
+        }
+        // m6: apply the policy-tier defaults FIRST, mirroring
+        // create_session's ordering (defaults before the universe
+        // build). Idempotent for genuine snapshots — their effective
+        // config was already tiered at creation — but a host-assembled
+        // snapshot must not silently run un-tiered.
+        config.apply_policy_tier_defaults(capabilities.context_policy_tier, context_window_tokens);
+        // M1: (phase, pending) coherence. Never coerce.
+        let incoherence = match phase {
+            EnginePhase::AwaitingModel if pending.call_model.is_none() => {
+                Some("phase AwaitingModel requires pending.call_model to be present")
+            }
+            EnginePhase::AwaitingTools if pending.execute.is_none() => {
+                Some("phase AwaitingTools requires pending.execute to be present")
+            }
+            EnginePhase::AwaitingSummary if pending.summary_req.is_none() => {
+                Some("phase AwaitingSummary requires pending.summary_req to be present")
+            }
+            EnginePhase::AwaitingSummary if pending.summary_ctx.is_none() => {
+                Some("phase AwaitingSummary requires pending.summary_ctx to be present")
+            }
+            _ => None,
+        };
+        if let Some(message) = incoherence {
+            return Err(ToolSemanticsError::InvalidSnapshot {
+                message: message.to_string(),
+            });
+        }
+        // M3: context-store restore invariants.
+        context_store.validate_restored()?;
+        let semantics = std::mem::take(&mut config.tool_semantics);
+        config.tool_catalog = ToolCatalog::default();
+        let mut universe = ToolUniverse::build(schemas, semantics)?;
+        universe.restore_active(active_tool_names);
+        let io = SessionIoParams {
+            provider,
+            context_window_tokens,
+            schemas: ToolSchemaSet::from_entries(Vec::new()),
+            system_prompt,
+        };
+        Ok(SessionHandle {
+            inner: Arc::new(Mutex::new(InnerSession {
+                session,
+                config,
+                capabilities,
+                io,
+                guardrails,
+                loop_metrics,
+                phase,
+                pending,
+                context_store,
+                state_ledger,
+                model_requests_this_turn,
+                events,
+                turn_index,
+                cancelled,
+                terminal_action,
+                last_model_response_greedy_tool_names,
+                tools_blocked_nudges_this_turn,
+                universe,
+                sidecar_builder,
+                compaction: compaction::CompactionState::restore(
+                    compaction_passes_this_turn,
+                    destructive_tiers_this_turn,
+                    suppress_summary_tier,
+                ),
             })),
         })
     }

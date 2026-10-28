@@ -198,82 +198,196 @@ impl From<FfiProviderContextSnapshot> for ProviderContextSnapshot {
 pub struct FfiModelRequest {
     pub session_messages: Vec<FfiAgentMessage>,
     pub system_prompt: String,
-    pub tools_schema_json: String,
+    /// Active tools by name (ENC-305 D1): `ToolName` references into the
+    /// session's `ToolUniverse`, resolved fallibly by
+    /// [`FfiModelRequest::into_core`]. No JSON state crosses on the request.
+    pub active_tools: Vec<String>,
     pub allow_tool_call: bool,
-    pub context_references: Vec<FfiContextReference>,
-    pub state_ledger_json: Option<String>,
-    pub tool_context_index_json: Option<String>,
-    pub file_context_index_json: Option<String>,
+    /// Context references by ID (ENC-305 D1): resolved against the
+    /// session's `ContextStore` by [`FfiModelRequest::into_core`].
+    pub context_reference_ids: Vec<String>,
     pub cache_hints: Vec<String>,
     pub provider_context: FfiProviderContextSnapshot,
-    pub state_ledger_delta_json: Option<String>,
-    pub tool_context_index_delta_json: Option<String>,
-    pub file_context_index_delta_json: Option<String>,
     pub retry_after_ms: Option<u64>,
     pub model_retry_attempt: Option<u32>,
 }
 
-impl From<FfiModelRequest> for ModelRequest {
-    fn from(m: FfiModelRequest) -> Self {
-        Self {
-            session_messages: m.session_messages.into_iter().map(Into::into).collect(),
-            system_prompt: m.system_prompt,
-            // FFI inbound edge (a justified remaining parse): the host-side
-            // request string is parsed once here, at the boundary. Unlike
-            // session construction, this conversion is infallible (`From`):
-            // the string echoes a request the engine itself rendered, so a
-            // contract violation here falls back to an empty active set
-            // rather than failing a conversion that cannot return an error.
-            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json)
-                .map(|schemas| schemas.active)
-                .unwrap_or_default(),
-            rendered_runtime_tools: Vec::new(),
-            allow_tool_call: m.allow_tool_call,
-            context_references: m.context_references.into_iter().map(Into::into).collect(),
-            state_ledger: m
-                .state_ledger_json
-                .and_then(|json| serde_json::from_str(&json).ok()),
-            tool_context_index: m
-                .tool_context_index_json
-                .and_then(|json| serde_json::from_str(&json).ok()),
-            file_context_index: m
-                .file_context_index_json
-                .and_then(|json| serde_json::from_str(&json).ok()),
-            cache_hints: m.cache_hints,
-            provider_context: m.provider_context.into(),
-            state_ledger_delta_json: m.state_ledger_delta_json,
-            tool_context_index_delta_json: m.tool_context_index_delta_json,
-            file_context_index_delta_json: m.file_context_index_delta_json,
-            retry_after_ms: m.retry_after_ms,
-            model_retry_attempt: m.model_retry_attempt,
+/// Fallible strict conversion of one FFI message for the request path
+/// (ENC-305 D3): metadata parsing must not fall back to an empty default,
+/// so this uses [`MessageMeta::from_json_str_strict`] instead of the
+/// lenient `From<FfiAgentMessage>` conversion. Malformed metadata is an
+/// `AgentException` naming the message index. Other
+/// `From<FfiAgentMessage>` users (e.g. `create_session`) are unchanged.
+fn agent_message_strict(m: FfiAgentMessage, index: usize) -> Result<AgentMessage, AgentException> {
+    let metadata = MessageMeta::from_json_str_strict(&m.metadata_json).map_err(|error| {
+        AgentException::Internal {
+            detail: format!("session_messages[{index}] metadata_json is not valid JSON: {error}"),
         }
+    })?;
+    Ok(AgentMessage {
+        id: m.id,
+        role: m.role.into(),
+        content: m.content,
+        metadata,
+    })
+}
+
+impl FfiModelRequest {
+    /// Fallible, session-bound inbound conversion (ENC-305 D3), replacing
+    /// the deleted infallible `From<FfiModelRequest> for ModelRequest`.
+    ///
+    /// Resolution rules:
+    /// - `active_tools`: each name builds a `ToolName` (blank ->
+    ///   `AgentException::Internal` naming the field, following the
+    ///   `tool_name_from_ffi` precedent in `ffi/semantics.rs`). When a
+    ///   catalog spec resolves for the name (canonical or alias), the
+    ///   name is canonicalized to `spec.name` FIRST (ENC-305 fix pass,
+    ///   m2) — entry lookup, stub identity, and active-membership all
+    ///   use the canonical name, because the canonical name is what
+    ///   the entry index and the active set hold; the original name is
+    ///   additionally accepted for active membership if it is itself
+    ///   in the active set (nothing more: host-activated aliases are
+    ///   not a thing). A name resolves iff the universe carries an
+    ///   entry for the canonical name, or a catalog spec for it, or
+    ///   either form is in the universe's active names (host-activated
+    ///   entry-less tools are legitimate tracked state). Resolved
+    ///   schemas are the entry cloned, else
+    ///   `SchemaEntry::stub(canonical_name)`. A name resolving none of
+    ///   these is an `AgentException::Internal` embedding the
+    ///   `UnknownToolReference` debug form (the `create_session`
+    ///   precedent in `ffi/mod.rs`). The resolved list is deduped
+    ///   first-seen on the canonical `ToolName` (m3), so an alias and
+    ///   its canonical name in one request yield one schema.
+    /// - `context_reference_ids`: each id must exist in `context_store`;
+    ///   the store entry's reference populates `context_references`. A
+    ///   miss is `AgentException::ContextReferenceNotFound`. IDs are
+    ///   deduped first-seen (m3).
+    /// - `session_messages`: converted strictly (see
+    ///   [`agent_message_strict`]); malformed `metadata_json` is an
+    ///   `AgentException::Internal` naming the message index.
+    ///
+    /// Engine-derived state on the produced `ModelRequest`
+    /// (`state_ledger`, `tool_context_index`, `file_context_index`, the
+    /// `*_delta_json` fields, and `rendered_runtime_tools`) is
+    /// `None`/empty BY CONSTRUCTION: that state is rebuilt by
+    /// `build_model_request` per turn and never enters from a request.
+    pub fn into_core(
+        self,
+        universe: &crate::tool_universe::ToolUniverse,
+        context_store: &crate::context_store::ContextStore,
+    ) -> Result<crate::turn_io::ModelRequest, AgentException> {
+        let mut tool_schemas = Vec::with_capacity(self.active_tools.len());
+        // m3: dedupe first-seen on the canonical ToolName (post-m2
+        // canonicalization), mirroring the activate + outbound-projection
+        // precedent.
+        let mut seen_tools: std::collections::HashSet<crate::tool_name::ToolName> =
+            std::collections::HashSet::new();
+        for raw_name in &self.active_tools {
+            let name = crate::tool_name::ToolName::new(raw_name).map_err(|_| {
+                AgentException::Internal {
+                    detail: "active_tools[] must not be blank".to_string(),
+                }
+            })?;
+            // m2: a resolving spec canonicalizes the name before entry
+            // lookup / stub / active-membership logic.
+            let spec = universe.spec(&name);
+            let canonical = match spec {
+                Some(spec) => spec.name.clone(),
+                None => name.clone(),
+            };
+            if !seen_tools.insert(canonical.clone()) {
+                continue;
+            }
+            let entry = universe.entry(&canonical);
+            let resolves = entry.is_some()
+                || spec.is_some()
+                || universe.active_names().contains(&canonical)
+                || universe.active_names().contains(&name);
+            if !resolves {
+                let error = crate::tool_semantics::ToolSemanticsError::UnknownToolReference {
+                    section: "request".to_string(),
+                    name: canonical.as_str().to_string(),
+                };
+                return Err(AgentException::Internal {
+                    detail: format!("invalid tool semantics: {error:?}"),
+                });
+            }
+            tool_schemas.push(match entry {
+                Some(entry) => entry.clone(),
+                None => crate::tool_schema::SchemaEntry::stub(&canonical),
+            });
+        }
+
+        let mut context_references = Vec::with_capacity(self.context_reference_ids.len());
+        // m3: dedupe first-seen on the ID.
+        let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for id in &self.context_reference_ids {
+            if !seen_ids.insert(id.as_str()) {
+                continue;
+            }
+            match context_store.get(id) {
+                Some(entry) => context_references.push(entry.reference.clone()),
+                None => {
+                    return Err(AgentException::ContextReferenceNotFound {
+                        reference_id: id.clone(),
+                    })
+                }
+            }
+        }
+
+        let session_messages = self
+            .session_messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| agent_message_strict(message, index))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ModelRequest {
+            session_messages,
+            system_prompt: self.system_prompt,
+            tool_schemas,
+            rendered_runtime_tools: Vec::new(),
+            allow_tool_call: self.allow_tool_call,
+            context_references,
+            state_ledger: None,
+            tool_context_index: None,
+            file_context_index: None,
+            cache_hints: self.cache_hints,
+            provider_context: self.provider_context.into(),
+            state_ledger_delta_json: None,
+            tool_context_index_delta_json: None,
+            file_context_index_delta_json: None,
+            retry_after_ms: self.retry_after_ms,
+            model_retry_attempt: self.model_retry_attempt,
+        })
     }
 }
 
 impl From<ModelRequest> for FfiModelRequest {
     fn from(m: ModelRequest) -> Self {
-        // FFI outbound edge: serialize the parsed entries to JSON here.
-        let tools_schema_json = m.tools_schema_json();
+        // FFI outbound edge (ENC-305 D2): an infallible pure projection —
+        // no parsing or serialization. Active tools project to the names
+        // of `tool_schemas` ++ `rendered_runtime_tools`, deduped
+        // first-seen; context references project to their IDs in order.
+        let mut active_tools: Vec<String> = Vec::new();
+        for entry in m.tool_schemas.iter().chain(m.rendered_runtime_tools.iter()) {
+            let name = entry.name.as_str().to_string();
+            if !active_tools.contains(&name) {
+                active_tools.push(name);
+            }
+        }
         Self {
             session_messages: m.session_messages.into_iter().map(Into::into).collect(),
             system_prompt: m.system_prompt,
-            tools_schema_json,
+            active_tools,
             allow_tool_call: m.allow_tool_call,
-            context_references: m.context_references.into_iter().map(Into::into).collect(),
-            state_ledger_json: m
-                .state_ledger
-                .and_then(|ledger| serde_json::to_string(&ledger).ok()),
-            tool_context_index_json: m
-                .tool_context_index
-                .and_then(|index| serde_json::to_string(&index).ok()),
-            file_context_index_json: m
-                .file_context_index
-                .and_then(|index| serde_json::to_string(&index).ok()),
+            context_reference_ids: m
+                .context_references
+                .iter()
+                .map(|reference| reference.id.clone())
+                .collect(),
             cache_hints: m.cache_hints,
             provider_context: m.provider_context.into(),
-            state_ledger_delta_json: m.state_ledger_delta_json,
-            tool_context_index_delta_json: m.tool_context_index_delta_json,
-            file_context_index_delta_json: m.file_context_index_delta_json,
             retry_after_ms: m.retry_after_ms,
             model_retry_attempt: m.model_retry_attempt,
         }

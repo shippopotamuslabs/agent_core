@@ -367,6 +367,25 @@ impl MessageMeta {
             .unwrap_or_default()
     }
 
+    /// Strict sibling of [`Self::from_json_str`] (ENC-305): identical
+    /// per-field handling via [`Self::from_value`], but malformed JSON is a
+    /// `serde_json::Error` instead of a silent empty default. Also strict
+    /// about the top level (ENC-305 fix pass, m1): a value that is neither
+    /// an object nor null is an error, never a silently emptied meta.
+    /// Used on paths where a parse failure must surface as a typed error
+    /// (the per-turn FFI request conversion); [`Self::from_json_str`] is
+    /// unchanged.
+    pub fn from_json_str_strict(s: &str) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
+        let value: serde_json::Value = serde_json::from_str(s)?;
+        match value {
+            serde_json::Value::Object(_) | serde_json::Value::Null => Ok(Self::from_value(value)),
+            _ => Err(serde_json::Error::custom(
+                "message metadata must be a JSON object or null",
+            )),
+        }
+    }
+
     /// Encode for JSON persistence / FFI. Empty metadata encodes as `null`,
     /// matching the pre-typed default.
     pub fn to_json_string(&self) -> String {
@@ -629,6 +648,29 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&s).unwrap(),
             json!({"call_id": "c1"})
         );
+    }
+
+    #[test]
+    fn message_meta_from_json_str_strict_rejects_malformed_json() {
+        // ENC-305: the strict sibling surfaces malformed JSON as an error
+        // while valid blobs (object and null) parse exactly as the lenient
+        // path parses them.
+        assert!(MessageMeta::from_json_str_strict("{not json").is_err());
+        assert!(MessageMeta::from_json_str_strict("bogus").is_err());
+        let meta = MessageMeta::from_json_str_strict(r#"{"call_id":"c1"}"#)
+            .expect("valid object metadata must parse");
+        assert_eq!(meta.call_id(), Some("c1"));
+        assert!(MessageMeta::from_json_str_strict("null")
+            .expect("null metadata must parse")
+            .is_empty());
+        // m1: a top level that is neither an object nor null is an
+        // error, not a silently emptied meta.
+        assert!(MessageMeta::from_json_str_strict("42").is_err());
+        assert!(MessageMeta::from_json_str_strict("[1,2]").is_err());
+        assert!(MessageMeta::from_json_str_strict("\"text\"").is_err());
+        assert!(MessageMeta::from_json_str_strict("true").is_err());
+        // The lenient path is unchanged.
+        assert_eq!(MessageMeta::from_json_str("bogus").to_json_string(), "null");
     }
 
     #[test]

@@ -221,6 +221,21 @@ impl ToolUniverse {
         merge_tool_names_deduped(&mut self.active, names);
     }
 
+    /// Replace the active set wholesale with `active`, deduped in
+    /// first-seen order through the same merge helper [`activate`] uses
+    /// (starting from an empty set). Snapshot-restore ONLY (ENC-305):
+    /// [`crate::session_snapshot::SessionSnapshot`] import restores the
+    /// live active set captured at export, which is authoritative over
+    /// the schema set's initial active names the world was built with.
+    /// Like `activate`, this imposes no membership rule — snapshot data
+    /// came from a live universe, whose active set may carry
+    /// host-activated entry-less names.
+    pub(crate) fn restore_active(&mut self, active: Vec<ToolName>) {
+        let mut restored = Vec::new();
+        merge_tool_names_deduped(&mut restored, active);
+        self.active = restored;
+    }
+
     /// Admit a new tool into the world (ENC-304 D6): full validation of
     /// the candidate against the CURRENT world runs before any mutation,
     /// so a failure leaves the world unchanged. Admission does NOT
