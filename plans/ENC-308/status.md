@@ -31,3 +31,72 @@ Implementation (chunk B1)
   engine code reads any extras key behaviorally. Orchestrator decision
   (Sean's typing doctrine): Option B, type it in the core; plan amended.
   B1 re-dispatched with file_context.rs + model_request.rs in scope.
+- 2026-10-28 (B1, re-dispatch): Session context closed + typed; strict
+  creation — done. (1) included_files typed in the core per the
+  amendment: new `IncludedFile { path, token_estimate, content }` lives
+  in src/session.rs (chosen home: file_context already depends on
+  session for AgentConfig/SessionCapabilities, so the entry struct in
+  session keeps the module DAG one-directional; session never imports
+  file_context). `SessionContext.included_files` is now
+  `Vec<IncludedFile>` — absent ≡ empty, matching pending_work /
+  history_snapshot_ids in the same struct (the one intentional semantic
+  collapse: a legacy explicit `[]` used to yield an empty
+  FileContextIndex, now none). `content` keeps serde default +
+  skip-if-empty, so stored entries missing `content` read back and
+  round-trip in the legacy entry shape. The read seam stays tolerant
+  (D2): new `de_included_files` keeps entries that deserialize and
+  drops malformed ones, mirroring `de_string_list`; live construction
+  never passes through it. `condense_file_context` takes
+  `&[IncludedFile]`; the private `InputFile`, the JSON parse, and the
+  control-char sanitize-and-retry fallback are deleted, as is
+  `SessionContext::included_files_json()`; model_request.rs condenses
+  the typed list directly (no index for an empty list). (8) New
+  UniFFI records `FfiIncludedFile` + `FfiSessionContext` (src/ffi/
+  types.rs, re-exported via ffi/mod.rs + lib.rs) mirror the core
+  fields; `create_session` now takes `session_context: FfiSessionContext`
+  instead of `session_context_json: String`, the lenient
+  `unwrap_or(Value::Null)` parse is deleted, and the conversion is a
+  total `From` (unit-tested field-by-field). (12-context)
+  `SessionContext.extras` is DELETED (field, serde flatten, and the
+  from(Value) collection wording); unknown keys are unrepresentable at
+  the FFI and dropped by serde at the stored-state seam — proven by the
+  hand-written legacy-row test in session.rs (junk keys at both
+  levels, typed wire keys `chatId` etc., an included_files entry
+  without `content`, one entry missing `path` dropped at the seam).
+  (10) create_session routes initial messages through
+  `agent_message_strict` (now pub(crate), doc updated) — malformed
+  metadata_json at creation is an AgentException::Internal identical
+  in kind to the per-turn path; new FFI test asserts it, plus a typed-
+  context test asserting the exported snapshot carries the typed wire
+  keys and the legacy included_files entry shape.
+  PR-description deltas for ENC-294: create_session's 4th parameter is
+  now the FfiSessionContext record (was a JSON string); SessionContext
+  wire loses extras round-tripping (unknown keys dropped on read) and
+  gains typed included_files entries.
+  Existing tests changed, each for a legitimate shape change:
+  session.rs `session_context_defaults_empty_when_missing` (extras
+  assertion removed — field deleted; included_files emptiness asserted
+  instead) and `session_context_roundtrips_existing_fixture_shape`
+  (now asserts the closed-schema contract: typed fields + typed file
+  entry survive, unknown key drops instead of round-tripping); the
+  lenient-bool test's comment no longer cites extras;
+  tests/file_context_test.rs s17/e7 (condense takes `&[IncludedFile]`
+  struct literals instead of a JSON string); tests/
+  enc305_snapshot_test.rs two FFI create_session sites (`"{}"` →
+  `FfiSessionContext::default()`); tests/finish_boundary_test.rs
+  FB-R-010 (pending_work JSON string → FfiSessionContext field);
+  src/ffi/semantics.rs two create_session tests (`"null"` →
+  `FfiSessionContext::default()`). No assertion was weakened.
+  Verification (all counts read off complete on-disk logs):
+  `cargo fmt --check` clean; `cargo clippy --locked --all-targets --
+  -D warnings` clean; `cargo test --locked` full — 710 passed /
+  0 failed (lib 289; enc305_snapshot 14; file_context 3;
+  context_management e2e 1; finish_boundary 10);
+  `cargo test --locked --no-default-features` targeted (lib +
+  enc305_snapshot + file_context + context_management e2e) — 281
+  passed / 0 failed (lib 268; snapshot 9 — ffi-gated tests off, its
+  baseline shape; file_context 3; e2e 1). finish_boundary cannot
+  build under no-default-features (required-features = ["ffi"],
+  pre-existing) and was not run there. A2 goldens pass unchanged
+  (golden snapshot's session_context is `{}`, no drift).
+  Next: chunk B2.

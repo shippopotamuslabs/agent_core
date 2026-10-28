@@ -25,11 +25,11 @@ pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,
     FfiCompactionBoundary, FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger,
     FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind, FfiFinishReason,
-    FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest, FfiModelResponse,
-    FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities, FfiSessionIoParams,
-    FfiSummaryRequest, FfiSummaryResult, FfiToolCallFormat, FfiToolCallRecord, FfiToolParseBatch,
-    FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
-    FfiToolSchemaEntry,
+    FfiIncludedFile, FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest,
+    FfiModelResponse, FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities,
+    FfiSessionContext, FfiSessionIoParams, FfiSummaryRequest, FfiSummaryResult, FfiToolCallFormat,
+    FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason,
+    FfiToolParseField, FfiToolResultRecord, FfiToolSchemaEntry,
 };
 
 use std::sync::Arc;
@@ -69,13 +69,21 @@ impl FfiAgentEngine {
         initial_messages: Vec<FfiAgentMessage>,
         config: FfiAgentConfig,
         capabilities: FfiSessionCapabilities,
-        session_context_json: String,
+        session_context: FfiSessionContext,
         io: FfiSessionIoParams,
     ) -> Result<Arc<FfiSession>, AgentException> {
-        let ctx: serde_json::Value =
-            serde_json::from_str(&session_context_json).unwrap_or(serde_json::Value::Null);
-        let msgs: Vec<crate::message::AgentMessage> =
-            initial_messages.into_iter().map(Into::into).collect();
+        // ENC-308 item 8: the context arrives as the typed
+        // `FfiSessionContext` record and converts totally — the lenient
+        // JSON parse with its Null fallback is gone.
+        let ctx: crate::session::SessionContext = session_context.into();
+        // ENC-308 item 10: initial messages convert strictly, exactly
+        // like the per-turn path — malformed metadata is an
+        // AgentException, never a silently defaulted message.
+        let msgs: Vec<crate::message::AgentMessage> = initial_messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| types::agent_message_strict(message, index))
+            .collect::<Result<Vec<_>, _>>()?;
         let io = types::session_io_params(io)?;
         // ENC-297 D2: fallible typed conversion — invalid semantics/catalog
         // is an AgentException, never an eprintln + agnostic fallback.
@@ -92,9 +100,9 @@ impl FfiAgentEngine {
     }
 
     /// Export the session's typed snapshot (ENC-305 D7) as its canonical
-    /// serde JSON — the only bulk state crossing this FFI, following
-    /// `create_session`'s `session_context_json` precedent of typed core
-    /// values as serde text. Serialization of the typed struct is
+    /// serde JSON — the only bulk state crossing this FFI as serde text
+    /// (the ratified conduit exception: the host stores the blob without
+    /// reading it). Serialization of the typed struct is
     /// infallible in practice; a failure surfaces as a typed
     /// `AgentException::Internal`, never a fallback payload.
     pub fn export_snapshot(&self, session: &FfiSession) -> Result<String, AgentException> {

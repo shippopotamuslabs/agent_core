@@ -6,7 +6,8 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelResponse, RawToolCall};
 use agent_core::{
     create_agent_engine, FfiAgentAction, FfiAgentConfig, FfiAgentMessage, FfiAgentRole,
-    FfiFinishReason, FfiModelResponse, FfiSessionCapabilities, FfiSessionIoParams,
+    FfiFinishReason, FfiModelResponse, FfiSessionCapabilities, FfiSessionContext,
+    FfiSessionIoParams,
 };
 
 fn user_message(content: &str) -> AgentMessage {
@@ -375,7 +376,10 @@ fn fb_r_010_ffi_config_enables_pending_work_continuation() {
             }],
             config,
             capabilities,
-            serde_json::json!({"pending_work": ["verify failing tests"]}).to_string(),
+            FfiSessionContext {
+                pending_work: vec!["verify failing tests".into()],
+                ..Default::default()
+            },
             FfiSessionIoParams {
                 provider: "anthropic".into(),
                 context_window_tokens: 200_000,

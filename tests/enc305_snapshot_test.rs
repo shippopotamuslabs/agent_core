@@ -561,7 +561,8 @@ fn enc305_snapshot_import_rejects_dangling_argument_repairs_reference() {
 mod ffi_tests {
     use agent_core::{
         create_agent_engine, AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentMessage,
-        FfiAgentRole, FfiSessionCapabilities, FfiSessionIoParams, FfiToolSchemaEntry,
+        FfiAgentRole, FfiIncludedFile, FfiSessionCapabilities, FfiSessionContext,
+        FfiSessionIoParams, FfiToolSchemaEntry,
     };
 
     #[test]
@@ -577,7 +578,7 @@ mod ffi_tests {
                 }],
                 FfiAgentConfig::default(),
                 FfiSessionCapabilities::default(),
-                "{}".to_string(),
+                FfiSessionContext::default(),
                 FfiSessionIoParams {
                     provider: "anthropic".to_string(),
                     context_window_tokens: 200_000,
@@ -658,7 +659,7 @@ mod ffi_tests {
                 }],
                 FfiAgentConfig::default(),
                 FfiSessionCapabilities::default(),
-                "{}".to_string(),
+                FfiSessionContext::default(),
                 FfiSessionIoParams {
                     provider: "anthropic".to_string(),
                     context_window_tokens: 200_000,
@@ -695,5 +696,96 @@ mod ffi_tests {
             }
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    fn bare_io() -> FfiSessionIoParams {
+        FfiSessionIoParams {
+            provider: "anthropic".to_string(),
+            context_window_tokens: 200_000,
+            tool_schemas: vec![],
+            system_prompt: "sys".to_string(),
+        }
+    }
+
+    #[test]
+    fn enc308_ffi_create_session_rejects_malformed_metadata() {
+        // ENC-308 item 10: creation validates initial-message metadata
+        // through the strict converter, exactly like the per-turn path —
+        // the error kind matches (Internal naming the field and index).
+        let eng = create_agent_engine();
+        let error = match eng.create_session(
+            vec![FfiAgentMessage {
+                id: "u1".to_string(),
+                role: FfiAgentRole::User,
+                content: "hi".to_string(),
+                metadata_json: "{not json".to_string(),
+            }],
+            FfiAgentConfig::default(),
+            FfiSessionCapabilities::default(),
+            FfiSessionContext::default(),
+            bare_io(),
+        ) {
+            Ok(_) => panic!("malformed metadata_json must fail create_session"),
+            Err(error) => error,
+        };
+        match error {
+            AgentException::Internal { detail } => {
+                assert!(
+                    detail.contains("metadata_json is not valid JSON"),
+                    "detail must name the metadata failure: {detail}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enc308_ffi_create_session_typed_context_lands_in_snapshot() {
+        // ENC-308 item 8: the typed FfiSessionContext record converts
+        // totally into the core SessionContext — the exported snapshot
+        // carries the typed wire keys and the typed included_files
+        // entries.
+        let eng = create_agent_engine();
+        let session = eng
+            .create_session(
+                vec![FfiAgentMessage {
+                    id: "u1".to_string(),
+                    role: FfiAgentRole::User,
+                    content: "hi".to_string(),
+                    metadata_json: "null".to_string(),
+                }],
+                FfiAgentConfig::default(),
+                FfiSessionCapabilities::default(),
+                FfiSessionContext {
+                    chat_id: Some("chat-1".to_string()),
+                    user_message_id: Some("u-1".to_string()),
+                    pending_work: vec!["ship it".to_string()],
+                    force_finish_blocked: true,
+                    included_files: vec![FfiIncludedFile {
+                        path: "src/big.rs".to_string(),
+                        token_estimate: 42,
+                        content: String::new(),
+                    }],
+                    ..Default::default()
+                },
+                bare_io(),
+            )
+            .expect("ffi create_session with typed context");
+        let snapshot_json = eng
+            .export_snapshot(&session)
+            .expect("ffi export_snapshot returns JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(&snapshot_json).expect("snapshot JSON parses");
+        let context = &value["session"]["session_context"];
+        assert_eq!(context["chatId"], "chat-1");
+        assert_eq!(context["userMessageId"], "u-1");
+        assert_eq!(context["pending_work"], serde_json::json!(["ship it"]));
+        assert_eq!(context["force_finish_blocked"], true);
+        // The contentless entry serializes in the legacy entry shape
+        // (content skipped while empty, exactly as stored rows read).
+        assert_eq!(
+            context["included_files"],
+            serde_json::json!([{"path": "src/big.rs", "token_estimate": 42}])
+        );
     }
 }

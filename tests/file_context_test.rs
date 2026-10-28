@@ -5,7 +5,7 @@ use agent_core::context_store::ContextStore;
 use agent_core::engine::{AgentEngine, SessionIoParams};
 use agent_core::file_context::{condense_file_context, FileCondensationLevel};
 use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
-use agent_core::session::{AgentConfig, SessionCapabilities};
+use agent_core::session::{AgentConfig, IncludedFile, SessionCapabilities};
 
 #[test]
 fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
@@ -19,16 +19,14 @@ fn s17_large_parseable_file_becomes_outline_and_chunk_refs() {
         ..Default::default()
     };
     let mut store = ContextStore::default();
-    let files = serde_json::json!([
-        {
-            "path": "src/large.rs",
-            "token_estimate": 500,
-            "content": "// license header\npub fn alpha() {}\nstruct Beta {}\nfn gamma() {}"
-        }
-    ]);
+    let files = vec![IncludedFile {
+        path: "src/large.rs".to_string(),
+        token_estimate: 500,
+        content: "// license header\npub fn alpha() {}\nstruct Beta {}\nfn gamma() {}".to_string(),
+    }];
 
-    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps, 0)
-        .expect("file context index");
+    let index =
+        condense_file_context(&files, &mut store, &cfg, &caps, 0).expect("file context index");
 
     assert_eq!(index.included_paths.len(), 1);
     let summary = &index.included_paths[0];
@@ -55,16 +53,14 @@ fn e7_unparseable_file_context_becomes_filename_only() {
         ..Default::default()
     };
     let mut store = ContextStore::default();
-    let files = serde_json::json!([
-        {
-            "path": "blob.bin",
-            "token_estimate": 500,
-            "content": "plain bytes without source structure"
-        }
-    ]);
+    let files = vec![IncludedFile {
+        path: "blob.bin".to_string(),
+        token_estimate: 500,
+        content: "plain bytes without source structure".to_string(),
+    }];
 
-    let index = condense_file_context(&files.to_string(), &mut store, &cfg, &caps, 0)
-        .expect("file context index");
+    let index =
+        condense_file_context(&files, &mut store, &cfg, &caps, 0).expect("file context index");
 
     assert_eq!(index.included_paths.len(), 1);
     let summary = &index.included_paths[0];

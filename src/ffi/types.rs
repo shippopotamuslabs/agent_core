@@ -5,7 +5,7 @@ use crate::long_loop_policy::LongLoopPolicy;
 use crate::manual_compact::{ManualCompactRequest, ManualCompactResult};
 use crate::message::{AgentMessage, AgentRole, MessageMeta, RepairRecord, ToolCallRecord};
 use crate::policy::ContextPolicyTier;
-use crate::session::{AgentConfig, SessionCapabilities};
+use crate::session::{AgentConfig, IncludedFile, SessionCapabilities, SessionContext};
 use crate::sidecar_builder::ProviderContextSnapshot;
 use crate::tool_parse::result::{
     ToolParseBatch, ToolParseFailure, ToolParseFailureReason, ToolParseField,
@@ -216,9 +216,13 @@ pub struct FfiModelRequest {
 /// (ENC-305 D3): metadata parsing must not fall back to an empty default,
 /// so this uses [`MessageMeta::from_json_str_strict`] instead of the
 /// lenient `From<FfiAgentMessage>` conversion. Malformed metadata is an
-/// `AgentException` naming the message index. Other
-/// `From<FfiAgentMessage>` users (e.g. `create_session`) are unchanged.
-fn agent_message_strict(m: FfiAgentMessage, index: usize) -> Result<AgentMessage, AgentException> {
+/// `AgentException` naming the message index. `create_session` routes
+/// its initial messages through here too (ENC-308 item 10), so creation
+/// validates metadata exactly like the per-turn path.
+pub(crate) fn agent_message_strict(
+    m: FfiAgentMessage,
+    index: usize,
+) -> Result<AgentMessage, AgentException> {
     let metadata = MessageMeta::from_json_str_strict(&m.metadata_json).map_err(|error| {
         AgentException::Internal {
             detail: format!("session_messages[{index}] metadata_json is not valid JSON: {error}"),
@@ -1338,6 +1342,59 @@ impl From<FfiSessionCapabilities> for SessionCapabilities {
     }
 }
 
+/// FFI twin of [`IncludedFile`] (ENC-308 B1): one host-supplied file in
+/// the session context's `included_files` list.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct FfiIncludedFile {
+    pub path: String,
+    pub token_estimate: u32,
+    pub content: String,
+}
+
+impl From<FfiIncludedFile> for IncludedFile {
+    fn from(f: FfiIncludedFile) -> Self {
+        Self {
+            path: f.path,
+            token_estimate: f.token_estimate,
+            content: f.content,
+        }
+    }
+}
+
+/// Typed session context at the FFI (ENC-308 item 8): mirrors
+/// [`SessionContext`]'s closed schema field-for-field, replacing the
+/// `session_context_json: String` parameter `create_session` used to
+/// parse leniently. The conversion is total — every field maps
+/// directly, there is no parse and no fallback.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct FfiSessionContext {
+    pub chat_id: Option<String>,
+    pub user_message_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub history_snapshot_ids: Vec<String>,
+    pub pending_work: Vec<String>,
+    pub force_finish_blocked: bool,
+    pub included_files: Vec<FfiIncludedFile>,
+}
+
+impl From<FfiSessionContext> for SessionContext {
+    fn from(f: FfiSessionContext) -> Self {
+        Self {
+            chat_id: f.chat_id,
+            user_message_id: f.user_message_id,
+            assistant_message_id: f.assistant_message_id,
+            history_snapshot_ids: f.history_snapshot_ids,
+            pending_work: f.pending_work,
+            force_finish_blocked: f.force_finish_blocked,
+            included_files: f
+                .included_files
+                .into_iter()
+                .map(IncludedFile::from)
+                .collect(),
+        }
+    }
+}
+
 // ── Actions / events / errors (FFI) ─────────────────────────────────────────
 
 use crate::action::AgentAction;
@@ -1858,5 +1915,39 @@ mod tests {
             }
             other => panic!("expected typed Internal error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ffi_session_context_converts_every_field() {
+        // ENC-308 item 8: the conversion is total — each record field
+        // lands on its SessionContext counterpart, included_files as
+        // typed entries.
+        let context = SessionContext::from(FfiSessionContext {
+            chat_id: Some("chat-1".into()),
+            user_message_id: Some("u-1".into()),
+            assistant_message_id: Some("a-1".into()),
+            history_snapshot_ids: vec!["m0".into()],
+            pending_work: vec!["task".into()],
+            force_finish_blocked: true,
+            included_files: vec![FfiIncludedFile {
+                path: "src/big.rs".into(),
+                token_estimate: 42,
+                content: "fn x() {}".into(),
+            }],
+        });
+        assert_eq!(context.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(context.user_message_id.as_deref(), Some("u-1"));
+        assert_eq!(context.assistant_message_id.as_deref(), Some("a-1"));
+        assert_eq!(context.history_snapshot_ids, vec!["m0".to_string()]);
+        assert_eq!(context.pending_work, vec!["task".to_string()]);
+        assert!(context.force_finish_blocked);
+        assert_eq!(
+            context.included_files,
+            vec![IncludedFile {
+                path: "src/big.rs".to_string(),
+                token_estimate: 42,
+                content: "fn x() {}".to_string(),
+            }]
+        );
     }
 }
