@@ -34,7 +34,7 @@
 //!   is created. Hosts always send arrays of named schema objects; anything
 //!   else is a contract violation, not a render case.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::loop_metrics::LoopMetrics;
 use crate::session::{AgentConfig, SessionCapabilities};
@@ -142,52 +142,30 @@ pub fn entries_json(entries: &[SchemaEntry]) -> String {
 ///
 /// Parsed exactly once per session by [`ToolSchemaSet::parse`]; per-turn code
 /// borrows these entries and never parses schema text.
-#[derive(Debug, Clone, Default)]
-pub struct ToolSchemaSet {
-    /// Currently active (callable) schemas — the `tools_schema_json` channel.
-    pub active: Vec<SchemaEntry>,
-    /// Untouched session-level raw text backing pressure/budget/FFI
-    /// paths, so those stay byte-identical.
-    raw_active: String,
-}
-
-/// The ONE wire form for [`ToolSchemaSet`] serde (ENC-305, raw_active
-/// fidelity restored by the fix pass, M2), shared by both impls below:
-/// `{ "active": [SchemaEntry...], "raw_active": String }`.
+///
+/// Serde is derived (ENC-308 A2; previously hand-rolled through a
+/// private Wire struct of identical shape). The wire form is
+/// `{ "active": [SchemaEntry...], "raw_active": String }`, pinned
+/// byte-for-byte by the golden fixtures in
+/// `tests/enc308_a2_goldens_test.rs` — do not add serde attributes or
+/// reorder fields without re-checking them.
 ///
 /// `raw_active` crosses the wire verbatim: it is NOT derived state. A
 /// string-path (`parse`d) set's raw channel text — whitespace, key
 /// order, number lexemes — backs the pressure/budget paths via
 /// `active_json()` and feeds token counting, so replacing it with the
 /// canonical `entries_json` text on a round trip would drift
-/// compaction behavior across a restart. Deserialize therefore
-/// constructs `Self { active, raw_active }` DIRECTLY from the wire
+/// compaction behavior across a restart. Deserialization therefore
+/// restores `Self { active, raw_active }` DIRECTLY from the wire
 /// fields, never via [`ToolSchemaSet::from_entries`] (which synthesizes
 /// `raw_active` for sets that never had host text).
-#[derive(Serialize, Deserialize)]
-struct Wire {
-    active: Vec<SchemaEntry>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolSchemaSet {
+    /// Currently active (callable) schemas — the `tools_schema_json` channel.
+    pub active: Vec<SchemaEntry>,
+    /// Untouched session-level raw text backing pressure/budget/FFI
+    /// paths, so those stay byte-identical.
     raw_active: String,
-}
-
-impl Serialize for ToolSchemaSet {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Wire {
-            active: self.active.clone(),
-            raw_active: self.raw_active.clone(),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ToolSchemaSet {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = Wire::deserialize(deserializer)?;
-        Ok(Self {
-            active: wire.active,
-            raw_active: wire.raw_active,
-        })
-    }
 }
 
 /// Why a tool-schema channel was rejected at session construction.
