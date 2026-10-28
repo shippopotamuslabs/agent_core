@@ -53,7 +53,7 @@ use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
 use crate::transcript_revision::record_destructive_compaction_boundary;
-use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
+use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
 use state::{EnginePhase, InnerSession, PendingToolTurn};
 
@@ -217,9 +217,7 @@ impl AgentEngine {
                 tools_blocked_nudges_this_turn: 0,
                 active_tool_names: initial_active_tool_names,
                 sidecar_builder: SidecarBuilder::new(),
-                compaction_passes_this_turn: 0,
-                destructive_tiers_this_turn: 0,
-                suppress_summary_tier: false,
+                compaction: compaction::CompactionState::new(),
             })),
         })
     }
@@ -348,7 +346,7 @@ impl AgentEngine {
                         // The provider finish reason may be ToolUse/Other for the blocked
                         // attempt; finishing with it would fail the loop after a graceful
                         // fallback, so force Stop semantics.
-                        finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
+                        g.finish_after_model_stop(FinishReason::Stop);
                         return;
                     }
                 }
@@ -364,7 +362,7 @@ impl AgentEngine {
         );
 
         if merged_tool_calls.is_empty() {
-            finish::finish_after_model_stop(g.finish_state(), response.finish_reason);
+            g.finish_after_model_stop(response.finish_reason);
             return;
         }
 
@@ -959,7 +957,7 @@ impl AgentEngine {
             CompactionOutcome::NeedsHostCall(req, sess) => {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
                 // Shared staging: session replace + history/ledger refs.
-                let req = InnerSession::stage_summary_request(&mut g, sess, req, trigger);
+                let req = g.attach_summary_staging(sess, req, trigger);
                 g.pending.summary_req = Some(req.clone());
                 g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
@@ -1015,61 +1013,11 @@ pub(super) fn session_has_append_context(
 }
 
 impl InnerSession {
-    /// ENC-286 slice 3: dispatch glue — bundles the disjoint finish fields for
-    /// `finish::finish_after_model_stop`. No logic lives here.
-    fn finish_state(&mut self) -> finish::FinishState<'_> {
-        finish::FinishState {
-            session: &mut self.session,
-            config: &self.config,
-            capabilities: &self.capabilities,
-            io: &self.io,
-            guardrails: &mut self.guardrails,
-            loop_metrics: &self.loop_metrics,
-            phase: &mut self.phase,
-            terminal_action: &mut self.terminal_action,
-            pending: &mut self.pending,
-            last_model_response_greedy_tool_names: &self.last_model_response_greedy_tool_names,
-            state_ledger: &mut self.state_ledger,
-            context_store: &mut self.context_store,
-            sidecar_builder: &mut self.sidecar_builder,
-            active_tool_names: &self.active_tool_names,
-            turn_index: self.turn_index,
-            model_requests_this_turn: &mut self.model_requests_this_turn,
-            compaction_passes_this_turn: self.compaction_passes_this_turn,
-            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-            suppress_summary_tier: self.suppress_summary_tier,
-            events: &mut self.events,
-        }
-    }
-
-    /// Dispatch glue for slice 6: the shared `NeedsHostCall` staging takes a
-    /// field bundle, so construction goes through `&mut InnerSession`.
-    fn stage_summary_request(
-        g: &mut InnerSession,
-        sess: AgentSession,
-        req: SummaryRequest,
-        trigger: CompactionTrigger,
-    ) -> SummaryRequest {
-        compaction::attach_summary_staging(
-            compaction::StageSummaryInputs {
-                session: &mut g.session,
-                context_store: &mut g.context_store,
-                state_ledger: &mut g.state_ledger,
-                enable_context_store: g.config.enable_context_store,
-                enable_state_ledger: g.config.enable_state_ledger,
-                turn_index: g.turn_index,
-                trigger,
-            },
-            sess,
-            req,
-        )
-    }
-
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
     fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
-        self.suppress_summary_tier = true;
+        self.compaction.set_suppress_summary_tier(true);
         match self.run_compaction_pass(trigger) {
             Ok(Some(_)) => {}
             Ok(None) => {}
@@ -1077,7 +1025,7 @@ impl InnerSession {
                 self.set_terminal(AgentAction::Failed(e));
             }
         }
-        self.suppress_summary_tier = false;
+        self.compaction.set_suppress_summary_tier(false);
     }
 
     pub(super) fn set_terminal(&mut self, a: AgentAction) {
@@ -1123,7 +1071,7 @@ impl InnerSession {
             context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
             trigger,
-            suppress_summary_tier: self.suppress_summary_tier,
+            suppress_summary_tier: self.compaction.suppress_summary_tier(),
         }
     }
 
@@ -1161,10 +1109,7 @@ impl InnerSession {
         &mut self,
         trigger: CompactionTrigger,
     ) -> Result<Option<AgentAction>, AgentError> {
-        let mut sync_applied = false;
-        let mut last_history_ref: Option<String> = None;
-        let message_count_before = self.session.messages.len() as u32;
-        let mut destructive_tiers: Vec<CompactionTier> = Vec::new();
+        let mut pass = compaction::CompactionPassState::new(self.session.messages.len() as u32);
         loop {
             let ctx = self.make_ctx(trigger);
             let policy = resolve_context_policy(
@@ -1180,7 +1125,7 @@ impl InnerSession {
                 &policy,
                 trigger,
                 self.io.context_window_tokens,
-                self.suppress_summary_tier,
+                self.compaction.suppress_summary_tier(),
             );
             // ENC-303 Q2: ConfirmationGated tiers (Fifo, TextTruncate) stay
             // in a ratio-triggered plan only on hard-ceiling pressure, a
@@ -1242,13 +1187,13 @@ impl InnerSession {
             let forced_by_non_ratio = fire.forced_by_non_ratio;
 
             if !fire.should_enter {
-                if sync_applied {
+                if pass.sync_applied() {
                     self.emit_post_compact(
                         trigger,
                         None,
-                        last_history_ref,
-                        &destructive_tiers,
-                        message_count_before,
+                        pass.take_history_ref(),
+                        pass.destructive_tiers(),
+                        pass.message_count_before(),
                     );
                 }
                 return Ok(None);
@@ -1273,40 +1218,10 @@ impl InnerSession {
             }
 
             if self.config.enable_context_store {
-                // Slice 6: sync spill/snapshot runs in the helper; the
-                // dispatch applies flags, ledger refs, and emits in order.
-                let effect = compaction::collect_sync_spill_effect(compaction::SyncSpillInputs {
-                    session: &mut self.session,
-                    context_store: &mut self.context_store,
-                    artifact_squash: self
-                        .config
-                        .tool_semantics
-                        .compaction
-                        .artifact_squash
-                        .as_ref(),
-                    spill_threshold_bytes: effective_tool_spill_threshold_bytes(
-                        &self.config,
-                        self.io.context_window_tokens,
-                    ),
-                    turn_index: self.turn_index,
-                    pressure_total_tokens: pressure.total_tokens,
-                    trigger,
-                });
-                if let Some(event) = effect.spill_event {
-                    self.session.push_compaction_event(event.clone());
-                    self.emit(AgentEvent::CompactionApplied(event));
-                    sync_applied = true;
-                }
-                if let Some(history_ref) = effect.history_ref {
-                    last_history_ref = Some(history_ref.clone());
-                    self.remember_history_snapshot_ids(effect.snapshot_ids);
-                    if self.config.enable_state_ledger {
-                        self.state_ledger.add_history_ref(&history_ref);
-                    }
-                    let event = effect.snapshot_event.expect("history snapshot event");
-                    self.session.push_compaction_event(event.clone());
-                    self.emit(AgentEvent::CompactionApplied(event));
-                }
+                // ENC-306 D2: the sync spill/snapshot block is a fused
+                // InnerSession method in the compaction module; it runs
+                // against self and applies its effects in order.
+                self.sync_spill_pass(pressure.total_tokens, &mut pass, trigger);
             }
             if has_append_context {
                 self.persist_artifact_state_if_present();
@@ -1322,43 +1237,27 @@ impl InnerSession {
                 &self.config,
                 &effective_plan,
             );
-            // FRG-47: the 4-arm outcome match is a decision stage; the
-            // dispatch owns the loop and the return. Post pressure is read
-            // only for the NotApplicable arm, exactly as before.
+            // FRG-47 / ENC-306 D2+D4: the 4-arm outcome match lives exactly
+            // once, inside `decide_pipeline_outcome`, which applies its
+            // effects directly; the dispatch owns the loop and the return.
+            // Post pressure is read only for the NotApplicable arm, exactly
+            // as before.
             let post_pressure = matches!(outcome, CompactionOutcome::NotApplicable)
                 .then(|| self.estimate_pressure(trigger));
-            match compaction::decide_pipeline_outcome(
-                compaction::PipelineOutcomeInputs {
-                    session: &mut self.session,
-                    config: &self.config,
-                    capabilities: &self.capabilities,
-                    context_store: &mut self.context_store,
-                    state_ledger: &mut self.state_ledger,
-                    events: &mut self.events,
-                    pending_summary_req: &mut self.pending.summary_req,
-                    pending_summary_ctx: &mut self.pending.summary_ctx,
-                    phase: &mut self.phase,
-                    turn_index: self.turn_index,
-                    trigger,
+            match self.decide_pipeline_outcome(
+                outcome,
+                &mut pass,
+                compaction::PipelinePassContext {
                     loop_ctx: ctx,
                     forced_by_non_ratio,
                     entered_for_long_loop_only,
                     post_pressure,
-                    sync_applied: &mut sync_applied,
-                    last_history_ref: &mut last_history_ref,
-                    destructive_tiers: &mut destructive_tiers,
-                    destructive_tiers_this_turn: &mut self.destructive_tiers_this_turn,
-                    compaction_passes_this_turn: &mut self.compaction_passes_this_turn,
                     defer_compaction_failure,
-                    message_count_before,
                 },
-                outcome,
             ) {
-                compaction::PipelineDecision::ReturnOk(action) => {
-                    return Ok(action.map(|boxed| *boxed));
-                }
-                compaction::PipelineDecision::ReturnErr(err) => return Err(err),
-                compaction::PipelineDecision::LoopAgain => {}
+                Ok(compaction::Flow::Loop) => continue,
+                Ok(compaction::Flow::Done(action)) => return Ok(action.map(|a| *a)),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1371,8 +1270,7 @@ impl InnerSession {
         self.turn_index += 1;
         self.context_store.expire_after_turn(self.turn_index);
         // Reset per-turn telemetry counters for the new user turn.
-        self.compaction_passes_this_turn = 0;
-        self.destructive_tiers_this_turn = 0;
+        self.compaction.begin_turn();
         let allow = self
             .guardrails
             .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
@@ -1429,9 +1327,9 @@ impl InnerSession {
             state_ledger: &self.state_ledger,
             sidecar_builder: &mut self.sidecar_builder,
             turn_index: self.turn_index,
-            compaction_passes_this_turn: self.compaction_passes_this_turn,
-            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-            suppress_summary_tier: self.suppress_summary_tier,
+            compaction_passes_this_turn: self.compaction.passes_this_turn(),
+            destructive_tiers_this_turn: self.compaction.destructive_tiers_this_turn(),
+            suppress_summary_tier: self.compaction.suppress_summary_tier(),
             allow_tool_call: allow,
             cache_hints,
             loop_metrics: &self.loop_metrics,
