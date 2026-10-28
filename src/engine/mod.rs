@@ -51,7 +51,8 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
-use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics, ToolSemanticsError};
+use crate::tool_semantics::{ArtifactSquashSemantics, ToolSemanticsError};
+use crate::tool_universe::ToolUniverse;
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryResult};
 
@@ -65,20 +66,6 @@ pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
             | CompactionTier::Summary
             | CompactionTier::TextTruncate
     )
-}
-
-/// Merge canonical tool identities into the active set in first-seen order,
-/// deduped (m3: the generic String/ToolName bridge is deleted now that every
-/// side is `ToolName`).
-pub(super) fn merge_active_tool_names(
-    active_tool_names: &mut Vec<ToolName>,
-    names: impl IntoIterator<Item = ToolName>,
-) {
-    for name in names {
-        if !active_tool_names.iter().any(|existing| existing == &name) {
-            active_tool_names.push(name);
-        }
-    }
 }
 
 /// Single decider for the discovery gate (ENC-303): whether `tool_name`
@@ -95,7 +82,7 @@ pub(super) fn gate_exemption_for(
 }
 
 pub(super) fn activate_tools_for_spill_reference(
-    active_tool_names: &mut Vec<ToolName>,
+    universe: &mut ToolUniverse,
     result: &mut ToolResultRecord,
     reference: &ContextReference,
 ) {
@@ -105,8 +92,15 @@ pub(super) fn activate_tools_for_spill_reference(
         .iter()
         .filter_map(|name| ToolName::new(name).ok())
         .collect();
-    merge_active_tool_names(active_tool_names, hinted.clone());
-    merge_active_tool_names(&mut result.activated_tool_names, hinted);
+    // Session side: activation goes through the model (ENC-304 D5).
+    universe.activate(hinted.clone());
+    // Result-record side: keep merging into `activated_tool_names` as today
+    // (first-seen order, deduped — the former merge helper's semantics).
+    for name in hinted {
+        if !result.activated_tool_names.iter().any(|existing| existing == &name) {
+            result.activated_tool_names.push(name);
+        }
+    }
 }
 
 /// Session state machine: hosts drive it exclusively through the polling surface
@@ -134,13 +128,13 @@ impl AgentEngine {
         Self::default()
     }
 
-    /// Fallible (ENC-297 J1): re-syncs the policy catalog from the
-    /// construction-time semantics and fails on invalid struct-literal /
-    /// serde configs (duplicate tool names, alias collisions) instead of
-    /// running the session with a stale or empty catalog. ENC-299 D4 also
-    /// fails session creation when a semantics section references a tool
-    /// that is neither a catalog tool nor an active schema
-    /// ([`ToolSemanticsError::UnknownToolReference`]). Returns
+    /// Fallible (ENC-297 J1): fails on invalid struct-literal / serde
+    /// configs (duplicate tool names, alias collisions) instead of running
+    /// the session with a stale or empty catalog. ENC-299 D4 also fails
+    /// session creation when a semantics section references a tool that is
+    /// neither a catalog tool nor an active schema
+    /// ([`ToolSemanticsError::UnknownToolReference`]). ENC-304: both
+    /// validations live inside [`ToolUniverse::build`]. Returns
     /// [`ToolSemanticsError`] so every caller decides how to surface it.
     pub fn create_session(
         &self,
@@ -152,21 +146,25 @@ impl AgentEngine {
     ) -> Result<SessionHandle, ToolSemanticsError> {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
-        // ENC-297 J1: propagate — no `let _` discard. An invalid literal
-        // config fails session creation; no live session exists on error.
-        config.prepare_tool_semantics()?;
-        // ENC-299 D4: referential validation runs here, where the policy
-        // catalog and the parsed schema set meet for the first time. Known
-        // names are the catalog (canonical + aliases) union the active
-        // schemas; sections that are absent/empty are skipped, so the
-        // agnostic config passes.
-        // Single session-construction parse: names come from the parsed set
-        // (m4: one binding shared by referential validation and the active
-        // set below).
-        let initial_active_tool_names = io.schemas.initial_active_names();
-        config
-            .tool_semantics
-            .validate_references(&config.tool_catalog, &initial_active_tool_names)?;
+        // ENC-304 D3: the session's tool world is built once here, from
+        // the boundary inputs (`io.schemas` + `config.tool_semantics`);
+        // `ToolUniverse::build` owns the ENC-297 structural validation
+        // (via `ToolCatalog::from_semantics`) and the ENC-299 D4
+        // referential validation that used to run inline here, so the
+        // `prepare_tool_semantics` + `validate_references` calls are
+        // deleted. An invalid literal config fails session creation; no
+        // live session exists on error.
+        //
+        // Adaptation vs plan D3's `mem::replace` sketch: build consumes
+        // clones and the stored catalog is re-synced from the universe
+        // below, rather than emptying the stored config/io tool fields.
+        // Guardrails (greedy extensions) and the compaction tiers (micro
+        // result policies, artifact squash) read static semantics through
+        // `&AgentConfig` in live sessions, so an emptied stored config
+        // would silently disable them; the universe is the live world and
+        // the stored copies are its construction-time snapshot.
+        let universe = ToolUniverse::build(io.schemas.clone(), config.tool_semantics.clone())?;
+        config.tool_catalog = universe.catalog().clone();
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -215,7 +213,7 @@ impl AgentEngine {
                 terminal_action: None,
                 last_model_response_greedy_tool_names: Vec::new(),
                 tools_blocked_nudges_this_turn: 0,
-                active_tool_names: initial_active_tool_names,
+                universe,
                 sidecar_builder: SidecarBuilder::new(),
                 compaction: compaction::CompactionState::new(),
             })),
@@ -288,8 +286,9 @@ impl AgentEngine {
         // prepare_tool_semantics at session creation), so the per-turn path
         // borrows the stored value instead of rebuilding + silently
         // falling back to empty on invalid semantics.
-        let semantics = g.config.tool_semantics.clone();
-        let catalog = g.config.tool_catalog.clone();
+        // ENC-304: these clones come from the session's tool universe.
+        let semantics = g.universe.semantics().clone();
+        let catalog = g.universe.catalog().clone();
         let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
             g.config.tool_call_format,
             response.assistant_text.as_deref(),
@@ -371,7 +370,7 @@ impl AgentEngine {
 
         // FRG-47 stage: the repair/discovery loop returns a decision payload;
         // the dispatch owns emit ordering and every phase write below.
-        let outcome = Self::intake_repair(&mut g, &merged_tool_calls, &catalog);
+        let outcome = Self::intake_repair(&mut g, &merged_tool_calls, &catalog, &semantics);
         for ev in outcome.events {
             g.emit(ev);
         }
@@ -533,11 +532,9 @@ impl AgentEngine {
         let mut reject_by_call_id = std::mem::take(&mut g.pending.reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
         // Both sides are ToolName now: no re-folding (m3).
+        // ENC-304 D5: activation goes through the tool universe.
         for res in &results {
-            merge_active_tool_names(
-                &mut g.active_tool_names,
-                res.activated_tool_names.iter().cloned(),
-            );
+            g.universe.activate(res.activated_tool_names.iter().cloned());
         }
 
         // FRG-47 stage 1 (pure): pair host results to calls.
@@ -644,7 +641,7 @@ impl AgentEngine {
         if finalize_after_tool_stop {
             let synth = synthetic_finalize_calls_with_semantics(
                 &g.pending.artifact_ids,
-                &g.config.tool_semantics,
+                g.universe.semantics(),
             );
             if !synth.is_empty() {
                 g.pending.execute = Some(synth);
@@ -751,17 +748,22 @@ impl AgentEngine {
     }
 
     /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    ///
+    /// ENC-304: `semantics`/`catalog` are the dispatch's clones from the
+    /// universe (passing them in keeps them borrow-disjoint from the
+    /// `&mut` universe the repair loop activates through).
     fn intake_repair(
         g: &mut InnerSession,
         merged_tool_calls: &[RawToolCall],
         catalog: &ToolCatalog,
+        semantics: &crate::tool_semantics::ToolSemanticsConfig,
     ) -> model_intake::RepairTurnOutcome {
         model_intake::repair_tool_turn(
             merged_tool_calls,
             model_intake::RepairTurnInputs {
-                semantics: &g.config.tool_semantics,
+                semantics,
                 catalog,
-                active_tool_names: &mut g.active_tool_names,
+                universe: &mut g.universe,
                 turn_index: g.turn_index,
                 default_tool_timeout_ms: g.config.default_tool_timeout_ms,
                 tool_retry_limit: g.config.tool_retry_limit,
@@ -802,7 +804,7 @@ impl AgentEngine {
         let call_tool = ToolName::from_model_output(&call.name).ok();
         let policy = call_tool
             .as_ref()
-            .and_then(|name| result_policy_for(&g.config.tool_semantics, name));
+            .and_then(|name| g.universe.result_policy(name));
         let skip_result_truncation = policy
             .map(|policy| policy.skip_result_truncation)
             .unwrap_or(false);
@@ -821,7 +823,7 @@ impl AgentEngine {
             call,
             res,
             tool_results::ProcessOneResultInputs {
-                semantics: &g.config.tool_semantics,
+                semantics: g.universe.semantics(),
                 spill_threshold_bytes: effective_tool_spill_threshold_bytes(
                     &g.config,
                     g.io.context_window_tokens,
@@ -843,7 +845,7 @@ impl AgentEngine {
                 session: &mut g.session,
                 enable_state_ledger: g.config.enable_state_ledger,
                 state_ledger: &mut g.state_ledger,
-                active_tool_names: &mut g.active_tool_names,
+                universe: &mut g.universe,
                 events: &mut g.events,
                 last_batch_tool_message_index,
                 spill_tokens_before,
@@ -1066,7 +1068,7 @@ impl InnerSession {
         CompactionContext {
             provider: self.io.provider.clone(),
             context_window_tokens: self.io.context_window_tokens,
-            tools_schema_json: self.io.schemas.active_json().to_string(),
+            tools_schema_json: self.universe.active_json().to_string(),
             system_prompt: self.io.system_prompt.clone(),
             context_sidecars_estimate: String::new(),
             capabilities: self.capabilities.clone(),
@@ -1082,8 +1084,8 @@ impl InnerSession {
 
     fn persist_artifact_state_if_present(&mut self) {
         let Some(squash) = self
-            .config
-            .tool_semantics
+            .universe
+            .semantics()
             .compaction
             .artifact_squash
             .as_ref()
@@ -1145,8 +1147,8 @@ impl InnerSession {
                 .any(|m| m.role == AgentRole::Tool);
             let (has_append_context, defer_compaction_failure) = compaction::probe_turn_flags(
                 &self.session.messages,
-                self.config
-                    .tool_semantics
+                self.universe
+                    .semantics()
                     .compaction
                     .artifact_squash
                     .as_ref(),
@@ -1322,7 +1324,7 @@ impl InnerSession {
             config: &self.config,
             capabilities: &self.capabilities,
             io: &self.io,
-            active_tool_names: &self.active_tool_names,
+            universe: &self.universe,
             context_store: &mut self.context_store,
             state_ledger: &self.state_ledger,
             sidecar_builder: &mut self.sidecar_builder,

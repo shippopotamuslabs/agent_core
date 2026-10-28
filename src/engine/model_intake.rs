@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use super::{gate_exemption_for, merge_active_tool_names};
+use super::gate_exemption_for;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::catalog::ToolCatalog;
 use crate::events::AgentEvent;
@@ -25,6 +25,7 @@ use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
+use crate::tool_universe::ToolUniverse;
 use crate::turn_io::RawToolCall;
 
 /// FRG-47 stage: appends the assistant message for the continuing flow
@@ -117,7 +118,7 @@ fn gate_tool_name(raw: &str) -> Option<ToolName> {
 pub(super) struct RepairTurnInputs<'a> {
     pub semantics: &'a ToolSemanticsConfig,
     pub catalog: &'a ToolCatalog,
-    pub active_tool_names: &'a mut Vec<ToolName>,
+    pub universe: &'a mut ToolUniverse,
     pub turn_index: u32,
     pub default_tool_timeout_ms: Option<u64>,
     pub tool_retry_limit: u32,
@@ -141,7 +142,7 @@ pub(super) fn repair_tool_turn(
     let RepairTurnInputs {
         semantics,
         catalog,
-        active_tool_names,
+        universe,
         turn_index,
         default_tool_timeout_ms,
         tool_retry_limit,
@@ -172,9 +173,10 @@ pub(super) fn repair_tool_turn(
             .and_then(|name| gate_exemption_for(&discovery, name));
         if exemption == Some(true) {
             if let Some(name) = tool_name.clone() {
-                merge_active_tool_names(active_tool_names, [name]);
+                universe.activate([name]);
             }
         }
+        let active_tool_names = universe.active_names();
         let callable_now = !active_tool_names.is_empty()
             && (tool_name
                 .as_ref()
@@ -185,7 +187,7 @@ pub(super) fn repair_tool_turn(
                 tool_name: raw.name.clone(),
                 turn_index,
             });
-            let mut available = active_tool_names.clone();
+            let mut available = active_tool_names.to_vec();
             if let Some(name) = discovery_name.clone() {
                 if !available.iter().any(|n| n == &name) {
                     available.insert(0, name);

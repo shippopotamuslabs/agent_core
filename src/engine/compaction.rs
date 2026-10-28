@@ -168,8 +168,8 @@ impl InnerSession {
         let spill_event = spill_tool_messages_in_session(
             &mut self.context_store,
             &mut self.session,
-            self.config
-                .tool_semantics
+            self.universe
+                .semantics()
                 .compaction
                 .artifact_squash
                 .as_ref(),

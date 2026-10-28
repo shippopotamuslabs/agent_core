@@ -29,6 +29,7 @@ use crate::session::AgentSession;
 use crate::state_ledger::StateLedger;
 use crate::tool_name::ToolName;
 use crate::tool_semantics::ToolSemanticsConfig;
+use crate::tool_universe::ToolUniverse;
 use crate::truncate::truncate_tool_result_json;
 
 /// FRG-47 stage: pair host results to calls by `call_id`, falling back to
@@ -202,7 +203,7 @@ pub(super) struct ApplyProcessedInputs<'a> {
     pub session: &'a mut AgentSession,
     pub enable_state_ledger: bool,
     pub state_ledger: &'a mut StateLedger,
-    pub active_tool_names: &'a mut Vec<ToolName>,
+    pub universe: &'a mut ToolUniverse,
     pub events: &'a mut Vec<AgentEvent>,
     pub last_batch_tool_message_index: &'a mut Option<usize>,
     pub spill_tokens_before: u32,
@@ -217,7 +218,7 @@ pub(super) fn apply_processed_tool_result(
         session,
         enable_state_ledger,
         state_ledger,
-        active_tool_names,
+        universe,
         events,
         last_batch_tool_message_index,
         spill_tokens_before,
@@ -230,7 +231,7 @@ pub(super) fn apply_processed_tool_result(
         state_ledger.observe_tool_result(&res);
     }
     if let Some(reference) = processed.spill_reference.as_ref() {
-        activate_tools_for_spill_reference(active_tool_names, &mut res, reference);
+        activate_tools_for_spill_reference(universe, &mut res, reference);
     }
     if processed.spilled_inline {
         events.push(AgentEvent::CompactionApplied(CompactionEvent {

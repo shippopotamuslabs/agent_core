@@ -43,7 +43,7 @@ impl InnerSession {
 
         let synth = synthetic_finalize_calls_with_semantics(
             &self.pending.artifact_ids,
-            &self.config.tool_semantics,
+            self.universe.semantics(),
         );
         if !synth.is_empty() {
             self.pending.execute = Some(synth);
@@ -129,7 +129,7 @@ impl InnerSession {
             config: &self.config,
             capabilities: &self.capabilities,
             io: &self.io,
-            active_tool_names: &self.active_tool_names,
+            universe: &self.universe,
             context_store: &mut self.context_store,
             state_ledger: &self.state_ledger,
             sidecar_builder: &mut self.sidecar_builder,

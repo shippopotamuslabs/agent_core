@@ -16,7 +16,7 @@ use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
 use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
 use crate::state_ledger::StateLedger;
 use crate::tool_context::build_tool_context_index_from_set;
-use crate::tool_name::ToolName;
+use crate::tool_universe::ToolUniverse;
 use crate::turn_io::ModelRequest;
 
 /// Disjoint-field view of `InnerSession` needed to build a `ModelRequest`.
@@ -28,7 +28,7 @@ pub(super) struct ModelRequestInputs<'a> {
     pub config: &'a AgentConfig,
     pub capabilities: &'a SessionCapabilities,
     pub io: &'a SessionIoParams,
-    pub active_tool_names: &'a [ToolName],
+    pub universe: &'a ToolUniverse,
     pub context_store: &'a mut ContextStore,
     pub state_ledger: &'a StateLedger,
     pub sidecar_builder: &'a mut SidecarBuilder,
@@ -47,7 +47,7 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
         config,
         capabilities,
         io,
-        active_tool_names,
+        universe,
         context_store,
         state_ledger,
         sidecar_builder,
@@ -76,24 +76,22 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     // parsed active channel; serialize at the edge. (ENC-297: catalog
     // presence comes from the typed `ToolCatalog` on the config, not from
     // schema-channel text.)
-    let rendered_runtime_tools = io
-        .schemas
-        .render_runtime_view(config, capabilities, loop_metrics);
+    let rendered_runtime_tools = universe.render_runtime_view(config, capabilities, loop_metrics);
 
     // ENC-297 D5: the gate re-sources to typed catalog presence (non-empty
     // tools). Equivalent inputs keep exact gate semantics; the pinned delta
     // is that legacy catalog-channel text (e.g. a semantics-file '{}' object)
     // no longer counts as a catalog.
-    let has_catalog = !config.tool_catalog.is_empty();
+    let has_catalog = !universe.catalog().is_empty();
 
     // ENC-296: render from the active channel (registry deleted). Names the
     // active channel does not carry — tools activated mid-session — render
     // as name stubs; the host wires their full schemas provider-side.
-    let active_schemas = io.schemas.render_active_schemas(active_tool_names);
+    let active_schemas = universe.render_active_schemas();
 
     let tool_context_index = build_tool_context_index_from_set(
         &active_schemas,
-        &config.tool_catalog,
+        universe.catalog(),
         config,
         capabilities,
     );
@@ -165,7 +163,7 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
                         estimate_session_pressure(
                             session,
                             config,
-                            &preflight_ctx_of(io, capabilities, suppress_summary_tier),
+                            &preflight_ctx_of(io, universe, capabilities, suppress_summary_tier),
                         )
                         .ratio
                     });
@@ -190,13 +188,14 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
 
 fn preflight_ctx_of(
     io: &SessionIoParams,
+    universe: &ToolUniverse,
     capabilities: &SessionCapabilities,
     suppress_summary_tier: bool,
 ) -> CompactionContext {
     CompactionContext {
         provider: io.provider.clone(),
         context_window_tokens: io.context_window_tokens,
-        tools_schema_json: io.schemas.active_json().to_string(),
+        tools_schema_json: universe.active_json().to_string(),
         system_prompt: io.system_prompt.clone(),
         context_sidecars_estimate: String::new(),
         capabilities: capabilities.clone(),
