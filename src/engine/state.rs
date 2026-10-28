@@ -43,6 +43,27 @@ pub(super) enum EnginePhase {
     AwaitingSummary,
 }
 
+/// Tool-turn transient state, written by model-response intake and consumed by
+/// tool-results submission (ENC-286 slice 7). Grouped so the rest of
+/// `InnerSession` is the stable machine state.
+#[derive(Default)]
+pub(crate) struct PendingToolTurn {
+    pub(super) call_model: Option<ModelRequest>,
+    pub(super) execute: Option<Vec<ToolCallRecord>>,
+    pub(super) execute_skip_guardrail_count: bool,
+    pub(super) auto_finalize_finish: bool,
+    pub(super) finalize_after_tool_stop: bool,
+    pub(super) summary_req: Option<SummaryRequest>,
+    pub(super) summary_ctx: Option<CompactionContext>,
+    pub(super) tool_turn_parallel: usize,
+    pub(super) reject_count_this_turn: usize,
+    pub(super) artifact_ids: HashSet<String>,
+    /// Model-requested tool calls for the in-flight turn, in provider order.
+    pub(super) tool_turn_request_order: Vec<RawToolCall>,
+    /// Reject/suggest tool payloads keyed by `call_id`, flushed after successful results.
+    pub(super) reject_tool_by_call_id: HashMap<String, AgentMessage>,
+}
+
 pub(crate) struct InnerSession {
     pub(super) session: AgentSession,
     pub(super) config: AgentConfig,
@@ -51,29 +72,16 @@ pub(crate) struct InnerSession {
     pub(super) guardrails: GuardrailState,
     pub(super) loop_metrics: LoopMetrics,
     pub(super) phase: EnginePhase,
-    pub(super) pending_call_model: Option<ModelRequest>,
-    pub(super) pending_execute: Option<Vec<ToolCallRecord>>,
-    pub(super) pending_execute_skip_guardrail_count: bool,
-    pub(super) pending_auto_finalize_finish: bool,
-    pub(super) pending_finalize_after_tool_stop: bool,
-    pub(super) pending_summary_req: Option<SummaryRequest>,
-    pub(super) pending_summary_ctx: Option<CompactionContext>,
+    pub(super) pending: PendingToolTurn,
     pub(super) context_store: ContextStore,
     pub(super) state_ledger: StateLedger,
-    pub(super) pending_tool_turn_parallel: usize,
-    pub(super) pending_reject_count_this_turn: usize,
     pub(super) model_requests_this_turn: u32,
     pub(super) events: Vec<AgentEvent>,
     pub(super) turn_index: u32,
     pub(super) cancelled: bool,
     pub(super) terminal_action: Option<AgentAction>,
     pub(super) last_model_response_greedy_tool_names: Vec<String>,
-    pub(super) pending_artifact_ids: HashSet<String>,
     pub(super) tools_blocked_nudges_this_turn: u32,
-    /// Model-requested tool calls for the in-flight turn, in provider order.
-    pub(super) pending_tool_turn_request_order: Vec<RawToolCall>,
-    /// Reject/suggest tool payloads keyed by `call_id`, flushed after successful results.
-    pub(super) pending_reject_tool_by_call_id: HashMap<String, AgentMessage>,
     /// Active tool names for the current session. Updated on tool_discovery_tool activations.
     /// Initially populated from the session's initial `tools_schema_json`.
     pub(super) active_tool_names: Vec<String>,

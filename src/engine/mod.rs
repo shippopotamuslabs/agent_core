@@ -1,27 +1,29 @@
 //! Session state machine (`AgentEngine`) — AGENT-017, AGENT-018 preflight via idle compaction.
 
+pub(super) mod compaction;
+mod context_refs;
 pub mod envelope_ingest;
+pub(super) mod finish;
 pub mod leaked_tool_recovery;
+pub(super) mod model_intake;
+pub(super) mod model_request;
 mod provider_tool_calls;
 mod state;
+pub(super) mod tool_results;
 pub use envelope_ingest::{ingest_model_response_envelopes, EnvelopeIngestOutcome};
 pub use leaked_tool_recovery::{resolve_model_turn_text, ModelTurnTextResolution};
 pub use state::{SessionHandle, SessionIoParams, SessionTestSnapshot};
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
 use crate::action::AgentAction;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
-use crate::artifact_finalize::{
-    record_artifact_progress_with_semantics, synthetic_finalize_calls_with_semantics,
-};
+use crate::artifact_finalize::synthetic_finalize_calls_with_semantics;
 use crate::budget::{
-    effective_threshold_tokens, effective_tool_result_budget_for_window,
-    effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ceiling,
-    should_compact_at_token_threshold,
+    effective_tool_result_budget_for_window, effective_tool_spill_threshold_bytes,
+    exceeds_hard_prompt_ceiling,
 };
 use crate::catalog::ToolCatalog;
 use crate::compact::{
@@ -29,41 +31,33 @@ use crate::compact::{
     artifact_snapshot::persist_artifact_snapshot,
     artifact_squash::extract_artifact_anchor,
     compaction_pipeline_for_plan, estimate_session_pressure,
-    history_snapshot::snapshot_history_range,
-    policy::build_compaction_plan,
-    tool_spill::{
-        activation_tools_from_retrieval_hint, spill_tool_messages_in_session,
-        spill_tool_result_if_needed,
+    policy::{
+        build_compaction_plan, mid_turn_stall_error, ratio_threshold_tokens_for_plan,
+        should_enter_compaction, FireConditionInputs, MidTurnStallGate,
     },
+    tool_spill::activation_tools_from_retrieval_hint,
     CompactionContext, CompactionOutcome, CompactionTier as _,
 };
-use crate::context_store::{
-    insert_terminal_output, is_browsable_context_kind, ContextReference, ContextStore,
-};
-use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
-use crate::file_context::condense_file_context;
-use crate::guardrails::{is_soft_failure_result_json, GuardrailState};
-use crate::long_loop_policy::should_compact_for_long_loop;
+use crate::context_store::{ContextReference, ContextStore};
+use crate::events::{AgentError, AgentEvent, CompactionTier, CompactionTrigger};
+use crate::guardrails::GuardrailState;
 use crate::loop_metrics::{LoopMetrics, PendingWorkItem};
 use crate::manual_compact::ManualCompactResult;
-use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
+use crate::message::{AgentMessage, AgentRole, ToolCallRecord, ToolResultRecord};
 use crate::policy::resolve_context_policy;
-use crate::repair::{RepairOutcome, ToolRepairPipeline};
-use crate::request_pipeline::render_runtime_tool_view;
+
 use crate::session::{AgentConfig, AgentSession, SessionCapabilities};
-use crate::sidecar_builder::{ProviderContextSnapshot, SidecarBuilder};
+use crate::sidecar_builder::SidecarBuilder;
 use crate::state_ledger::StateLedger;
 #[allow(unused_imports)]
 use crate::tool_context::build_tool_context_index;
-use crate::tool_context::build_tool_context_index_with_registry;
 use crate::tool_semantics::{result_policy_for, ArtifactSquashSemantics};
 use crate::transcript_revision::record_destructive_compaction_boundary;
-use crate::truncate::truncate_tool_result_json;
-use crate::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall, SummaryResult};
+use crate::turn_io::{FinishReason, ModelResponse, RawToolCall, SummaryRequest, SummaryResult};
 
-use state::{EnginePhase, InnerSession};
+use state::{EnginePhase, InnerSession, PendingToolTurn};
 
-fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
+pub(super) fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     matches!(
         tier,
         CompactionTier::Micro
@@ -73,7 +67,7 @@ fn is_destructive_compaction_tier(tier: &CompactionTier) -> bool {
     )
 }
 
-fn merge_active_tool_names(
+pub(super) fn merge_active_tool_names(
     active_tool_names: &mut Vec<String>,
     names: impl IntoIterator<Item = String>,
 ) {
@@ -84,7 +78,7 @@ fn merge_active_tool_names(
     }
 }
 
-fn is_companion_callable_tool(
+pub(super) fn is_companion_callable_tool(
     discovery: &Option<crate::tool_semantics::ToolDiscoverySemantics>,
     tool_name: &str,
 ) -> bool {
@@ -94,7 +88,7 @@ fn is_companion_callable_tool(
         .unwrap_or(false)
 }
 
-fn activate_tools_for_spill_reference(
+pub(super) fn activate_tools_for_spill_reference(
     active_tool_names: &mut Vec<String>,
     result: &mut ToolResultRecord,
     reference: &ContextReference,
@@ -148,22 +142,6 @@ fn render_active_schema_json(registry_json: &str, active_names: &[String]) -> St
         }
     }
     serde_json::Value::Array(out).to_string()
-}
-
-fn inject_tool_budget_after_batch(
-    session: &mut InnerSession,
-    last_batch_tool_message_index: Option<usize>,
-) {
-    let meta = session.guardrails.tool_budget_snapshot(
-        &session.config,
-        &session.last_model_response_greedy_tool_names,
-    );
-    inject_tool_budget_into_session(
-        &mut session.session,
-        session.turn_index,
-        &meta,
-        last_batch_tool_message_index,
-    );
 }
 
 /// Session state machine: hosts drive it exclusively through the polling surface
@@ -238,27 +216,25 @@ impl AgentEngine {
                     ..LoopMetrics::default()
                 },
                 phase: EnginePhase::Idle,
-                pending_call_model: None,
-                pending_execute: None,
-                pending_execute_skip_guardrail_count: false,
-                pending_auto_finalize_finish: false,
-                pending_finalize_after_tool_stop: false,
-                pending_summary_req: None,
-                pending_summary_ctx: None,
+                pending: PendingToolTurn {
+                    call_model: None,
+                    execute: None,
+                    execute_skip_guardrail_count: false,
+                    auto_finalize_finish: false,
+                    finalize_after_tool_stop: false,
+                    summary_req: None,
+                    summary_ctx: None,
+                    ..PendingToolTurn::default()
+                },
                 context_store: ContextStore::default(),
                 state_ledger,
-                pending_tool_turn_parallel: 0,
-                pending_reject_count_this_turn: 0,
                 model_requests_this_turn: 0,
                 events: Vec::new(),
                 turn_index: 0,
                 cancelled: false,
                 terminal_action: None,
                 last_model_response_greedy_tool_names: Vec::new(),
-                pending_artifact_ids: HashSet::new(),
                 tools_blocked_nudges_this_turn: 0,
-                pending_tool_turn_request_order: Vec::new(),
-                pending_reject_tool_by_call_id: HashMap::new(),
                 active_tool_names: parse_tool_names_from_schema(&initial_active_tool_names_source),
                 sidecar_builder: SidecarBuilder::new(),
                 compaction_passes_this_turn: 0,
@@ -280,15 +256,15 @@ impl AgentEngine {
         match g.phase {
             EnginePhase::AwaitingModel => {
                 return AgentAction::CallModel(
-                    g.pending_call_model.clone().expect("awaiting model"),
+                    g.pending.call_model.clone().expect("awaiting model"),
                 );
             }
             EnginePhase::AwaitingTools => {
-                let calls = g.pending_execute.clone().expect("awaiting tools");
+                let calls = g.pending.execute.clone().expect("awaiting tools");
                 return AgentAction::ExecuteTools(calls);
             }
             EnginePhase::AwaitingSummary => {
-                let req = g.pending_summary_req.clone().expect("awaiting summary");
+                let req = g.pending.summary_req.clone().expect("awaiting summary");
                 return AgentAction::RequestSummary(req);
             }
             EnginePhase::Idle => {}
@@ -320,12 +296,15 @@ impl AgentEngine {
         g.phase = EnginePhase::Idle;
         g.guardrails.reset_model_api_failures();
         let allow_tool_call = g
-            .pending_call_model
+            .pending
+            .call_model
             .as_ref()
             .map(|request| request.allow_tool_call)
             .unwrap_or(true);
-        g.pending_call_model = None;
+        g.pending.call_model = None;
 
+        // ENC-286 slice 5: the catalog is built once here and passed into the
+        // repair stage (previously cloned + rebuilt per tool call).
         let semantics = g.config.tool_semantics.clone();
         let catalog = ToolCatalog::from_semantics(&semantics)
             .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
@@ -336,6 +315,8 @@ impl AgentEngine {
             &catalog,
             &semantics,
         );
+        // FRG-47 staging: each ingest arm is a stage fn; this match only
+        // dispatches on the returned decision and owns phase/emit behavior.
         let (assistant_content, ingest_metadata) = match &ingest_outcome {
             EnvelopeIngestOutcome::NoMarkers => {
                 g.guardrails.reset_envelope_parse_failures();
@@ -358,39 +339,11 @@ impl AgentEngine {
                 visible_assistant_text,
                 error_json_for_model,
             } => {
-                g.guardrails.record_envelope_parse_failure();
-                let assistant_id = format!(
-                    "a{}",
-                    g.session
-                        .messages
-                        .iter()
-                        .filter(|message| message.role == AgentRole::Assistant)
-                        .count()
+                Self::intake_parse_failed(
+                    &mut g,
+                    visible_assistant_text.clone(),
+                    error_json_for_model.clone(),
                 );
-                let assistant_id_clone = assistant_id.clone();
-                g.session.messages.push(AgentMessage {
-                    id: assistant_id,
-                    role: AgentRole::Assistant,
-                    content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new().with_envelope_ingest("failed"),
-                });
-                if g.config.enable_state_ledger {
-                    if let Some(message) = g.session.messages.last().cloned() {
-                        g.state_ledger.observe_assistant_message(&message);
-                    }
-                }
-                g.session.messages.push(AgentMessage {
-                    id: format!("tool-err-envelope-{assistant_id_clone}"),
-                    role: AgentRole::Tool,
-                    content: error_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_envelope_parse_failure(),
-                });
-                let cfg = g.config.clone();
-                g.guardrails.count_tool_executed(1);
-                g.guardrails
-                    .on_tool_turn_finished(&cfg, 1, true, false, false, "agent_engine");
-                let last_tool_idx = g.session.messages.len().checked_sub(1);
-                inject_tool_budget_after_batch(&mut g, last_tool_idx);
                 return;
             }
             EnvelopeIngestOutcome::ToolsBlocked {
@@ -398,272 +351,51 @@ impl AgentEngine {
                 visible_assistant_text,
                 user_fallback_text,
             } => {
-                let assistant_id = format!(
-                    "a{}",
-                    g.session
-                        .messages
-                        .iter()
-                        .filter(|message| message.role == AgentRole::Assistant)
-                        .count()
-                );
-                let can_nudge = g.tools_blocked_nudges_this_turn == 0
-                    && g.model_requests_this_turn < g.config.max_model_requests_per_turn;
-
-                if !can_nudge {
-                    g.session.messages.push(AgentMessage {
-                        id: assistant_id,
-                        role: AgentRole::Assistant,
-                        content: user_fallback_text.clone(),
-                        metadata: MessageMeta::new().with_tools_blocked_fallback(),
-                    });
-                    if g.config.enable_state_ledger {
-                        if let Some(message) = g.session.messages.last().cloned() {
-                            g.state_ledger.observe_assistant_message(&message);
-                        }
-                    }
-                    g.emit(AgentEvent::VisibleAssistantText {
-                        text: user_fallback_text.clone(),
-                    });
-                    // The fallback text is the final user-facing answer for this turn.
-                    // The provider finish reason may be ToolUse/Other for the blocked
-                    // attempt; finishing with it would fail the loop after a graceful
-                    // fallback, so force Stop semantics.
-                    g.finish_after_model_stop(FinishReason::Stop);
-                    return;
-                }
-
-                let assistant_id_clone = assistant_id.clone();
-                g.session.messages.push(AgentMessage {
-                    id: assistant_id,
-                    role: AgentRole::Assistant,
-                    content: visible_assistant_text.clone(),
-                    metadata: MessageMeta::new().with_envelope_ingest("tools_blocked"),
-                });
-                if g.config.enable_state_ledger {
-                    if let Some(message) = g.session.messages.last().cloned() {
-                        g.state_ledger.observe_assistant_message(&message);
+                match Self::intake_tools_blocked(
+                    &mut g,
+                    visible_assistant_text.clone(),
+                    user_fallback_text.clone(),
+                    nudge_json_for_model.clone(),
+                ) {
+                    model_intake::ToolsBlockedEffect::Nudged => return,
+                    model_intake::ToolsBlockedEffect::FallbackFinished => {
+                        // The fallback text is the final user-facing answer for this turn.
+                        // The provider finish reason may be ToolUse/Other for the blocked
+                        // attempt; finishing with it would fail the loop after a graceful
+                        // fallback, so force Stop semantics.
+                        finish::finish_after_model_stop(g.finish_state(), FinishReason::Stop);
+                        return;
                     }
                 }
-                g.session.messages.push(AgentMessage {
-                    id: format!("tool-nudge-tools-blocked-{assistant_id_clone}"),
-                    role: AgentRole::Tool,
-                    content: nudge_json_for_model.clone(),
-                    metadata: MessageMeta::new().with_tools_blocked_nudge(),
-                });
-                let last_tool_idx = g.session.messages.len().checked_sub(1);
-                inject_tool_budget_after_batch(&mut g, last_tool_idx);
-                g.tools_blocked_nudges_this_turn += 1;
-                g.guardrails.reset_envelope_parse_failures();
-                return;
             }
         };
 
-        let assistant_id = format!(
-            "a{}",
-            g.session
-                .messages
-                .iter()
-                .filter(|message| message.role == AgentRole::Assistant)
-                .count()
+        Self::push_assistant_message(
+            &mut g,
+            &merged_tool_calls,
+            assistant_content,
+            ingest_metadata,
+            response.provider_reasoning_content.as_deref(),
         );
-        let mut metadata = MessageMeta::new();
-        if let Some(ingest_obj) = ingest_metadata.as_object() {
-            for (k, v) in ingest_obj {
-                metadata.set_extra(k.clone(), v.clone());
-            }
-        }
-        if let Some(reasoning_content) = response
-            .provider_reasoning_content
-            .as_deref()
-            .filter(|content| !content.is_empty())
-        {
-            metadata.set_extra(
-                "provider_reasoning",
-                json!({ "reasoning_content": reasoning_content }),
-            );
-        }
-        g.session.messages.push(AgentMessage {
-            id: assistant_id,
-            role: AgentRole::Assistant,
-            content: assistant_content,
-            metadata,
-        });
-        if g.config.enable_state_ledger {
-            if let Some(message) = g.session.messages.last().cloned() {
-                g.state_ledger.observe_assistant_message(&message);
-            }
-        }
-
-        // Emit after_model_response only when there are tool calls (model returned with tools)
-        if g.config.enable_loop_hooks
-            && g.capabilities.lifecycle_hooks_supported
-            && !merged_tool_calls.is_empty()
-        {
-            g.emit(AgentEvent::HookInvoked {
-                checkpoint: "after_model_response".into(),
-            });
-        }
-
-        g.last_model_response_greedy_tool_names = merged_tool_calls
-            .iter()
-            .map(|c| normalize_tool_name_hint(&c.name))
-            .collect();
 
         if merged_tool_calls.is_empty() {
-            g.finish_after_model_stop(response.finish_reason);
+            finish::finish_after_model_stop(g.finish_state(), response.finish_reason);
             return;
         }
 
-        let mut repaired: Vec<ToolCallRecord> = Vec::new();
-        let mut rejects = 0usize;
-        let parallel = merged_tool_calls.len();
-        g.pending_tool_turn_request_order = merged_tool_calls.clone();
-        g.pending_reject_tool_by_call_id.clear();
+        g.pending.tool_turn_request_order = merged_tool_calls.clone();
+        g.pending.reject_tool_by_call_id.clear();
 
-        for raw in &merged_tool_calls {
-            // Tool-discovery guard: reject any call whose tool name is not part of the
-            // currently active set (the discovery tool itself is always callable).
-            // Only enforce when active_tool_names has actually been initialized — empty
-            // active set means the host has not opted into the new contract yet.
-            let discovery = g.config.tool_semantics.discovery.clone();
-            let discovery_name = discovery.as_ref().map(|d| d.tool_name.as_str());
-            let discovery_always_callable = discovery
-                .as_ref()
-                .map(|d| d.always_callable && raw.name == d.tool_name)
-                .unwrap_or(false);
-            let companion_callable = is_companion_callable_tool(&discovery, &raw.name);
-            if companion_callable {
-                merge_active_tool_names(&mut g.active_tool_names, [raw.name.clone()]);
-            }
-            let callable_now = !g.active_tool_names.is_empty()
-                && (g.active_tool_names.iter().any(|n| n == &raw.name)
-                    || discovery_always_callable
-                    || companion_callable);
-            if !g.active_tool_names.is_empty() && !callable_now {
-                let ti = g.turn_index;
-                g.emit(AgentEvent::ToolSoftFailure {
-                    tool_name: raw.name.clone(),
-                    turn_index: ti,
-                });
-                let mut available = g.active_tool_names.clone();
-                if let Some(name) = discovery_name {
-                    if !available.iter().any(|n| n == name) {
-                        available.insert(0, name.to_string());
-                    }
-                }
-                let error = if let Some(name) = discovery_name {
-                    format!("Tool '{}' is not active. Call {name} first.", raw.name)
-                } else {
-                    format!("Tool '{}' is not active.", raw.name)
-                };
-                let err = serde_json::json!({
-                    "error": error,
-                    "available_tools": available,
-                })
-                .to_string();
-                let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                g.pending_reject_tool_by_call_id.insert(
-                    call_id.clone(),
-                    AgentMessage {
-                        id: format!("tool-err-{call_id}"),
-                        role: AgentRole::Tool,
-                        content: err,
-                        metadata: MessageMeta::new().with_call_id(call_id),
-                    },
-                );
-                rejects += 1;
-                continue;
-            }
-            let semantics = g.config.tool_semantics.clone();
-            let (outcome, evs) = match ToolCatalog::from_semantics(&semantics) {
-                Ok(catalog) => ToolRepairPipeline::repair_with_semantics(raw, &catalog, &semantics),
-                Err(_) => (
-                    RepairOutcome::Reject {
-                        error_json_for_model: serde_json::json!({
-                            "error": format!("Tool '{}' is not configured.", raw.name),
-                        })
-                        .to_string(),
-                    },
-                    Vec::new(),
-                ),
-            };
-            for ev in evs {
-                g.emit(ev);
-            }
-            match outcome {
-                RepairOutcome::Repaired(mut rec) => {
-                    if g.config.default_tool_timeout_ms.is_some() {
-                        rec.attempt_metadata = Some(crate::message::ToolAttemptMetadata {
-                            attempt_index: g.turn_index + 1,
-                            attempts_remaining: Some(
-                                g.config
-                                    .tool_retry_limit
-                                    .saturating_sub(g.turn_index)
-                                    .saturating_sub(1),
-                            ),
-                            timeout_ms: g.config.default_tool_timeout_ms,
-                            policy_denied: false,
-                            requires_prior_read: g.config.require_read_before_edit,
-                        });
-                    }
-                    repaired.push(rec);
-                }
-                RepairOutcome::Reject {
-                    error_json_for_model,
-                } => {
-                    let ti = g.turn_index;
-                    g.emit(AgentEvent::ToolSoftFailure {
-                        tool_name: raw.name.clone(),
-                        turn_index: ti,
-                    });
-                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                    g.pending_reject_tool_by_call_id.insert(
-                        call_id.clone(),
-                        AgentMessage {
-                            id: format!("tool-err-{call_id}"),
-                            role: AgentRole::Tool,
-                            content: error_json_for_model,
-                            metadata: MessageMeta::new().with_call_id(call_id),
-                        },
-                    );
-                    rejects += 1;
-                }
-                RepairOutcome::Suggest {
-                    original,
-                    closest_name,
-                } => {
-                    let ti = g.turn_index;
-                    g.emit(AgentEvent::ToolSoftFailure {
-                        tool_name: raw.name.clone(),
-                        turn_index: ti,
-                    });
-                    let err = serde_json::json!({
-                        "error": format!("Ambiguous tool '{original}' (closest '{closest_name}')"),
-                        "available_tools": ToolCatalog::from_semantics(&g.config.tool_semantics)
-                            .map(|catalog| {
-                                catalog
-                                    .all()
-                                    .iter()
-                                    .map(|tool| tool.name.clone())
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default(),
-                    })
-                    .to_string();
-                    let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-                    g.pending_reject_tool_by_call_id.insert(
-                        call_id.clone(),
-                        AgentMessage {
-                            id: format!("tool-err-{call_id}"),
-                            role: AgentRole::Tool,
-                            content: err,
-                            metadata: MessageMeta::new().with_call_id(call_id),
-                        },
-                    );
-                    rejects += 1;
-                }
-            }
+        // FRG-47 stage: the repair/discovery loop returns a decision payload;
+        // the dispatch owns emit ordering and every phase write below.
+        let outcome = Self::intake_repair(&mut g, &merged_tool_calls, &catalog);
+        for ev in outcome.events {
+            g.emit(ev);
         }
+        g.pending.reject_tool_by_call_id = outcome.reject_by_call_id;
+        let repaired = outcome.repaired;
+        let parallel = outcome.parallel;
+        let rejects = outcome.rejects;
 
         if !merged_tool_calls.is_empty() {
             provider_tool_calls::patch_last_assistant_raw_tool_calls(
@@ -694,12 +426,12 @@ impl AgentEngine {
                     g.state_ledger.observe_tool_call(call);
                 }
             }
-            g.pending_tool_turn_parallel = parallel;
-            g.pending_reject_count_this_turn = rejects;
-            g.pending_execute = Some(repaired);
-            g.pending_execute_skip_guardrail_count = false;
-            g.pending_auto_finalize_finish = false;
-            g.pending_finalize_after_tool_stop =
+            g.pending.tool_turn_parallel = parallel;
+            g.pending.reject_count_this_turn = rejects;
+            g.pending.execute = Some(repaired);
+            g.pending.execute_skip_guardrail_count = false;
+            g.pending.auto_finalize_finish = false;
+            g.pending.finalize_after_tool_stop =
                 matches!(response.finish_reason, FinishReason::Stop);
 
             match g.run_compaction_pass(CompactionTrigger::MidTurn) {
@@ -719,27 +451,9 @@ impl AgentEngine {
             return;
         }
 
-        // Reject-only synthetic turn
-        let cfg = g.config.clone();
-        g.guardrails.count_tool_executed(rejects as u32);
-        g.guardrails.on_tool_turn_finished(
-            &cfg,
-            parallel,
-            parallel > 0,
-            false,
-            false,
-            "agent_engine",
-        );
-        let mut last_tool_idx = None;
-        for raw in std::mem::take(&mut g.pending_tool_turn_request_order) {
-            let call_id = raw.id.clone().unwrap_or_else(|| "noid".into());
-            if let Some(message) = g.pending_reject_tool_by_call_id.remove(&call_id) {
-                g.session.messages.push(message);
-                last_tool_idx = Some(g.session.messages.len() - 1);
-            }
-        }
-        g.pending_reject_tool_by_call_id.clear();
-        inject_tool_budget_after_batch(&mut g, last_tool_idx);
+        // Reject-only synthetic turn: the stage applies counts, flush, and
+        // budget; the phase is already Idle so the dispatch just returns.
+        Self::intake_flush_rejects(&mut g, parallel, rejects);
     }
 
     pub fn submit_model_turn_failure(
@@ -804,7 +518,7 @@ impl AgentEngine {
             reason,
         });
 
-        if let Some(request) = g.pending_call_model.as_mut() {
+        if let Some(request) = g.pending.call_model.as_mut() {
             request.retry_after_ms = Some(delay_ms);
             request.model_retry_attempt = Some(attempt);
         }
@@ -824,16 +538,16 @@ impl AgentEngine {
             return;
         }
 
-        let calls = g.pending_execute.take().expect("tools");
-        let skip_count = g.pending_execute_skip_guardrail_count;
-        let finalize_after_tool_stop = g.pending_finalize_after_tool_stop;
-        let pending_parallel = g.pending_tool_turn_parallel;
-        let pending_rejects = g.pending_reject_count_this_turn;
+        let calls = g.pending.execute.take().expect("tools");
+        let skip_count = g.pending.execute_skip_guardrail_count;
+        let finalize_after_tool_stop = g.pending.finalize_after_tool_stop;
+        let pending_parallel = g.pending.tool_turn_parallel;
+        let pending_rejects = g.pending.reject_count_this_turn;
         g.phase = EnginePhase::Idle;
-        g.pending_finalize_after_tool_stop = false;
+        g.pending.finalize_after_tool_stop = false;
 
-        let turn_order = std::mem::take(&mut g.pending_tool_turn_request_order);
-        let mut reject_by_call_id = std::mem::take(&mut g.pending_reject_tool_by_call_id);
+        let turn_order = std::mem::take(&mut g.pending.tool_turn_request_order);
+        let mut reject_by_call_id = std::mem::take(&mut g.pending.reject_tool_by_call_id);
         // Merge any host-reported activations into the active set in first-seen order, deduped.
         for res in &results {
             merge_active_tool_names(
@@ -842,48 +556,8 @@ impl AgentEngine {
             );
         }
 
-        // Pair results to calls by call_id; fall back to submission order for
-        // results the host returned with unknown ids. Calls left without any
-        // result get a synthesized error so provider replay still sees one tool
-        // message per tool_call_id (OpenAI-compatible APIs 400 otherwise).
-        let mut remaining: Vec<Option<ToolResultRecord>> = results.into_iter().map(Some).collect();
-        let mut executed_by_call_id: HashMap<String, (ToolCallRecord, ToolResultRecord)> =
-            HashMap::with_capacity(calls.len());
-        for call in &calls {
-            if let Some(slot) = remaining
-                .iter_mut()
-                .find(|slot| slot.as_ref().is_some_and(|res| res.call_id == call.call_id))
-            {
-                let res = slot.take().expect("matched result");
-                executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
-            }
-        }
-        let mut unmatched = remaining.into_iter().flatten();
-        for call in &calls {
-            if executed_by_call_id.contains_key(&call.call_id) {
-                continue;
-            }
-            let res = unmatched.next().map(|mut res| {
-                res.call_id = call.call_id.clone();
-                res
-            });
-            let res = res.unwrap_or_else(|| ToolResultRecord {
-                call_id: call.call_id.clone(),
-                result_json: json!({
-                    "error": "tool_result_missing",
-                    "message": format!(
-                        "Host returned no result for tool '{}' (call_id {}).",
-                        call.name, call.call_id
-                    ),
-                })
-                .to_string(),
-                truncated: false,
-                soft_failure: true,
-                activated_tool_names: Vec::new(),
-                result_metadata: None,
-            });
-            executed_by_call_id.insert(call.call_id.clone(), (call.clone(), res));
-        }
+        // FRG-47 stage 1 (pure): pair host results to calls.
+        let mut executed_by_call_id = tool_results::pair_results_to_calls(&calls, results);
 
         let mut processed_results: Vec<ToolResultRecord> =
             Vec::with_capacity(executed_by_call_id.len());
@@ -909,184 +583,28 @@ impl AgentEngine {
                 last_batch_tool_message_index = Some(g.session.messages.len() - 1);
                 continue;
             }
-            let Some((call, mut res)) = executed_by_call_id.remove(&call_id) else {
+            let Some((call, res)) = executed_by_call_id.remove(&call_id) else {
                 continue;
             };
-            let spill_tokens_before = g
-                .estimate_pressure(CompactionTrigger::PostToolResult)
-                .total_tokens;
-            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
-            let spill_stored_copy_only = policy
-                .map(|policy| policy.spill_stored_copy_only)
-                .unwrap_or(false);
-            let skip_result_truncation = policy
-                .map(|policy| policy.skip_result_truncation)
-                .unwrap_or(false);
-            let spilled = if spill_stored_copy_only {
-                let mut stored_copy = res.clone();
-                let threshold =
-                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-                let turn_index = g.turn_index;
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut stored_copy,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            } else {
-                let threshold =
-                    effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-                let turn_index = g.turn_index;
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut res,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            };
-
-            if !skip_result_truncation {
-                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
-                let budget = effective_tool_result_budget_for_window(
-                    &pressure,
-                    &g.capabilities,
-                    &g.config,
-                    g.io.context_window_tokens,
-                );
-                let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
-                res.result_json = payload;
-                res.truncated = res.truncated || truncated;
-            }
-
-            if g.config.tool_semantics.artifact.is_some() {
-                let semantics = g.config.tool_semantics.clone();
-                record_artifact_progress_with_semantics(
-                    &mut g.pending_artifact_ids,
-                    &semantics,
-                    &call.name,
-                    &call.arguments_json,
-                    &res.result_json,
-                );
-            }
-
-            g.session.messages.push(AgentMessage {
-                id: format!("tool-{}", res.call_id),
-                role: AgentRole::Tool,
-                content: res.result_json.clone(),
-                metadata: MessageMeta::new()
-                    .with_call_id(res.call_id.clone())
-                    .with_tool_name(call.name)
-                    .with_truncated(res.truncated),
-            });
-            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
-            if g.config.enable_state_ledger {
-                g.state_ledger.observe_tool_result(&res);
-            }
-            if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
-            }
-            if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = g
-                    .estimate_pressure(CompactionTrigger::PostToolResult)
-                    .total_tokens;
-                g.emit(AgentEvent::CompactionApplied(CompactionEvent {
-                    tier: CompactionTier::ToolSpill,
-                    tokens_before: spill_tokens_before,
-                    tokens_after: spill_tokens_after,
-                    trigger: CompactionTrigger::PostToolResult,
-                }));
-            }
-            processed_results.push(res);
+            processed_results.push(Self::process_and_apply_tool_result(
+                &mut g,
+                &mut last_batch_tool_message_index,
+                &call,
+                res,
+            ));
         }
 
         for (_, reject_msg) in reject_by_call_id {
             g.session.messages.push(reject_msg);
             last_batch_tool_message_index = Some(g.session.messages.len() - 1);
         }
-        for (_, (call, mut res)) in executed_by_call_id {
-            let spill_tokens_before = g
-                .estimate_pressure(CompactionTrigger::PostToolResult)
-                .total_tokens;
-            let threshold =
-                effective_tool_spill_threshold_bytes(&g.config, g.io.context_window_tokens);
-            let turn_index = g.turn_index;
-            let policy = result_policy_for(&g.config.tool_semantics, &call.name);
-            let spill_stored_copy_only = policy
-                .map(|policy| policy.spill_stored_copy_only)
-                .unwrap_or(false);
-            let skip_result_truncation = policy
-                .map(|policy| policy.skip_result_truncation)
-                .unwrap_or(false);
-            let spilled = if spill_stored_copy_only {
-                let mut stored_copy = res.clone();
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut stored_copy,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            } else {
-                spill_tool_result_if_needed(
-                    &mut g.context_store,
-                    &mut res,
-                    &call,
-                    threshold,
-                    turn_index,
-                )
-            };
-            if !skip_result_truncation {
-                let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
-                let budget = effective_tool_result_budget_for_window(
-                    &pressure,
-                    &g.capabilities,
-                    &g.config,
-                    g.io.context_window_tokens,
-                );
-                let (payload, truncated) = truncate_tool_result_json(&res.result_json, budget);
-                res.result_json = payload;
-                res.truncated = res.truncated || truncated;
-            }
-            if g.config.tool_semantics.artifact.is_some() {
-                let semantics = g.config.tool_semantics.clone();
-                record_artifact_progress_with_semantics(
-                    &mut g.pending_artifact_ids,
-                    &semantics,
-                    &call.name,
-                    &call.arguments_json,
-                    &res.result_json,
-                );
-            }
-            g.session.messages.push(AgentMessage {
-                id: format!("tool-{}", res.call_id),
-                role: AgentRole::Tool,
-                content: res.result_json.clone(),
-                metadata: MessageMeta::new()
-                    .with_call_id(res.call_id.clone())
-                    .with_tool_name(call.name)
-                    .with_truncated(res.truncated),
-            });
-            last_batch_tool_message_index = Some(g.session.messages.len() - 1);
-            if g.config.enable_state_ledger {
-                g.state_ledger.observe_tool_result(&res);
-            }
-            if let Some(reference) = spilled.as_ref() {
-                activate_tools_for_spill_reference(&mut g.active_tool_names, &mut res, reference);
-            }
-            if spilled.is_some() && !spill_stored_copy_only {
-                let spill_tokens_after = g
-                    .estimate_pressure(CompactionTrigger::PostToolResult)
-                    .total_tokens;
-                g.emit(AgentEvent::CompactionApplied(CompactionEvent {
-                    tier: CompactionTier::ToolSpill,
-                    tokens_before: spill_tokens_before,
-                    tokens_after: spill_tokens_after,
-                    trigger: CompactionTrigger::PostToolResult,
-                }));
-            }
-            processed_results.push(res);
+        for (_, (call, res)) in executed_by_call_id {
+            processed_results.push(Self::process_and_apply_tool_result(
+                &mut g,
+                &mut last_batch_tool_message_index,
+                &call,
+                res,
+            ));
         }
 
         if g.config.enable_loop_hooks && g.capabilities.lifecycle_hooks_supported {
@@ -1100,9 +618,7 @@ impl AgentEngine {
             g.guardrails
                 .count_tool_executed((pending_rejects + repaired_n) as u32);
 
-            let non_soft_outcome = processed_results
-                .iter()
-                .any(|res| !res.soft_failure && !is_soft_failure_result_json(&res.result_json));
+            let non_soft_outcome = tool_results::batch_has_non_soft_outcome(&processed_results);
 
             let cfg = g.config.clone();
             g.guardrails.on_tool_turn_finished(
@@ -1113,14 +629,23 @@ impl AgentEngine {
                 non_soft_outcome,
                 "agent_engine",
             );
-            g.pending_tool_turn_parallel = 0;
-            g.pending_reject_count_this_turn = 0;
+            g.pending.tool_turn_parallel = 0;
+            g.pending.reject_count_this_turn = 0;
         }
 
-        inject_tool_budget_after_batch(&mut g, last_batch_tool_message_index);
+        let budget_meta = g
+            .guardrails
+            .tool_budget_snapshot(&g.config, &g.last_model_response_greedy_tool_names);
+        let turn_index = g.turn_index;
+        inject_tool_budget_into_session(
+            &mut g.session,
+            turn_index,
+            &budget_meta,
+            last_batch_tool_message_index,
+        );
 
-        if g.pending_auto_finalize_finish {
-            g.pending_auto_finalize_finish = false;
+        if g.pending.auto_finalize_finish {
+            g.pending.auto_finalize_finish = false;
             g.terminal_action = Some(AgentAction::Finished);
             let ti = g.turn_index;
             let tc = g.guardrails.tool_calls_executed;
@@ -1134,19 +659,19 @@ impl AgentEngine {
 
         if finalize_after_tool_stop {
             let synth = synthetic_finalize_calls_with_semantics(
-                &g.pending_artifact_ids,
+                &g.pending.artifact_ids,
                 &g.config.tool_semantics,
             );
             if !synth.is_empty() {
-                g.pending_execute = Some(synth);
-                g.pending_execute_skip_guardrail_count = true;
-                g.pending_auto_finalize_finish = true;
+                g.pending.execute = Some(synth);
+                g.pending.execute_skip_guardrail_count = true;
+                g.pending.auto_finalize_finish = true;
                 g.phase = EnginePhase::AwaitingTools;
             }
         }
 
         let auto_finalize_queued =
-            g.pending_execute_skip_guardrail_count && g.pending_execute.is_some();
+            g.pending.execute_skip_guardrail_count && g.pending.execute.is_some();
         if !auto_finalize_queued {
             match g.run_compaction_pass(CompactionTrigger::PostToolResult) {
                 Ok(Some(_)) => return,
@@ -1167,6 +692,177 @@ impl AgentEngine {
         });
     }
 
+    /// Dispatch glue for slice 5: bundle construction must go through `&mut
+    /// InnerSession` (not the `MutexGuard`), because simultaneous field
+    /// splits through the guard's autoderef do not borrow-check.
+    fn intake_parse_failed(
+        g: &mut InnerSession,
+        visible_assistant_text: String,
+        error_json_for_model: String,
+    ) {
+        model_intake::apply_ingest_parse_failed(
+            model_intake::IngestArmInputs {
+                session: &mut g.session,
+                guardrails: &mut g.guardrails,
+                config: &g.config,
+                state_ledger: &mut g.state_ledger,
+                events: &mut g.events,
+                turn_index: g.turn_index,
+                last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
+            },
+            visible_assistant_text,
+            error_json_for_model,
+        );
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_tools_blocked(
+        g: &mut InnerSession,
+        visible_assistant_text: String,
+        user_fallback_text: String,
+        nudge_json_for_model: String,
+    ) -> model_intake::ToolsBlockedEffect {
+        model_intake::apply_ingest_tools_blocked(
+            model_intake::IngestArmInputs {
+                session: &mut g.session,
+                guardrails: &mut g.guardrails,
+                config: &g.config,
+                state_ledger: &mut g.state_ledger,
+                events: &mut g.events,
+                turn_index: g.turn_index,
+                last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
+            },
+            visible_assistant_text,
+            user_fallback_text,
+            nudge_json_for_model,
+            &mut g.tools_blocked_nudges_this_turn,
+            g.model_requests_this_turn,
+            g.config.max_model_requests_per_turn,
+        )
+    }
+
+    /// Dispatch glue for the assistant-append stage.
+    fn push_assistant_message(
+        g: &mut InnerSession,
+        merged_tool_calls: &[RawToolCall],
+        assistant_content: String,
+        ingest_metadata: serde_json::Value,
+        provider_reasoning_content: Option<&str>,
+    ) {
+        model_intake::append_assistant_message(
+            model_intake::AppendAssistantInputs {
+                session: &mut g.session,
+                state_ledger: &mut g.state_ledger,
+                enable_state_ledger: g.config.enable_state_ledger,
+                events: &mut g.events,
+                enable_loop_hooks: g.config.enable_loop_hooks,
+                lifecycle_hooks_supported: g.capabilities.lifecycle_hooks_supported,
+                greedy_tool_names: &mut g.last_model_response_greedy_tool_names,
+            },
+            merged_tool_calls,
+            assistant_content,
+            ingest_metadata,
+            provider_reasoning_content,
+        );
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_repair(
+        g: &mut InnerSession,
+        merged_tool_calls: &[RawToolCall],
+        catalog: &ToolCatalog,
+    ) -> model_intake::RepairTurnOutcome {
+        model_intake::repair_tool_turn(
+            merged_tool_calls,
+            model_intake::RepairTurnInputs {
+                semantics: &g.config.tool_semantics,
+                catalog,
+                active_tool_names: &mut g.active_tool_names,
+                turn_index: g.turn_index,
+                default_tool_timeout_ms: g.config.default_tool_timeout_ms,
+                tool_retry_limit: g.config.tool_retry_limit,
+                require_read_before_edit: g.config.require_read_before_edit,
+            },
+        )
+    }
+
+    /// Dispatch glue for slice 5 (see `intake_parse_failed`).
+    fn intake_flush_rejects(g: &mut InnerSession, parallel: usize, rejects: usize) {
+        model_intake::flush_reject_only_turn(model_intake::RejectFlushInputs {
+            session: &mut g.session,
+            guardrails: &mut g.guardrails,
+            config: &g.config,
+            pending_tool_turn_request_order: &mut g.pending.tool_turn_request_order,
+            pending_reject_tool_by_call_id: &mut g.pending.reject_tool_by_call_id,
+            turn_index: g.turn_index,
+            parallel,
+            rejects,
+            last_model_response_greedy_tool_names: &g.last_model_response_greedy_tool_names,
+        });
+    }
+
+    /// Dispatch glue for slice 4: owns every pressure read and the apply
+    /// ordering; the session-free `process_one_result` stage runs in between.
+    fn process_and_apply_tool_result(
+        g: &mut InnerSession,
+        last_batch_tool_message_index: &mut Option<usize>,
+        call: &ToolCallRecord,
+        res: ToolResultRecord,
+    ) -> ToolResultRecord {
+        let spill_tokens_before = g
+            .estimate_pressure(CompactionTrigger::PostToolResult)
+            .total_tokens;
+        let policy = result_policy_for(&g.config.tool_semantics, &call.name);
+        let skip_result_truncation = policy
+            .map(|policy| policy.skip_result_truncation)
+            .unwrap_or(false);
+        let truncation_budget = if skip_result_truncation {
+            None
+        } else {
+            let pressure = g.estimate_pressure(CompactionTrigger::PostToolResult);
+            Some(effective_tool_result_budget_for_window(
+                &pressure,
+                &g.capabilities,
+                &g.config,
+                g.io.context_window_tokens,
+            ))
+        };
+        let processed = tool_results::process_one_result(
+            call,
+            res,
+            tool_results::ProcessOneResultInputs {
+                semantics: &g.config.tool_semantics,
+                spill_threshold_bytes: effective_tool_spill_threshold_bytes(
+                    &g.config,
+                    g.io.context_window_tokens,
+                ),
+                truncation_budget,
+                turn_index: g.turn_index,
+                context_store: &mut g.context_store,
+                pending_artifact_ids: &mut g.pending.artifact_ids,
+            },
+        );
+        let spill_tokens_after = if processed.spilled_inline {
+            g.estimate_pressure(CompactionTrigger::PostToolResult)
+                .total_tokens
+        } else {
+            spill_tokens_before
+        };
+        tool_results::apply_processed_tool_result(
+            tool_results::ApplyProcessedInputs {
+                session: &mut g.session,
+                enable_state_ledger: g.config.enable_state_ledger,
+                state_ledger: &mut g.state_ledger,
+                active_tool_names: &mut g.active_tool_names,
+                events: &mut g.events,
+                last_batch_tool_message_index,
+                spill_tokens_before,
+                spill_tokens_after,
+            },
+            processed,
+        )
+    }
+
     pub fn submit_summary(&self, handle: &SessionHandle, summary: SummaryResult) {
         let mut g = handle.lock_inner();
         if g.terminal_action.is_some() || g.cancelled {
@@ -1181,21 +877,12 @@ impl AgentEngine {
             return;
         }
 
-        let req = g.pending_summary_req.take().expect("summary req");
-        let ctx = g.pending_summary_ctx.take().expect("summary ctx");
+        let req = g.pending.summary_req.take().expect("summary req");
+        let ctx = g.pending.summary_ctx.take().expect("summary ctx");
         g.phase = EnginePhase::Idle;
 
         if summary.summary_text.trim().is_empty() {
-            g.suppress_summary_tier = true;
-            let trigger = ctx.trigger;
-            match g.run_compaction_pass(trigger) {
-                Ok(Some(_)) => {}
-                Ok(None) => {}
-                Err(e) => {
-                    g.set_terminal(AgentAction::Failed(e));
-                }
-            }
-            g.suppress_summary_tier = false;
+            g.retry_without_summary(ctx.trigger);
             return;
         }
 
@@ -1203,16 +890,7 @@ impl AgentEngine {
         let message_count_before = g.session.messages.len() as u32;
         if let Err(reason) = apply_summary_result(&mut g.session, &req, &summary, &cfg, &ctx) {
             if reason == "empty summary_text" {
-                g.suppress_summary_tier = true;
-                let trigger = ctx.trigger;
-                match g.run_compaction_pass(trigger) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {}
-                    Err(e) => {
-                        g.set_terminal(AgentAction::Failed(e));
-                    }
-                }
-                g.suppress_summary_tier = false;
+                g.retry_without_summary(ctx.trigger);
                 return;
             }
             g.set_terminal(AgentAction::Failed(AgentError::CompactionFailed {
@@ -1249,17 +927,9 @@ impl AgentEngine {
             message_count_before,
         );
 
-        if g.pending_execute.is_some() {
+        if g.pending.execute.is_some() {
             g.phase = EnginePhase::AwaitingTools;
         }
-    }
-
-    pub fn cancel(&self, handle: &SessionHandle) {
-        let mut g = handle.lock_inner();
-        g.cancelled = true;
-        g.set_terminal(AgentAction::Failed(AgentError::Internal(
-            "cancelled".into(),
-        )));
     }
 
     pub fn drain_events(&self, handle: &SessionHandle) -> Vec<AgentEvent> {
@@ -1294,28 +964,12 @@ impl AgentEngine {
         let outcome =
             crate::compact::SummaryCompactionTier.apply(g.session.clone(), &g.config, &ctx);
         match outcome {
-            CompactionOutcome::NeedsHostCall(mut req, sess) => {
-                g.session = sess;
-                req.focus_instruction = request.focus_instruction;
-                if g.config.enable_context_store {
-                    let turn_index = g.turn_index;
-                    if let Some(reference) = snapshot_history_range(
-                        &mut g.context_store,
-                        &req.messages_to_summarize,
-                        trigger,
-                        turn_index,
-                    ) {
-                        req.history_ref = Some(reference.id.clone());
-                        if g.config.enable_state_ledger {
-                            g.state_ledger.add_history_ref(&reference.id);
-                        }
-                    }
-                }
-                if g.config.enable_state_ledger {
-                    req.state_ledger_snapshot = Some(g.state_ledger.clone());
-                }
-                g.pending_summary_req = Some(req.clone());
-                g.pending_summary_ctx = Some(ctx);
+            CompactionOutcome::NeedsHostCall(req, sess) => {
+                let req = compaction::apply_manual_focus_instruction(req, &request);
+                // Shared staging: session replace + history/ledger refs.
+                let req = InnerSession::stage_summary_request(&mut g, sess, req, trigger);
+                g.pending.summary_req = Some(req.clone());
+                g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
                 AgentAction::RequestSummary(req)
             }
@@ -1343,57 +997,9 @@ impl AgentEngine {
             CompactionOutcome::Failed(err) => AgentAction::Failed(err),
         }
     }
-
-    pub fn read_context_reference(
-        &self,
-        handle: &SessionHandle,
-        reference_id: String,
-    ) -> Result<String, AgentError> {
-        let g = handle.lock_inner();
-        g.context_store
-            .get(&reference_id)
-            .map(|entry| entry.content.clone())
-            .ok_or(AgentError::ContextReferenceNotFound { reference_id })
-    }
-
-    pub fn search_context_references(
-        &self,
-        handle: &SessionHandle,
-        query: String,
-        limit: usize,
-    ) -> Vec<crate::context_store::ContextReference> {
-        let g = handle.lock_inner();
-        g.context_store.search(&query, limit)
-    }
-
-    pub fn insert_terminal_output(
-        &self,
-        handle: &SessionHandle,
-        id: String,
-        title: String,
-        content: String,
-    ) -> ContextReference {
-        let mut g = handle.lock_inner();
-        let turn_index = g.turn_index;
-        insert_terminal_output(&mut g.context_store, id, title, content, turn_index)
-    }
 }
 
-fn normalize_tool_name_hint(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-    loop {
-        if let Some(r) = s.strip_prefix("functions.") {
-            s = r.to_string();
-        } else if let Some(r) = s.strip_prefix("tools.") {
-            s = r.to_string();
-        } else {
-            break;
-        }
-    }
-    s.to_lowercase().replace(['-', ' '], "_")
-}
-
-fn session_has_append_context(
+pub(super) fn session_has_append_context(
     messages: &[AgentMessage],
     artifact_squash: Option<&ArtifactSquashSemantics>,
 ) -> bool {
@@ -1418,7 +1024,72 @@ fn session_has_append_context(
 }
 
 impl InnerSession {
-    fn set_terminal(&mut self, a: AgentAction) {
+    /// ENC-286 slice 3: dispatch glue — bundles the disjoint finish fields for
+    /// `finish::finish_after_model_stop`. No logic lives here.
+    fn finish_state(&mut self) -> finish::FinishState<'_> {
+        finish::FinishState {
+            session: &mut self.session,
+            config: &self.config,
+            capabilities: &self.capabilities,
+            io: &self.io,
+            guardrails: &mut self.guardrails,
+            loop_metrics: &self.loop_metrics,
+            phase: &mut self.phase,
+            terminal_action: &mut self.terminal_action,
+            pending: &mut self.pending,
+            last_model_response_greedy_tool_names: &self.last_model_response_greedy_tool_names,
+            state_ledger: &mut self.state_ledger,
+            context_store: &mut self.context_store,
+            sidecar_builder: &mut self.sidecar_builder,
+            active_tool_names: &self.active_tool_names,
+            turn_index: self.turn_index,
+            model_requests_this_turn: &mut self.model_requests_this_turn,
+            compaction_passes_this_turn: self.compaction_passes_this_turn,
+            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+            suppress_summary_tier: self.suppress_summary_tier,
+            events: &mut self.events,
+        }
+    }
+
+    /// Dispatch glue for slice 6: the shared `NeedsHostCall` staging takes a
+    /// field bundle, so construction goes through `&mut InnerSession`.
+    fn stage_summary_request(
+        g: &mut InnerSession,
+        sess: AgentSession,
+        req: SummaryRequest,
+        trigger: CompactionTrigger,
+    ) -> SummaryRequest {
+        compaction::attach_summary_staging(
+            compaction::StageSummaryInputs {
+                session: &mut g.session,
+                context_store: &mut g.context_store,
+                state_ledger: &mut g.state_ledger,
+                enable_context_store: g.config.enable_context_store,
+                enable_state_ledger: g.config.enable_state_ledger,
+                turn_index: g.turn_index,
+                trigger,
+            },
+            sess,
+            req,
+        )
+    }
+
+    /// FRG-47: shared empty-summary fallback — re-runs compaction without the
+    /// summary tier so the next tier can make progress. Owns no phase
+    /// transition itself; `run_compaction_pass` does.
+    fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
+        self.suppress_summary_tier = true;
+        match self.run_compaction_pass(trigger) {
+            Ok(Some(_)) => {}
+            Ok(None) => {}
+            Err(e) => {
+                self.set_terminal(AgentAction::Failed(e));
+            }
+        }
+        self.suppress_summary_tier = false;
+    }
+
+    pub(super) fn set_terminal(&mut self, a: AgentAction) {
         self.terminal_action = Some(a);
         self.phase = EnginePhase::Idle;
     }
@@ -1528,114 +1199,60 @@ impl InnerSession {
                 self.suppress_summary_tier,
             );
             let threshold_tokens = plan.threshold_tokens;
-            let ratio_threshold_tokens = effective_threshold_tokens(
-                &self.config,
-                self.io.context_window_tokens,
-                plan.threshold_ratio,
-                None,
-            );
+            let ratio_threshold_tokens =
+                ratio_threshold_tokens_for_plan(&self.config, self.io.context_window_tokens, &plan);
             let pressure = self.estimate_pressure(trigger);
             self.session.ledger_snapshot = Some(pressure.clone());
 
-            let artifact_squash = self
-                .config
-                .tool_semantics
-                .compaction
-                .artifact_squash
-                .as_ref();
-            let has_append_context =
-                session_has_append_context(&self.session.messages, artifact_squash);
             let session_has_tool_messages = self
                 .session
                 .messages
                 .iter()
                 .any(|m| m.role == AgentRole::Tool);
-            let defer_compaction_failure = has_append_context
-                || self.pending_finalize_after_tool_stop
-                || (self.pending_execute.is_some()
-                    && !self.session.compaction_log.is_empty()
-                    && session_has_tool_messages);
+            let (has_append_context, defer_compaction_failure) = compaction::probe_turn_flags(
+                &self.session.messages,
+                self.config
+                    .tool_semantics
+                    .compaction
+                    .artifact_squash
+                    .as_ref(),
+                self.pending.finalize_after_tool_stop,
+                self.pending.execute.is_some(),
+                self.session.compaction_log.is_empty(),
+                session_has_tool_messages,
+            );
 
-            if matches!(trigger, CompactionTrigger::MidTurn)
-                && !self.config.allow_fifo_on_mid_turn
-                && !self.capabilities.summarization_allowed
-                && !self.session.compaction_log.is_empty()
-                && !defer_compaction_failure
-            {
-                return Err(AgentError::CompactionFailed {
-                    tier: "pipeline".into(),
-                    reason: "No compaction tier applied while context remains over threshold"
-                        .into(),
-                });
+            if let Some(err) = mid_turn_stall_error(
+                trigger,
+                MidTurnStallGate {
+                    allow_fifo_on_mid_turn: self.config.allow_fifo_on_mid_turn,
+                    summarization_allowed: self.capabilities.summarization_allowed,
+                    compaction_log_is_empty: self.session.compaction_log.is_empty(),
+                    defer_compaction_failure,
+                    require_nonempty_log: true,
+                },
+            ) {
+                return Err(err);
             }
 
-            let absolute_fires = match trigger {
-                CompactionTrigger::Preflight => self
-                    .config
-                    .preflight_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::MidTurn => self
-                    .config
-                    .mid_turn_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::PostToolResult => self
-                    .config
-                    .post_tool_result_token_threshold
-                    .map(|t| pressure.total_tokens >= t)
-                    .unwrap_or(false),
-                CompactionTrigger::Manual => false,
-            };
-            let has_destructive_compaction_candidate = self.capabilities.summarization_allowed
-                || (session_has_tool_messages && self.config.micro_keep_recent == 0)
-                || match trigger {
-                    CompactionTrigger::Preflight => self.config.allow_fifo_on_preflight,
-                    CompactionTrigger::MidTurn => self.config.allow_fifo_on_mid_turn,
-                    CompactionTrigger::PostToolResult => self.config.allow_fifo_on_post_tool_result,
-                    CompactionTrigger::Manual => true,
-                };
-            let absolute_fires = absolute_fires && has_destructive_compaction_candidate;
-            let active_threshold_tokens = if has_destructive_compaction_candidate {
-                threshold_tokens
-            } else {
-                ratio_threshold_tokens
-            };
-            let turn_fires = matches!(trigger, CompactionTrigger::Preflight)
-                && self
-                    .config
-                    .turn_threshold
-                    .map(|t| self.loop_metrics.turn_count >= t)
-                    .unwrap_or(false);
-            let turn_end_fires = trigger == CompactionTrigger::PostToolResult
-                && self.config.compact_on_turn_end
-                && self
-                    .session
-                    .messages
-                    .last()
-                    .map(|m| matches!(m.role, AgentRole::Tool | AgentRole::User))
-                    .unwrap_or(false);
+            // ENC-286 slice 6 / FRG-47: pure entry gate; the dispatch keeps
+            // looping, emitting, and phase wiring.
+            let fire = should_enter_compaction(FireConditionInputs {
+                config: &self.config,
+                capabilities: &self.capabilities,
+                trigger,
+                pressure: &pressure,
+                threshold_tokens,
+                ratio_threshold_tokens,
+                turn_count: self.loop_metrics.turn_count,
+                tool_calls_executed: self.guardrails.tool_calls_executed,
+                session_has_tool_messages,
+                last_message_role: compaction::last_message_role(&self.session.messages),
+            });
+            let entered_for_long_loop_only = fire.entered_for_long_loop_only;
+            let forced_by_non_ratio = fire.forced_by_non_ratio;
 
-            let tool_round_index = self.guardrails.tool_calls_executed;
-            let long_loop_fires = session_has_tool_messages
-                && should_compact_for_long_loop(
-                    &self.config,
-                    &self.capabilities,
-                    tool_round_index,
-                    trigger,
-                );
-            let entered_for_long_loop_only = long_loop_fires
-                && !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                && !absolute_fires
-                && !turn_fires
-                && !turn_end_fires;
-
-            if !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                && !absolute_fires
-                && !turn_fires
-                && !turn_end_fires
-                && !long_loop_fires
-            {
+            if !fire.should_enter {
                 if sync_applied {
                     self.emit_post_compact(
                         trigger,
@@ -1653,63 +1270,51 @@ impl InnerSession {
                 ratio: pressure.ratio,
             });
 
-            if matches!(trigger, CompactionTrigger::MidTurn)
-                && !self.config.allow_fifo_on_mid_turn
-                && !self.capabilities.summarization_allowed
-                && !defer_compaction_failure
-            {
-                return Err(AgentError::CompactionFailed {
-                    tier: "pipeline".into(),
-                    reason: "No compaction tier applied while context remains over threshold"
-                        .into(),
-                });
+            if let Some(err) = mid_turn_stall_error(
+                trigger,
+                MidTurnStallGate {
+                    allow_fifo_on_mid_turn: self.config.allow_fifo_on_mid_turn,
+                    summarization_allowed: self.capabilities.summarization_allowed,
+                    compaction_log_is_empty: self.session.compaction_log.is_empty(),
+                    defer_compaction_failure,
+                    require_nonempty_log: false,
+                },
+            ) {
+                return Err(err);
             }
 
             if self.config.enable_context_store {
-                let artifact_squash = self
-                    .config
-                    .tool_semantics
-                    .compaction
-                    .artifact_squash
-                    .as_ref();
-                if let Some(event) = spill_tool_messages_in_session(
-                    &mut self.context_store,
-                    &mut self.session,
-                    artifact_squash,
-                    effective_tool_spill_threshold_bytes(
+                // Slice 6: sync spill/snapshot runs in the helper; the
+                // dispatch applies flags, ledger refs, and emits in order.
+                let effect = compaction::collect_sync_spill_effect(compaction::SyncSpillInputs {
+                    session: &mut self.session,
+                    context_store: &mut self.context_store,
+                    artifact_squash: self
+                        .config
+                        .tool_semantics
+                        .compaction
+                        .artifact_squash
+                        .as_ref(),
+                    spill_threshold_bytes: effective_tool_spill_threshold_bytes(
                         &self.config,
                         self.io.context_window_tokens,
                     ),
-                    self.turn_index,
+                    turn_index: self.turn_index,
+                    pressure_total_tokens: pressure.total_tokens,
                     trigger,
-                ) {
+                });
+                if let Some(event) = effect.spill_event {
                     self.session.push_compaction_event(event.clone());
                     self.emit(AgentEvent::CompactionApplied(event));
                     sync_applied = true;
                 }
-                let snapshot_ids: Vec<String> = self
-                    .session
-                    .messages
-                    .iter()
-                    .map(|message| message.id.clone())
-                    .collect();
-                if let Some(reference) = snapshot_history_range(
-                    &mut self.context_store,
-                    &self.session.messages,
-                    trigger,
-                    self.turn_index,
-                ) {
-                    last_history_ref = Some(reference.id.clone());
-                    self.remember_history_snapshot_ids(snapshot_ids);
+                if let Some(history_ref) = effect.history_ref {
+                    last_history_ref = Some(history_ref.clone());
+                    self.remember_history_snapshot_ids(effect.snapshot_ids);
                     if self.config.enable_state_ledger {
-                        self.state_ledger.add_history_ref(&reference.id);
+                        self.state_ledger.add_history_ref(&history_ref);
                     }
-                    let event = CompactionEvent {
-                        tier: CompactionTier::HistorySnapshot,
-                        tokens_before: pressure.total_tokens,
-                        tokens_after: pressure.total_tokens,
-                        trigger,
-                    };
+                    let event = effect.snapshot_event.expect("history snapshot event");
                     self.session.push_compaction_event(event.clone());
                     self.emit(AgentEvent::CompactionApplied(event));
                 }
@@ -1718,104 +1323,53 @@ impl InnerSession {
                 self.persist_artifact_state_if_present();
             }
 
-            // When forced by absolute token threshold, turn count, or turn-end,
-            // override:
-            //  - plan.threshold_ratio = 0.0 so the pipeline's own ratio guard passes
-            //  - ctx.trigger = MidTurn so the summary tier summarizes all messages
-            //    (not just "before last user") for short sessions
-            let forced_by_non_ratio =
-                !should_compact_at_token_threshold(&pressure, active_threshold_tokens)
-                    && (absolute_fires || turn_fires || turn_end_fires);
-            let (effective_plan, effective_ctx) = if forced_by_non_ratio {
-                let mut p = plan.clone();
-                p.threshold_ratio = 0.0;
-                p.threshold_tokens = 0;
-                let mut c = ctx.clone();
-                c.trigger = CompactionTrigger::MidTurn;
-                (p, c)
-            } else {
-                (plan.clone(), ctx.clone())
-            };
+            let (effective_plan, effective_ctx) =
+                compaction::apply_force_override(&plan, &ctx, forced_by_non_ratio);
 
             let pipeline = compaction_pipeline_for_plan(&effective_plan);
-            match pipeline.run_plan(
+            let outcome = pipeline.run_plan(
                 self.session.clone(),
                 &effective_ctx,
                 &self.config,
                 &effective_plan,
+            );
+            // FRG-47: the 4-arm outcome match is a decision stage; the
+            // dispatch owns the loop and the return. Post pressure is read
+            // only for the NotApplicable arm, exactly as before.
+            let post_pressure = matches!(outcome, CompactionOutcome::NotApplicable)
+                .then(|| self.estimate_pressure(trigger));
+            match compaction::decide_pipeline_outcome(
+                compaction::PipelineOutcomeInputs {
+                    session: &mut self.session,
+                    config: &self.config,
+                    capabilities: &self.capabilities,
+                    context_store: &mut self.context_store,
+                    state_ledger: &mut self.state_ledger,
+                    events: &mut self.events,
+                    pending_summary_req: &mut self.pending.summary_req,
+                    pending_summary_ctx: &mut self.pending.summary_ctx,
+                    phase: &mut self.phase,
+                    turn_index: self.turn_index,
+                    trigger,
+                    loop_ctx: ctx,
+                    forced_by_non_ratio,
+                    entered_for_long_loop_only,
+                    post_pressure,
+                    sync_applied: &mut sync_applied,
+                    last_history_ref: &mut last_history_ref,
+                    destructive_tiers: &mut destructive_tiers,
+                    destructive_tiers_this_turn: &mut self.destructive_tiers_this_turn,
+                    compaction_passes_this_turn: &mut self.compaction_passes_this_turn,
+                    defer_compaction_failure,
+                    message_count_before,
+                },
+                outcome,
             ) {
-                CompactionOutcome::NeedsHostCall(mut req, sess) => {
-                    // If we forced MidTurn context for non-ratio compaction,
-                    // restore the original trigger in the SummaryRequest.
-                    if forced_by_non_ratio {
-                        req.trigger = trigger;
-                    }
-                    self.session = sess;
-                    if self.config.enable_context_store {
-                        if let Some(reference) = snapshot_history_range(
-                            &mut self.context_store,
-                            &req.messages_to_summarize,
-                            trigger,
-                            self.turn_index,
-                        ) {
-                            if self.config.enable_state_ledger {
-                                self.state_ledger.add_history_ref(&reference.id);
-                            }
-                            req.history_ref = Some(reference.id);
-                        }
-                    }
-                    if self.config.enable_state_ledger {
-                        req.state_ledger_snapshot = Some(self.state_ledger.clone());
-                    }
-                    self.pending_summary_req = Some(req.clone());
-                    self.pending_summary_ctx = Some(ctx);
-                    self.phase = EnginePhase::AwaitingSummary;
-                    return Ok(Some(AgentAction::RequestSummary(req)));
+                compaction::PipelineDecision::ReturnOk(action) => {
+                    return Ok(action.map(|boxed| *boxed));
                 }
-                CompactionOutcome::Applied(sess, ev) => {
-                    if is_destructive_compaction_tier(&ev.tier) {
-                        destructive_tiers.push(ev.tier.clone());
-                        self.destructive_tiers_this_turn += 1;
-                    }
-                    self.compaction_passes_this_turn += 1;
-                    self.session = sess;
-                    self.emit(AgentEvent::CompactionApplied(ev.clone()));
-                    sync_applied = true;
-                    if self.capabilities.kv_fixed {
-                        self.emit(AgentEvent::KvCacheInvalidated {
-                            reason: format!("Compacted: {}", ev.tier),
-                        });
-                    }
-                    // loop until under threshold or NeedsHostCall / stuck
-                }
-                CompactionOutcome::NotApplicable => {
-                    let p2 = self.estimate_pressure(trigger);
-                    if exceeds_hard_prompt_ceiling(&p2)
-                        && !entered_for_long_loop_only
-                        && !sync_applied
-                        && !defer_compaction_failure
-                    {
-                        return Err(AgentError::CompactionFailed {
-                            tier: "pipeline".into(),
-                            reason:
-                                "No compaction tier applied while context remains over threshold"
-                                    .into(),
-                        });
-                    }
-                    if sync_applied {
-                        self.emit_post_compact(
-                            trigger,
-                            None,
-                            last_history_ref,
-                            &destructive_tiers,
-                            message_count_before,
-                        );
-                    }
-                    return Ok(None);
-                }
-                CompactionOutcome::Failed(err) => {
-                    return Err(err);
-                }
+                compaction::PipelineDecision::ReturnErr(err) => return Err(err),
+                compaction::PipelineDecision::LoopAgain => {}
             }
         }
     }
@@ -1874,279 +1428,30 @@ impl InnerSession {
             });
         }
 
-        let req = self.build_model_request(allow, cache_hints);
+        // ENC-286 slice 2: disjoint-field borrow split — each field is passed
+        // explicitly; this never hands the whole guard to the callee.
+        let req = model_request::build_model_request(model_request::ModelRequestInputs {
+            session: &self.session,
+            config: &self.config,
+            capabilities: &self.capabilities,
+            io: &self.io,
+            active_tool_names: &self.active_tool_names,
+            context_store: &mut self.context_store,
+            state_ledger: &self.state_ledger,
+            sidecar_builder: &mut self.sidecar_builder,
+            turn_index: self.turn_index,
+            compaction_passes_this_turn: self.compaction_passes_this_turn,
+            destructive_tiers_this_turn: self.destructive_tiers_this_turn,
+            suppress_summary_tier: self.suppress_summary_tier,
+            allow_tool_call: allow,
+            cache_hints,
+            loop_metrics: &self.loop_metrics,
+        });
 
-        self.pending_call_model = Some(req.clone());
+        self.pending.call_model = Some(req.clone());
         self.model_requests_this_turn += 1;
         self.phase = EnginePhase::AwaitingModel;
         Ok(AgentAction::CallModel(req))
-    }
-
-    fn finish_after_model_stop(&mut self, reason: FinishReason) {
-        match reason {
-            FinishReason::Stop => {}
-            FinishReason::MaxTokens => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped {
-                    reason: "max_tokens".into(),
-                }));
-                return;
-            }
-            FinishReason::Other(reason) => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped { reason }));
-                return;
-            }
-            FinishReason::ToolUse => {
-                self.set_terminal(AgentAction::Failed(AgentError::ModelStopped {
-                    reason: "tool_use_without_tool_calls".into(),
-                }));
-                return;
-            }
-        }
-
-        let synth = synthetic_finalize_calls_with_semantics(
-            &self.pending_artifact_ids,
-            &self.config.tool_semantics,
-        );
-        if !synth.is_empty() {
-            self.pending_execute = Some(synth);
-            self.pending_execute_skip_guardrail_count = true;
-            self.pending_auto_finalize_finish = true;
-            self.phase = EnginePhase::AwaitingTools;
-            return;
-        }
-
-        if self.config.enable_loop_hooks && self.capabilities.lifecycle_hooks_supported {
-            self.emit(AgentEvent::HookInvoked {
-                checkpoint: "before_finish".into(),
-            });
-        }
-
-        if self.config.enable_loop_hooks
-            && self.capabilities.lifecycle_hooks_supported
-            && self.config.enable_pending_work_guard
-        {
-            if let Some(action) = self.before_finish_pending_work_action() {
-                self.set_terminal_or_pending(action);
-                return;
-            }
-        }
-
-        self.terminal_action = Some(AgentAction::Finished);
-        let ti = self.turn_index;
-        let tc = self.guardrails.tool_calls_executed;
-        self.emit(AgentEvent::TurnCompleted {
-            turn_index: ti,
-            tool_call_count: tc,
-            terminal: true,
-        });
-    }
-
-    fn before_finish_pending_work_action(&mut self) -> Option<AgentAction> {
-        let pending_items = self
-            .loop_metrics
-            .pending_work_items
-            .iter()
-            .map(|item| item.text.clone())
-            .collect::<Vec<_>>();
-        let force_blocked = self
-            .session
-            .session_context
-            .get("force_finish_blocked")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        if pending_items.is_empty() {
-            return force_blocked.then(|| {
-                AgentAction::Failed(AgentError::GuardrailExceeded {
-                    kind: "finish_blocked_without_injected_message".into(),
-                    detail: None,
-                })
-            });
-        }
-        if self.model_requests_this_turn >= self.config.max_model_requests_per_turn {
-            return Some(AgentAction::Failed(AgentError::GuardrailExceeded {
-                kind: "max_model_requests_per_turn".into(),
-                detail: None,
-            }));
-        }
-
-        let injected_message = AgentMessage {
-            id: format!("pending-work-reminder-{}", self.turn_index),
-            role: AgentRole::User,
-            content: format!("Pending work remains: {}", pending_items.join(", ")),
-            metadata: MessageMeta::new(),
-        };
-        self.session.messages.push(injected_message.clone());
-        if self.config.enable_state_ledger {
-            self.state_ledger.observe_user_message(&injected_message);
-        }
-        let allow = self
-            .guardrails
-            .allow_tool_call(&self.config, &self.last_model_response_greedy_tool_names);
-        let request = self.build_model_request(allow, vec![]);
-        self.pending_call_model = Some(request.clone());
-        self.model_requests_this_turn += 1;
-        self.phase = EnginePhase::AwaitingModel;
-        Some(AgentAction::CallModel(request))
-    }
-
-    fn build_model_request(
-        &mut self,
-        allow_tool_call: bool,
-        cache_hints: Vec<String>,
-    ) -> ModelRequest {
-        let session_messages: Vec<AgentMessage> = self
-            .session
-            .messages
-            .iter()
-            .filter(|m| !m.metadata.is_superseded())
-            .cloned()
-            .collect();
-        // State-ledger anchor intentionally NOT injected at position 0 of session_messages.
-        // It would mutate byte 0 of the prefix on every turn (objective/decisions grow),
-        // breaking xAI/OpenAI prompt-cache prefix stability. Ledger content is already
-        // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
-
-        let rendered_tool_catalog_json = render_runtime_tool_view(
-            &self.io.tools_schema_json,
-            &self.config,
-            &self.capabilities,
-            &self.loop_metrics,
-        )
-        .unwrap_or_else(|_| self.io.tools_schema_json.clone());
-
-        let has_catalog = !self.io.tool_catalog_json.trim().is_empty()
-            && self.io.tool_catalog_json.trim() != "[]";
-        let has_registry = !self.io.tool_schema_registry_json.trim().is_empty()
-            && self.io.tool_schema_registry_json.trim() != "[]";
-
-        let active_schema_json: String = if has_registry && !self.active_tool_names.is_empty() {
-            render_active_schema_json(&self.io.tool_schema_registry_json, &self.active_tool_names)
-        } else {
-            self.io.tools_schema_json.clone()
-        };
-
-        let tool_context_index = build_tool_context_index_with_registry(
-            &active_schema_json,
-            &self.io.tool_catalog_json,
-            &self.io.tool_schema_registry_json,
-            &mut self.context_store,
-            &self.config,
-            &self.capabilities,
-        );
-        let tools_schema_json = if tool_context_index.is_some() && !has_catalog {
-            "[]".to_string()
-        } else {
-            active_schema_json
-        };
-
-        let file_context_index = self
-            .session
-            .session_context
-            .get("included_files")
-            .and_then(|value| serde_json::to_string(value).ok())
-            .and_then(|included_files_json| {
-                condense_file_context(
-                    &included_files_json,
-                    &mut self.context_store,
-                    &self.config,
-                    &self.capabilities,
-                    self.turn_index,
-                )
-            });
-
-        let generation = self.sidecar_builder.next_generation();
-        let sidecar_budget = self.config.long_loop.sidecar_byte_budget_per_call;
-        let ledger_delta = self
-            .config
-            .enable_state_ledger
-            .then(|| {
-                self.sidecar_builder.build_ledger_delta(
-                    &mut self.context_store,
-                    &self.state_ledger,
-                    sidecar_budget,
-                )
-            })
-            .flatten();
-        let tool_index_delta = tool_context_index.as_ref().and_then(|index| {
-            self.sidecar_builder.build_tool_index_payload(
-                &mut self.context_store,
-                index,
-                sidecar_budget,
-            )
-        });
-        let file_index_delta = file_context_index.as_ref().and_then(|index| {
-            self.sidecar_builder.build_file_index_payload(
-                &mut self.context_store,
-                index,
-                sidecar_budget,
-            )
-        });
-        let sidecar_byte_len = ledger_delta.as_ref().map(|s| s.len()).unwrap_or(0)
-            + tool_index_delta.as_ref().map(|s| s.len()).unwrap_or(0)
-            + file_index_delta.as_ref().map(|s| s.len()).unwrap_or(0);
-        self.sidecar_builder
-            .record_rolling_cache_entry(generation, sidecar_byte_len);
-        self.sidecar_builder
-            .enforce_total_budget(&self.config.long_loop);
-
-        ModelRequest {
-            session_messages,
-            system_prompt: self.io.system_prompt.clone(),
-            rendered_tool_catalog_json,
-            tools_schema_json,
-            allow_tool_call,
-            context_references: self
-                .context_store
-                .entries()
-                .filter(|entry| is_browsable_context_kind(&entry.reference.kind))
-                .map(|entry| entry.reference.clone())
-                .collect(),
-            state_ledger: self
-                .config
-                .enable_state_ledger
-                .then(|| self.state_ledger.clone()),
-            tool_context_index,
-            file_context_index,
-            cache_hints,
-            provider_context: ProviderContextSnapshot {
-                transcript_revision: self.session.transcript_revision,
-                sidecar_generation: generation,
-                sidecar_byte_len: sidecar_byte_len.min(u32::MAX as usize) as u32,
-                compaction_passes_this_turn: self.compaction_passes_this_turn,
-                destructive_tiers_this_turn: self.destructive_tiers_this_turn,
-                pressure_ratio_at_call_model_millis: {
-                    let ratio = self
-                        .session
-                        .ledger_snapshot
-                        .as_ref()
-                        .map(|p| p.ratio)
-                        .unwrap_or_else(|| {
-                            self.estimate_pressure(CompactionTrigger::Preflight).ratio
-                        });
-                    (ratio * 1000.0).round().clamp(0.0, u32::MAX as f32) as u32
-                },
-            },
-            state_ledger_delta_json: if generation == 0 { None } else { ledger_delta },
-            tool_context_index_delta_json: if generation == 0 {
-                None
-            } else {
-                tool_index_delta
-            },
-            file_context_index_delta_json: if generation == 0 {
-                None
-            } else {
-                file_index_delta
-            },
-            retry_after_ms: None,
-            model_retry_attempt: None,
-        }
-    }
-
-    fn set_terminal_or_pending(&mut self, action: AgentAction) {
-        match action {
-            AgentAction::CallModel(_) => {}
-            other => self.set_terminal(other),
-        }
     }
 }
 
@@ -2161,6 +1466,7 @@ fn truncate_model_api_failure_reason(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageMeta;
     use crate::turn_io::RawToolCall;
 
     fn io_small_window() -> SessionIoParams {

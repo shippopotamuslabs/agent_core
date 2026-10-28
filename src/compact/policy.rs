@@ -2,10 +2,15 @@
 //!
 //! See `plans/PLAN-agent-core-context-management/spec.md` — task 3.
 
-use crate::budget::effective_hard_prompt_ceiling_tokens;
-use crate::events::{CompactionTier, CompactionTrigger};
+use crate::budget::{
+    effective_hard_prompt_ceiling_tokens, effective_threshold_tokens,
+    should_compact_at_token_threshold,
+};
+use crate::events::{AgentError, CompactionTier, CompactionTrigger};
+use crate::long_loop_policy::should_compact_for_long_loop;
+use crate::message::AgentRole;
 use crate::policy::{effective_compaction_threshold_ratio, ContextPolicy, ContextPolicyTier};
-use crate::session::{AgentConfig, SessionCapabilities};
+use crate::session::{AgentConfig, Pressure, SessionCapabilities};
 
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
@@ -115,6 +120,159 @@ pub fn build_compaction_plan(
             context_window_tokens,
         ),
     }
+}
+
+/// ENC-286 slice 6 / FRG-47: pure entry-gate evaluation for `run_compaction_pass`.
+///
+/// All fire conditions are computed from plain data — no session access, no
+/// phase writes. The dispatch keeps looping, emitting, and phase wiring.
+pub struct FireConditionInputs<'a> {
+    pub config: &'a AgentConfig,
+    pub capabilities: &'a SessionCapabilities,
+    pub trigger: CompactionTrigger,
+    pub pressure: &'a Pressure,
+    pub threshold_tokens: u32,
+    pub ratio_threshold_tokens: u32,
+    pub turn_count: u32,
+    pub tool_calls_executed: u32,
+    pub session_has_tool_messages: bool,
+    pub last_message_role: Option<AgentRole>,
+}
+
+/// The dispatch-facing outcome of the entry gate. Only the fields the
+/// dispatch actually reads are returned; the individual fire signals
+/// stay local to [`should_enter_compaction`], where they are combined.
+pub struct FireConditions {
+    pub should_enter: bool,
+    pub entered_for_long_loop_only: bool,
+    pub forced_by_non_ratio: bool,
+}
+
+pub fn should_enter_compaction(inputs: FireConditionInputs<'_>) -> FireConditions {
+    let FireConditionInputs {
+        config,
+        capabilities,
+        trigger,
+        pressure,
+        threshold_tokens,
+        ratio_threshold_tokens,
+        turn_count,
+        tool_calls_executed,
+        session_has_tool_messages,
+        last_message_role,
+    } = inputs;
+    let absolute_fires = match trigger {
+        CompactionTrigger::Preflight => config
+            .preflight_token_threshold
+            .map(|t| pressure.total_tokens >= t)
+            .unwrap_or(false),
+        CompactionTrigger::MidTurn => config
+            .mid_turn_token_threshold
+            .map(|t| pressure.total_tokens >= t)
+            .unwrap_or(false),
+        CompactionTrigger::PostToolResult => config
+            .post_tool_result_token_threshold
+            .map(|t| pressure.total_tokens >= t)
+            .unwrap_or(false),
+        CompactionTrigger::Manual => false,
+    };
+    let has_destructive_compaction_candidate = capabilities.summarization_allowed
+        || (session_has_tool_messages && config.micro_keep_recent == 0)
+        || match trigger {
+            CompactionTrigger::Preflight => config.allow_fifo_on_preflight,
+            CompactionTrigger::MidTurn => config.allow_fifo_on_mid_turn,
+            CompactionTrigger::PostToolResult => config.allow_fifo_on_post_tool_result,
+            CompactionTrigger::Manual => true,
+        };
+    let absolute_fires = absolute_fires && has_destructive_compaction_candidate;
+    let active_threshold_tokens = if has_destructive_compaction_candidate {
+        threshold_tokens
+    } else {
+        ratio_threshold_tokens
+    };
+    let turn_fires = matches!(trigger, CompactionTrigger::Preflight)
+        && config
+            .turn_threshold
+            .map(|t| turn_count >= t)
+            .unwrap_or(false);
+    let turn_end_fires = trigger == CompactionTrigger::PostToolResult
+        && config.compact_on_turn_end
+        && last_message_role
+            .map(|role| matches!(role, AgentRole::Tool | AgentRole::User))
+            .unwrap_or(false);
+
+    let long_loop_fires = session_has_tool_messages
+        && should_compact_for_long_loop(config, capabilities, tool_calls_executed, trigger);
+    let entered_for_long_loop_only = long_loop_fires
+        && !should_compact_at_token_threshold(pressure, active_threshold_tokens)
+        && !absolute_fires
+        && !turn_fires
+        && !turn_end_fires;
+
+    let should_enter = should_compact_at_token_threshold(pressure, active_threshold_tokens)
+        || absolute_fires
+        || turn_fires
+        || turn_end_fires
+        || long_loop_fires;
+
+    // When forced by absolute token threshold, turn count, or turn-end, the
+    // dispatch overrides the plan ratio and context trigger (see dispatch).
+    let forced_by_non_ratio = !should_compact_at_token_threshold(pressure, active_threshold_tokens)
+        && (absolute_fires || turn_fires || turn_end_fires);
+
+    FireConditions {
+        should_enter,
+        entered_for_long_loop_only,
+        forced_by_non_ratio,
+    }
+}
+
+/// The gate inputs for [`mid_turn_stall_error`], as one named-field
+/// struct: five loose bools at a call site are trivially swapped, named
+/// fields are not.
+pub struct MidTurnStallGate {
+    pub allow_fifo_on_mid_turn: bool,
+    pub summarization_allowed: bool,
+    pub compaction_log_is_empty: bool,
+    pub defer_compaction_failure: bool,
+    /// Pre-gate call sites require a non-empty compaction log before the
+    /// stall error may fire; the post-emit call site does not.
+    pub require_nonempty_log: bool,
+}
+
+/// The two identical `CompactionFailed` early-error blocks in
+/// `run_compaction_pass` (pre-gate with a non-empty-log requirement, post-emit
+/// without). Pure constructor; the dispatch decides.
+pub fn mid_turn_stall_error(
+    trigger: CompactionTrigger,
+    gate: MidTurnStallGate,
+) -> Option<AgentError> {
+    if !matches!(trigger, CompactionTrigger::MidTurn) {
+        return None;
+    }
+    if gate.allow_fifo_on_mid_turn || gate.summarization_allowed {
+        return None;
+    }
+    if gate.defer_compaction_failure {
+        return None;
+    }
+    if gate.require_nonempty_log && gate.compaction_log_is_empty {
+        return None;
+    }
+    Some(AgentError::CompactionFailed {
+        tier: "pipeline".into(),
+        reason: "No compaction tier applied while context remains over threshold".into(),
+    })
+}
+
+/// Recomputes `ratio_threshold_tokens` the way the dispatch did inline
+/// (kept next to the plan so call sites stay one line).
+pub fn ratio_threshold_tokens_for_plan(
+    config: &AgentConfig,
+    context_window_tokens: u32,
+    plan: &CompactionPlan,
+) -> u32 {
+    effective_threshold_tokens(config, context_window_tokens, plan.threshold_ratio, None)
 }
 
 fn text_truncate_allowed(tier: ContextPolicyTier, context_window_tokens: u32) -> bool {
