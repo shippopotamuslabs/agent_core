@@ -252,14 +252,7 @@ fn ltd_10_direct_call_to_deferred_tool_fails_closed_before_disclosure() {
         .messages
         .iter()
         .rev()
-        .find(|message| {
-            message.role == AgentRole::Tool
-                && !message
-                    .metadata
-                    .extra("agent_tool_budget")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-        })
+        .find(|message| message.role == AgentRole::Tool && !message.metadata.agent_tool_budget())
         .expect("deferred tool rejection must be stored as a tool message");
     let payload: serde_json::Value =
         serde_json::from_str(&rejection.content).expect("rejection payload must be JSON");

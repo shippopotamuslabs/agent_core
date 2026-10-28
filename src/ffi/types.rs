@@ -602,23 +602,44 @@ pub struct FfiToolResultRecord {
     pub activated_tool_names: Vec<String>,
 }
 
-impl From<FfiToolResultRecord> for crate::message::ToolResultRecord {
-    fn from(t: FfiToolResultRecord) -> Self {
-        // Host-declared boundary names: ToolName::new, no snake-splitting;
-        // blank entries are dropped (the submit-time merge dedupes anyway).
-        Self {
-            call_id: t.call_id,
-            result_json: t.result_json,
-            truncated: t.truncated,
-            soft_failure: t.soft_failure,
-            activated_tool_names: t
-                .activated_tool_names
-                .iter()
-                .filter_map(|name| crate::tool_name::ToolName::new(name).ok())
-                .collect(),
-            result_metadata: None,
+/// Fallible inbound conversion for the submit path (ENC-308 item 11),
+/// replacing the deleted infallible `From<FfiToolResultRecord>` whose
+/// `filter_map` silently dropped whatever `ToolName::new` rejected.
+///
+/// Host-declared boundary names use `ToolName::new` (no snake-splitting).
+/// Blank entries (empty or whitespace-only) are dropped — the documented
+/// leniency the host relies on (the submit-time merge dedupes anyway).
+/// Any other name `ToolName::new` rejects is an `AgentException` naming
+/// the result's call and the offending entry: an invalid activation must
+/// surface at the boundary, never vanish.
+pub(crate) fn tool_result_record(
+    t: FfiToolResultRecord,
+) -> Result<crate::message::ToolResultRecord, AgentException> {
+    let mut activated_tool_names = Vec::new();
+    for name in &t.activated_tool_names {
+        if name.trim().is_empty() {
+            continue;
+        }
+        match crate::tool_name::ToolName::new(name) {
+            Ok(tool_name) => activated_tool_names.push(tool_name),
+            Err(error) => {
+                return Err(AgentException::Internal {
+                    detail: format!(
+                        "submit_tool_results: activated tool name {name:?} in result for call {} is invalid: {error}",
+                        t.call_id
+                    ),
+                });
+            }
         }
     }
+    Ok(crate::message::ToolResultRecord {
+        call_id: t.call_id,
+        result_json: t.result_json,
+        truncated: t.truncated,
+        soft_failure: t.soft_failure,
+        activated_tool_names,
+        result_metadata: None,
+    })
 }
 
 impl From<crate::message::ToolResultRecord> for FfiToolResultRecord {
@@ -808,6 +829,96 @@ impl From<FfiToolParseFailureReason> for ToolParseFailureReason {
     }
 }
 
+/// One artifact continuation anchor, mirroring
+/// [`crate::state_ledger::ArtifactStateAnchor`] field-for-field
+/// (ENC-308 item 9).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiArtifactStateAnchor {
+    pub artifact_id: String,
+    pub observed_total_blocks: Option<u32>,
+    pub last_block_preview: String,
+    pub continuation_instruction: String,
+}
+
+impl From<crate::state_ledger::ArtifactStateAnchor> for FfiArtifactStateAnchor {
+    fn from(a: crate::state_ledger::ArtifactStateAnchor) -> Self {
+        Self {
+            artifact_id: a.artifact_id,
+            observed_total_blocks: a.observed_total_blocks,
+            last_block_preview: a.last_block_preview,
+            continuation_instruction: a.continuation_instruction,
+        }
+    }
+}
+
+impl From<FfiArtifactStateAnchor> for crate::state_ledger::ArtifactStateAnchor {
+    fn from(a: FfiArtifactStateAnchor) -> Self {
+        Self {
+            artifact_id: a.artifact_id,
+            observed_total_blocks: a.observed_total_blocks,
+            last_block_preview: a.last_block_preview,
+            continuation_instruction: a.continuation_instruction,
+        }
+    }
+}
+
+/// The state ledger as a typed record (ENC-308 item 9), mirroring
+/// [`crate::state_ledger::StateLedger`] field-for-field. Every field is
+/// a UniFFI-native shape (strings, string lists, one nested record
+/// list), so the ledger crosses the boundary as data — the
+/// `state_ledger_snapshot_json` string and its two silent `.ok()`
+/// conversions are gone.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiStateLedger {
+    pub objective: Option<String>,
+    pub constraints: Vec<String>,
+    pub decisions: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub touched_files: Vec<String>,
+    pub tool_decisions: Vec<String>,
+    pub artifact_states: Vec<FfiArtifactStateAnchor>,
+    pub summary_refs: Vec<String>,
+    pub history_refs: Vec<String>,
+    pub retired: Vec<String>,
+    pub retirement_artifacts: Vec<String>,
+}
+
+impl From<crate::state_ledger::StateLedger> for FfiStateLedger {
+    fn from(l: crate::state_ledger::StateLedger) -> Self {
+        Self {
+            objective: l.objective,
+            constraints: l.constraints,
+            decisions: l.decisions,
+            open_questions: l.open_questions,
+            touched_files: l.touched_files,
+            tool_decisions: l.tool_decisions,
+            artifact_states: l.artifact_states.into_iter().map(Into::into).collect(),
+            summary_refs: l.summary_refs,
+            history_refs: l.history_refs,
+            retired: l.retired,
+            retirement_artifacts: l.retirement_artifacts,
+        }
+    }
+}
+
+impl From<FfiStateLedger> for crate::state_ledger::StateLedger {
+    fn from(l: FfiStateLedger) -> Self {
+        Self {
+            objective: l.objective,
+            constraints: l.constraints,
+            decisions: l.decisions,
+            open_questions: l.open_questions,
+            touched_files: l.touched_files,
+            tool_decisions: l.tool_decisions,
+            artifact_states: l.artifact_states.into_iter().map(Into::into).collect(),
+            summary_refs: l.summary_refs,
+            history_refs: l.history_refs,
+            retired: l.retired,
+            retirement_artifacts: l.retirement_artifacts,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiSummaryRequest {
     pub messages_to_summarize: Vec<FfiAgentMessage>,
@@ -816,7 +927,10 @@ pub struct FfiSummaryRequest {
     pub trigger: FfiCompactionTrigger,
     pub focus_instruction: Option<String>,
     pub history_ref: Option<String>,
-    pub state_ledger_snapshot_json: Option<String>,
+    /// The ledger as a typed record (ENC-308 item 9) — the JSON-string
+    /// snapshot and its silent `.ok()` parse/serialize are gone; this
+    /// conversion is total in both directions.
+    pub state_ledger_snapshot: Option<FfiStateLedger>,
 }
 
 impl From<FfiSummaryRequest> for SummaryRequest {
@@ -832,9 +946,7 @@ impl From<FfiSummaryRequest> for SummaryRequest {
             trigger: s.trigger.into(),
             focus_instruction: s.focus_instruction,
             history_ref: s.history_ref,
-            state_ledger_snapshot: s
-                .state_ledger_snapshot_json
-                .and_then(|json| serde_json::from_str(&json).ok()),
+            state_ledger_snapshot: s.state_ledger_snapshot.map(Into::into),
         }
     }
 }
@@ -852,9 +964,7 @@ impl From<SummaryRequest> for FfiSummaryRequest {
             trigger: s.trigger.into(),
             focus_instruction: s.focus_instruction,
             history_ref: s.history_ref,
-            state_ledger_snapshot_json: s
-                .state_ledger_snapshot
-                .and_then(|ledger| serde_json::to_string(&ledger).ok()),
+            state_ledger_snapshot: s.state_ledger_snapshot.map(Into::into),
         }
     }
 }
@@ -1768,6 +1878,10 @@ impl From<FfiManualCompactResult> for ManualCompactResult {
     }
 }
 
+// UniFFI enum: variants carry records by value (Box<T> is not a
+// UniFFI-supported field type), and actions are cold-path values
+// produced once per host step, so the size spread is accepted.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiAgentAction {
     CallModel { request: FfiModelRequest },
@@ -1949,5 +2063,118 @@ mod tests {
                 content: "fn x() {}".to_string(),
             }]
         );
+    }
+
+    fn populated_ledger() -> crate::state_ledger::StateLedger {
+        crate::state_ledger::StateLedger {
+            objective: Some("ship the close-out".into()),
+            constraints: vec!["no JSON at the boundary".into(), "keep it typed".into()],
+            decisions: vec!["type the ledger".into()],
+            open_questions: vec!["retention policy?".into()],
+            touched_files: vec!["src/ffi/types.rs".into()],
+            tool_decisions: vec!["call:web_search".into(), "result:c1:ok".into()],
+            artifact_states: vec![
+                crate::state_ledger::ArtifactStateAnchor {
+                    artifact_id: "art-1".into(),
+                    observed_total_blocks: Some(12),
+                    last_block_preview: "tail".into(),
+                    continuation_instruction: "continue appending".into(),
+                },
+                crate::state_ledger::ArtifactStateAnchor {
+                    artifact_id: "art-2".into(),
+                    observed_total_blocks: None,
+                    last_block_preview: String::new(),
+                    continuation_instruction: "start".into(),
+                },
+            ],
+            summary_refs: vec!["sum-1".into()],
+            history_refs: vec!["hist-1".into(), "hist-2".into()],
+            retired: vec!["old decision".into()],
+            retirement_artifacts: vec!["reversal: old decision".into()],
+        }
+    }
+
+    #[test]
+    fn ffi_state_ledger_round_trips_every_field() {
+        // ENC-308 item 9: the typed record carries the whole ledger —
+        // objective, tombstones, retirement artifacts, anchors with and
+        // without an observed count — with nothing routed through JSON.
+        let core = populated_ledger();
+        let ffi = FfiStateLedger::from(core.clone());
+        assert_eq!(ffi.objective.as_deref(), Some("ship the close-out"));
+        assert_eq!(ffi.artifact_states.len(), 2);
+        assert_eq!(ffi.artifact_states[0].observed_total_blocks, Some(12));
+        assert_eq!(ffi.artifact_states[1].observed_total_blocks, None);
+        assert_eq!(ffi.retirement_artifacts, vec!["reversal: old decision"]);
+        let back = crate::state_ledger::StateLedger::from(ffi);
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&core).unwrap(),
+            "ledger survives the FFI crossing field-for-field"
+        );
+    }
+
+    #[test]
+    fn ffi_summary_request_carries_typed_ledger_both_directions() {
+        // ENC-308 item 9: FfiSummaryRequest <-> SummaryRequest moves the
+        // ledger as a record; the old JSON string field is unrepresentable.
+        let core_req = SummaryRequest {
+            messages_to_summarize: Vec::new(),
+            instruction: "summarize".into(),
+            last_message_id: "m9".into(),
+            trigger: crate::events::CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: Some("hist-1".into()),
+            state_ledger_snapshot: Some(populated_ledger()),
+        };
+        let ffi_req = FfiSummaryRequest::from(core_req);
+        let ledger = ffi_req
+            .state_ledger_snapshot
+            .clone()
+            .expect("ledger crosses as a record");
+        assert_eq!(ledger.objective.as_deref(), Some("ship the close-out"));
+        assert_eq!(ledger.retired, vec!["old decision"]);
+        let back = SummaryRequest::from(ffi_req);
+        assert_eq!(
+            serde_json::to_value(&back.state_ledger_snapshot).unwrap(),
+            serde_json::to_value(populated_ledger()).unwrap()
+        );
+        // And the None case stays None in both directions.
+        let empty = FfiSummaryRequest::from(SummaryRequest {
+            messages_to_summarize: Vec::new(),
+            instruction: "summarize".into(),
+            last_message_id: "m9".into(),
+            trigger: crate::events::CompactionTrigger::Preflight,
+            focus_instruction: None,
+            history_ref: None,
+            state_ledger_snapshot: None,
+        });
+        assert!(empty.state_ledger_snapshot.is_none());
+    }
+
+    #[test]
+    fn tool_result_record_drops_blanks_and_canonicalizes_names() {
+        // ENC-308 item 11: blank activated names keep the documented
+        // drop; real names canonicalize through ToolName::new and land.
+        let record = tool_result_record(FfiToolResultRecord {
+            call_id: "c1".into(),
+            result_json: "{}".into(),
+            truncated: false,
+            soft_failure: false,
+            activated_tool_names: vec![
+                String::new(),
+                "   ".into(),
+                "Web Search".into(),
+                "read-file".into(),
+            ],
+        })
+        .expect("blanks drop, valid names convert");
+        let names: Vec<String> = record
+            .activated_tool_names
+            .iter()
+            .map(|n| n.as_str().to_string())
+            .collect();
+        assert_eq!(names, vec!["web_search", "read_file"]);
+        assert_eq!(record.call_id, "c1");
     }
 }

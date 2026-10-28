@@ -23,13 +23,14 @@ pub use stream_gate::{
 };
 pub use types::{
     AgentException, FfiAgentAction, FfiAgentConfig, FfiAgentEvent, FfiAgentMessage, FfiAgentRole,
-    FfiCompactionBoundary, FfiCompactionEvent, FfiCompactionTier, FfiCompactionTrigger,
-    FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind, FfiFinishReason,
-    FfiIncludedFile, FfiManualCompactRequest, FfiManualCompactResult, FfiModelRequest,
-    FfiModelResponse, FfiProviderContextSnapshot, FfiRawToolCall, FfiSessionCapabilities,
-    FfiSessionContext, FfiSessionIoParams, FfiSummaryRequest, FfiSummaryResult, FfiToolCallFormat,
-    FfiToolCallRecord, FfiToolParseBatch, FfiToolParseFailure, FfiToolParseFailureReason,
-    FfiToolParseField, FfiToolResultRecord, FfiToolSchemaEntry,
+    FfiArtifactStateAnchor, FfiCompactionBoundary, FfiCompactionEvent, FfiCompactionTier,
+    FfiCompactionTrigger, FfiContextPolicyTier, FfiContextReference, FfiContextReferenceKind,
+    FfiFinishReason, FfiIncludedFile, FfiManualCompactRequest, FfiManualCompactResult,
+    FfiModelRequest, FfiModelResponse, FfiProviderContextSnapshot, FfiRawToolCall,
+    FfiSessionCapabilities, FfiSessionContext, FfiSessionIoParams, FfiStateLedger,
+    FfiSummaryRequest, FfiSummaryResult, FfiToolCallFormat, FfiToolCallRecord, FfiToolParseBatch,
+    FfiToolParseFailure, FfiToolParseFailureReason, FfiToolParseField, FfiToolResultRecord,
+    FfiToolSchemaEntry,
 };
 
 use std::sync::Arc;
@@ -151,11 +152,22 @@ impl FfiAgentEngine {
             .submit_model_turn_failure(&session.handle, report.into());
     }
 
-    pub fn submit_tool_results(&self, session: &FfiSession, results: Vec<FfiToolResultRecord>) {
-        self.inner.submit_tool_results(
-            &session.handle,
-            results.into_iter().map(Into::into).collect(),
-        );
+    /// ENC-308 item 11: the conversion is fallible — a non-blank invalid
+    /// activated tool name in any record is an `AgentException` and
+    /// nothing is submitted (conversion of the whole batch precedes the
+    /// engine call, exactly as `create_session` collects strictly before
+    /// constructing).
+    pub fn submit_tool_results(
+        &self,
+        session: &FfiSession,
+        results: Vec<FfiToolResultRecord>,
+    ) -> Result<(), AgentException> {
+        let results = results
+            .into_iter()
+            .map(types::tool_result_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.submit_tool_results(&session.handle, results);
+        Ok(())
     }
 
     pub fn submit_summary(&self, session: &FfiSession, summary: FfiSummaryResult) {

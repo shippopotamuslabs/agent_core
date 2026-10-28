@@ -12,8 +12,6 @@
 
 use std::collections::HashMap;
 
-use serde_json::json;
-
 use super::gate_exemption_for;
 use crate::agent_tool_budget::inject_tool_budget_into_session;
 use crate::catalog::ToolCatalog;
@@ -67,17 +65,17 @@ pub(super) fn append_assistant_message(
     );
     let mut metadata = MessageMeta::new();
     if let Some(ingest_obj) = ingest_metadata.as_object() {
+        // The ingest metadata object is engine-produced with a closed,
+        // engine-owned key set (today only `envelope_ingest`); absorb
+        // routes each key into its typed field (ENC-308).
         for (k, v) in ingest_obj {
-            metadata.set_extra(k.clone(), v.clone());
+            metadata.absorb(k.clone(), v.clone());
         }
     }
     if let Some(reasoning_content) =
         provider_reasoning_content.filter(|content| !content.is_empty())
     {
-        metadata.set_extra(
-            "provider_reasoning",
-            json!({ "reasoning_content": reasoning_content }),
-        );
+        metadata = metadata.with_provider_reasoning_content(reasoning_content);
     }
     session.messages.push(AgentMessage {
         id: assistant_id,

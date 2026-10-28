@@ -13,41 +13,76 @@ pub enum AgentRole {
     CompactSummary,
 }
 
-/// Typed view over `AgentMessage.metadata`.
+/// Typed view over `AgentMessage.metadata` — a CLOSED schema (ENC-308
+/// item 12): every key the engine understands is a typed field, including
+/// the well-known engine keys that used to hide in the flattened `extra`
+/// catch-all (`agent_tool_budget`, `truncated`, `envelope_*`,
+/// `tools_blocked_*`, `provider_reasoning`). The catch-all is deleted:
+/// host annotations stay host-side and are never round-tripped through
+/// the engine (Sean's closed-boundary ruling).
 ///
-/// Known keys are materialized as typed fields; every other host key is
-/// preserved verbatim in the flattened `extra` catch-all so unknown host
-/// dialects round-trip byte-compatibly. Serialization emits keys in sorted
-/// order (serde_json's map ordering), exactly as plain `Value` objects did,
-/// so persisted sessions keep their shape.
+/// The two read seams differ deliberately (decision D2):
+/// - Stored-state reads (the `Deserialize` impl, snapshot import) are
+///   tolerant: unknown keys, and known keys whose values do not fit
+///   their typed field, are dropped at the seam (see `absorb`); every
+///   well-formed engine-owned value survives.
+/// - FFI ingress ([`MessageMeta::from_json_str_strict`]) is strict: an
+///   unknown key, or a known key whose value does not fit its field, is
+///   an error naming the key.
 ///
-/// Deserialization is lenient per field (see `absorb`): a known key whose
-/// value does not fit its typed field is preserved verbatim in `extra`
-/// instead of discarding the whole metadata object, and a known key never
-/// lives in both a typed field and `extra` at once, so serialization never
-/// emits a key twice.
-#[derive(Debug, Clone, Serialize)]
+/// Serialization emits keys in sorted order (serde_json's map ordering),
+/// exactly as plain `Value` objects and the old flattened catch-all did,
+/// so persisted sessions keep their byte shape.
+#[derive(Debug, Clone, Default)]
 pub struct MessageMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
     call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     raw_tool_calls: Vec<RawToolCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     superseded: Option<bool>,
     /// ENC-293: set when this message's content is a tool-output spill
     /// envelope (see `compact::tool_spill`). The spill exemption reads this
     /// flag instead of sniffing content for the envelope marker.
-    #[serde(skip_serializing_if = "Option::is_none")]
     spilled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     rewrite_of: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     compaction_tier: Option<String>,
-    /// Unknown host keys, round-tripped verbatim.
-    #[serde(flatten)]
-    extra: serde_json::Map<String, serde_json::Value>,
+    // -- Well-known engine keys, promoted from the catch-all (ENC-308). --
+    agent_tool_budget: Option<bool>,
+    truncated: Option<bool>,
+    envelope_ingest: Option<String>,
+    envelope_parse_failure: Option<bool>,
+    tools_blocked_fallback: Option<bool>,
+    tools_blocked_nudge: Option<bool>,
+    provider_reasoning: Option<ProviderReasoning>,
+}
+
+/// The `provider_reasoning` payload: provider reasoning content captured
+/// at model-response ingest. A closed object carrying the single sub-key
+/// the engine reads and writes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderReasoning {
+    reasoning_content: String,
+}
+
+impl Serialize for MessageMeta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.to_canonical_value().serialize(serializer)
+    }
+}
+
+/// What happened to one host-provided key in [`MessageMeta::absorb`]:
+/// the tolerant stored-state path drops `Misfit`/`Unknown` keys, the
+/// strict FFI path rejects them by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbsorbOutcome {
+    /// The value landed in its typed field.
+    Landed,
+    /// A known key whose value does not fit its typed field.
+    Misfit,
+    /// A key outside the closed schema.
+    Unknown,
 }
 
 impl<'de> Deserialize<'de> for MessageMeta {
@@ -61,27 +96,12 @@ impl<'de> Deserialize<'de> for MessageMeta {
     }
 }
 
-impl Default for MessageMeta {
-    fn default() -> Self {
-        Self {
-            call_id: None,
-            tool_name: None,
-            raw_tool_calls: Vec::new(),
-            superseded: None,
-            spilled: None,
-            rewrite_of: None,
-            compaction_tier: None,
-            extra: serde_json::Map::new(),
-        }
-    }
-}
-
 impl MessageMeta {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// True when no typed field is set and no unknown host keys are stored.
+    /// True when no field is set.
     /// Empty metadata serializes as JSON `null`, matching the pre-typed default.
     pub fn is_empty(&self) -> bool {
         self.call_id.is_none()
@@ -91,7 +111,70 @@ impl MessageMeta {
             && self.spilled.is_none()
             && self.rewrite_of.is_none()
             && self.compaction_tier.is_none()
-            && self.extra.is_empty()
+            && self.agent_tool_budget.is_none()
+            && self.truncated.is_none()
+            && self.envelope_ingest.is_none()
+            && self.envelope_parse_failure.is_none()
+            && self.tools_blocked_fallback.is_none()
+            && self.tools_blocked_nudge.is_none()
+            && self.provider_reasoning.is_none()
+    }
+
+    /// The canonical JSON object for this metadata: one entry per set
+    /// field, keys in serde_json's sorted map order — byte-identical to
+    /// what the pre-ENC-308 flattened catch-all emitted for the same
+    /// logical metadata.
+    fn to_canonical_value(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        if let Some(v) = &self.call_id {
+            map.insert("call_id".into(), v.clone().into());
+        }
+        if let Some(v) = &self.tool_name {
+            map.insert("tool_name".into(), v.clone().into());
+        }
+        if !self.raw_tool_calls.is_empty() {
+            map.insert(
+                "raw_tool_calls".into(),
+                serde_json::to_value(&self.raw_tool_calls).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(v) = self.superseded {
+            map.insert("superseded".into(), v.into());
+        }
+        if let Some(v) = self.spilled {
+            map.insert("spilled".into(), v.into());
+        }
+        if let Some(v) = &self.rewrite_of {
+            map.insert("rewrite_of".into(), v.clone().into());
+        }
+        if let Some(v) = &self.compaction_tier {
+            map.insert("compaction_tier".into(), v.clone().into());
+        }
+        if let Some(v) = self.agent_tool_budget {
+            map.insert("agent_tool_budget".into(), v.into());
+        }
+        if let Some(v) = self.truncated {
+            map.insert("truncated".into(), v.into());
+        }
+        if let Some(v) = &self.envelope_ingest {
+            map.insert("envelope_ingest".into(), v.clone().into());
+        }
+        if let Some(v) = self.envelope_parse_failure {
+            map.insert("envelope_parse_failure".into(), v.into());
+        }
+        if let Some(v) = self.tools_blocked_fallback {
+            map.insert("tools_blocked_fallback".into(), v.into());
+        }
+        if let Some(v) = self.tools_blocked_nudge {
+            map.insert("tools_blocked_nudge".into(), v.into());
+        }
+        if let Some(v) = &self.provider_reasoning {
+            map.insert(
+                "provider_reasoning".into(),
+                serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
     }
 
     pub fn call_id(&self) -> Option<&str> {
@@ -105,12 +188,10 @@ impl MessageMeta {
 
     pub fn set_call_id(&mut self, call_id: impl Into<String>) {
         self.call_id = Some(call_id.into());
-        self.extra.remove("call_id");
     }
 
     /// Canonical tool name. The legacy `name` dialect key is normalized
-    /// into this field on the read path (see `absorb`), so reads never
-    /// consult the catch-all.
+    /// into this field on the read path (see `absorb`).
     pub fn tool_name(&self) -> Option<&str> {
         self.tool_name.as_deref()
     }
@@ -122,7 +203,6 @@ impl MessageMeta {
 
     pub fn set_tool_name(&mut self, tool_name: impl Into<String>) {
         self.tool_name = Some(tool_name.into());
-        self.extra.remove("tool_name");
     }
 
     pub fn raw_tool_calls(&self) -> &[RawToolCall] {
@@ -131,7 +211,6 @@ impl MessageMeta {
 
     pub fn set_raw_tool_calls(&mut self, calls: Vec<RawToolCall>) {
         self.raw_tool_calls = calls;
-        self.extra.remove("raw_tool_calls");
     }
 
     pub fn with_raw_tool_calls(mut self, calls: Vec<RawToolCall>) -> Self {
@@ -145,7 +224,6 @@ impl MessageMeta {
 
     pub fn mark_superseded(&mut self) {
         self.superseded = Some(true);
-        self.extra.remove("superseded");
     }
 
     /// True when this message's content is a tool-output spill envelope.
@@ -164,7 +242,6 @@ impl MessageMeta {
 
     pub fn with_rewrite_of(mut self, rewrite_of: impl Into<String>) -> Self {
         self.rewrite_of = Some(rewrite_of.into());
-        self.extra.remove("rewrite_of");
         self
     }
 
@@ -179,174 +256,210 @@ impl MessageMeta {
 
     pub fn set_compaction_tier(&mut self, tier: impl Into<String>) {
         self.compaction_tier = Some(tier.into());
-        self.extra.remove("compaction_tier");
-    }
-
-    /// Read an unknown host key from the catch-all.
-    pub fn extra(&self, key: &str) -> Option<&serde_json::Value> {
-        self.extra.get(key)
-    }
-
-    /// Store a host key (builder). Known keys route to their typed field
-    /// when the value fits (see `absorb`); anything else is stored verbatim
-    /// in the catch-all.
-    pub fn with_extra(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.set_extra(key, value);
-        self
-    }
-
-    /// Store a host key. Routes through `absorb`, so a known key can never
-    /// shadow its typed field inside the catch-all.
-    pub fn set_extra(&mut self, key: impl Into<String>, value: serde_json::Value) {
-        self.absorb(key.into(), value);
     }
 
     /// Single entry point for host-provided keys. A known key whose value
-    /// fits its typed field lands there; a known key whose value does not
-    /// fit is preserved verbatim in the catch-all (never silently dropped,
-    /// and never duplicated alongside an already-set typed field). The
-    /// legacy `name` dialect key normalizes into `tool_name`. Unknown keys
-    /// are stored verbatim.
-    fn absorb(&mut self, key: String, value: serde_json::Value) {
+    /// fits its typed field lands there; the legacy `name` dialect key
+    /// normalizes into `tool_name` (for JSON objects the two keys iterate
+    /// in sorted order, so an explicit `tool_name` still wins, as it did
+    /// when `name` was guarded on the field being unset). Reports the
+    /// outcome so callers choose their seam: the tolerant stored-state
+    /// path ([`MessageMeta::from_value`]) drops `Misfit`/`Unknown` keys;
+    /// the strict FFI path ([`MessageMeta::from_json_str_strict`])
+    /// rejects them by name. Engine-internal producers also route
+    /// through here (e.g. the ingest-metadata copy in `model_intake`):
+    /// their key set is closed and engine-owned, so every key lands.
+    pub(crate) fn absorb(&mut self, key: String, value: serde_json::Value) -> AbsorbOutcome {
+        use AbsorbOutcome::*;
         match key.as_str() {
             "call_id" => match value {
-                serde_json::Value::String(s) => self.set_call_id(s),
-                _ if self.call_id.is_none() => {
-                    self.extra.insert(key, value);
+                serde_json::Value::String(s) => {
+                    self.set_call_id(s);
+                    Landed
                 }
-                _ => {}
+                _ => Misfit,
             },
             "tool_name" => match value {
-                serde_json::Value::String(s) => self.set_tool_name(s),
-                _ if self.tool_name.is_none() => {
-                    self.extra.insert(key, value);
+                serde_json::Value::String(s) => {
+                    self.set_tool_name(s);
+                    Landed
                 }
-                _ => {}
+                _ => Misfit,
             },
-            "raw_tool_calls" => match serde_json::from_value::<Vec<RawToolCall>>(value.clone()) {
-                Ok(calls) => self.set_raw_tool_calls(calls),
-                Err(_) if self.raw_tool_calls.is_empty() => {
-                    self.extra.insert(key, value);
+            "raw_tool_calls" => match serde_json::from_value::<Vec<RawToolCall>>(value) {
+                Ok(calls) => {
+                    self.set_raw_tool_calls(calls);
+                    Landed
                 }
-                Err(_) => {}
+                Err(_) => Misfit,
             },
             "superseded" => match value {
                 serde_json::Value::Bool(b) => {
                     self.superseded = Some(b);
-                    self.extra.remove("superseded");
+                    Landed
                 }
-                _ if self.superseded.is_none() => {
-                    self.extra.insert(key, value);
+                _ => Misfit,
+            },
+            "spilled" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.spilled = Some(b);
+                    Landed
                 }
-                _ => {}
+                _ => Misfit,
             },
             "rewrite_of" => match value {
                 serde_json::Value::String(s) => {
                     self.rewrite_of = Some(s);
-                    self.extra.remove("rewrite_of");
+                    Landed
                 }
-                _ if self.rewrite_of.is_none() => {
-                    self.extra.insert(key, value);
-                }
-                _ => {}
+                _ => Misfit,
             },
             "compaction_tier" => match value {
-                serde_json::Value::String(s) => self.set_compaction_tier(s),
-                _ if self.compaction_tier.is_none() => {
-                    self.extra.insert(key, value);
+                serde_json::Value::String(s) => {
+                    self.set_compaction_tier(s);
+                    Landed
                 }
-                _ => {}
+                _ => Misfit,
             },
-            "name" if self.tool_name.is_none() => match value {
-                serde_json::Value::String(s) => self.set_tool_name(s),
-                _ => {
-                    self.extra.insert(key, value);
+            "name" => match value {
+                serde_json::Value::String(s) => {
+                    self.set_tool_name(s);
+                    Landed
                 }
+                _ => Misfit,
             },
-            _ => {
-                self.extra.insert(key, value);
-            }
+            "agent_tool_budget" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.agent_tool_budget = Some(b);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "truncated" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.truncated = Some(b);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "envelope_ingest" => match value {
+                serde_json::Value::String(s) => {
+                    self.envelope_ingest = Some(s);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "envelope_parse_failure" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.envelope_parse_failure = Some(b);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "tools_blocked_fallback" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.tools_blocked_fallback = Some(b);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "tools_blocked_nudge" => match value {
+                serde_json::Value::Bool(b) => {
+                    self.tools_blocked_nudge = Some(b);
+                    Landed
+                }
+                _ => Misfit,
+            },
+            "provider_reasoning" => match serde_json::from_value::<ProviderReasoning>(value) {
+                Ok(reasoning) => {
+                    self.provider_reasoning = Some(reasoning);
+                    Landed
+                }
+                Err(_) => Misfit,
+            },
+            _ => Unknown,
         }
     }
 
-    // -- Well-known host keys: stored in the catch-all, accessed typed. --
+    // -- Well-known engine keys: typed fields since ENC-308 (they lived
+    // in the catch-all before, behind these same accessors). --
 
     /// True when this message is the synthetic agent-tool-budget row.
     pub fn agent_tool_budget(&self) -> bool {
-        self.extra
-            .get("agent_tool_budget")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.agent_tool_budget.unwrap_or(false)
     }
 
     /// Mark this message as the synthetic agent-tool-budget row.
     pub fn with_agent_tool_budget(mut self) -> Self {
-        self.set_extra("agent_tool_budget", serde_json::json!(true));
+        self.agent_tool_budget = Some(true);
         self
     }
 
     /// True when the tool result payload was truncated.
     pub fn truncated(&self) -> bool {
-        self.extra
-            .get("truncated")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.truncated.unwrap_or(false)
     }
 
     /// Record whether the tool result payload was truncated.
     pub fn with_truncated(mut self, truncated: bool) -> Self {
-        self.set_extra("truncated", serde_json::json!(truncated));
+        self.truncated = Some(truncated);
         self
     }
 
     /// Envelope ingest outcome recorded on an assistant message
     /// (e.g. "failed", "tools_blocked", "reified").
     pub fn envelope_ingest(&self) -> Option<&str> {
-        self.extra.get("envelope_ingest").and_then(|v| v.as_str())
+        self.envelope_ingest.as_deref()
     }
 
     /// Record the envelope ingest outcome on this message.
     pub fn with_envelope_ingest(mut self, state: impl Into<String>) -> Self {
-        self.set_extra("envelope_ingest", serde_json::json!(state.into()));
+        self.envelope_ingest = Some(state.into());
         self
     }
 
     /// Mark that envelope parsing failed for this message.
     pub fn with_envelope_parse_failure(mut self) -> Self {
-        self.set_extra("envelope_parse_failure", serde_json::json!(true));
+        self.envelope_parse_failure = Some(true);
         self
     }
 
     /// Mark that this message is the tools-blocked fallback notice.
     pub fn with_tools_blocked_fallback(mut self) -> Self {
-        self.set_extra("tools_blocked_fallback", serde_json::json!(true));
+        self.tools_blocked_fallback = Some(true);
         self
     }
 
     /// True when this message is the tools-blocked nudge row.
     pub fn tools_blocked_nudge(&self) -> bool {
-        self.extra
-            .get("tools_blocked_nudge")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self.tools_blocked_nudge.unwrap_or(false)
     }
 
     /// Mark this message as the tools-blocked nudge row.
     pub fn with_tools_blocked_nudge(mut self) -> Self {
-        self.set_extra("tools_blocked_nudge", serde_json::json!(true));
+        self.tools_blocked_nudge = Some(true);
         self
     }
 
     /// Provider reasoning content captured at model-response ingest.
     pub fn provider_reasoning_content(&self) -> Option<&str> {
-        self.extra
-            .get("provider_reasoning")?
-            .get("reasoning_content")?
-            .as_str()
+        self.provider_reasoning
+            .as_ref()
+            .map(|reasoning| reasoning.reasoning_content.as_str())
     }
 
-    /// Build from an untyped JSON value. `null` (and missing) maps to empty;
-    /// objects split known keys into typed fields via `absorb`; anything
+    /// Record provider reasoning content on this message.
+    pub fn with_provider_reasoning_content(mut self, content: impl Into<String>) -> Self {
+        self.provider_reasoning = Some(ProviderReasoning {
+            reasoning_content: content.into(),
+        });
+        self
+    }
+
+    /// Build from an untyped JSON value — the TOLERANT stored-state read
+    /// (decision D2). `null` (and missing) maps to empty; objects route
+    /// known keys into typed fields via `absorb`; unknown keys and
+    /// ill-typed values for known keys are dropped at this seam; anything
     /// else maps to empty (only objects and null were ever written by the
     /// engine).
     pub fn from_value(value: serde_json::Value) -> Self {
@@ -359,6 +472,32 @@ impl MessageMeta {
         meta
     }
 
+    /// Strict sibling of [`Self::from_value`] (ENC-308): the closed
+    /// schema enforced — an unknown key, or a known key whose value does
+    /// not fit its field, is an error naming the key.
+    fn from_value_strict(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
+        let mut meta = Self::default();
+        if let serde_json::Value::Object(map) = value {
+            for (key, val) in map {
+                match meta.absorb(key.clone(), val) {
+                    AbsorbOutcome::Landed => {}
+                    AbsorbOutcome::Unknown => {
+                        return Err(serde_json::Error::custom(format!(
+                            "unknown message metadata key: {key}"
+                        )));
+                    }
+                    AbsorbOutcome::Misfit => {
+                        return Err(serde_json::Error::custom(format!(
+                            "message metadata key {key} has a value that does not fit its field"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(meta)
+    }
+
     /// Parse a JSON-encoded metadata blob (e.g. across FFI). Unparseable input
     /// maps to empty, matching the previous `unwrap_or(Value::Null)` behavior.
     pub fn from_json_str(s: &str) -> Self {
@@ -367,19 +506,22 @@ impl MessageMeta {
             .unwrap_or_default()
     }
 
-    /// Strict sibling of [`Self::from_json_str`] (ENC-305): identical
-    /// per-field handling via [`Self::from_value`], but malformed JSON is a
-    /// `serde_json::Error` instead of a silent empty default. Also strict
-    /// about the top level (ENC-305 fix pass, m1): a value that is neither
-    /// an object nor null is an error, never a silently emptied meta.
-    /// Used on paths where a parse failure must surface as a typed error
-    /// (the per-turn FFI request conversion); [`Self::from_json_str`] is
+    /// Strict sibling of [`Self::from_json_str`] (ENC-305, closed schema
+    /// ENC-308): malformed JSON is a `serde_json::Error` instead of a
+    /// silent empty default; a top level that is neither an object nor
+    /// null is an error, never a silently emptied meta; and the object
+    /// must satisfy the closed schema — unknown keys, and known keys
+    /// whose values do not fit their fields, are errors naming the key
+    /// (see [`MessageMeta::from_value_strict`]). Used on paths where a
+    /// parse failure must surface as a typed error (the per-turn FFI
+    /// request conversion, session creation); [`Self::from_json_str`] is
     /// unchanged.
     pub fn from_json_str_strict(s: &str) -> Result<Self, serde_json::Error> {
         use serde::de::Error as _;
         let value: serde_json::Value = serde_json::from_str(s)?;
         match value {
-            serde_json::Value::Object(_) | serde_json::Value::Null => Ok(Self::from_value(value)),
+            serde_json::Value::Object(_) => Self::from_value_strict(value),
+            serde_json::Value::Null => Ok(Self::default()),
             _ => Err(serde_json::Error::custom(
                 "message metadata must be a JSON object or null",
             )),
@@ -392,7 +534,7 @@ impl MessageMeta {
         if self.is_empty() {
             "null".to_string()
         } else {
-            serde_json::to_string(self).unwrap_or_else(|_| "null".into())
+            self.to_canonical_value().to_string()
         }
     }
 }
@@ -507,20 +649,23 @@ mod tests {
 
     #[test]
     fn agent_message_roundtrip() {
-        let mut extra = MessageMeta::new();
-        extra.set_extra("tag", json!("vision"));
+        let metadata = MessageMeta::from_value(json!({
+            "call_id": "c1",
+            "agent_tool_budget": true,
+        }));
         let msg = AgentMessage {
             id: "msg-1".into(),
             role: AgentRole::User,
             content: "hello".into(),
-            metadata: extra,
+            metadata,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: AgentMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, msg.id);
         assert_eq!(back.role, msg.role);
         assert_eq!(back.content, msg.content);
-        assert_eq!(back.metadata.extra("tag"), Some(&json!("vision")));
+        assert_eq!(back.metadata.call_id(), Some("c1"));
+        assert!(back.metadata.agent_tool_budget());
     }
 
     #[test]
@@ -564,16 +709,115 @@ mod tests {
     }
 
     #[test]
-    fn message_meta_unknown_keys_roundtrip_verbatim() {
+    fn message_meta_unknown_keys_dropped_at_read_seam() {
+        // ENC-308 item 12: the catch-all is gone. A well-known engine key
+        // (`truncated`) lands in its typed field; a genuinely unknown host
+        // key (`vision_ref`) is dropped at the tolerant read seam and
+        // never re-serialized.
         let raw = json!({
             "tool_name": "web_search",
             "truncated": true,
             "vision_ref": "asset-1",
         });
-        let meta = MessageMeta::from_value(raw.clone());
+        let meta = MessageMeta::from_value(raw);
         assert_eq!(meta.tool_name(), Some("web_search"));
-        assert_eq!(meta.extra("truncated"), Some(&json!(true)));
+        assert!(meta.truncated());
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "tool_name": "web_search", "truncated": true })
+        );
+    }
+
+    #[test]
+    fn message_meta_well_known_engine_keys_roundtrip() {
+        // The keys that used to hide in the catch-all are typed fields
+        // now; every one round-trips through the stored-state path.
+        let raw = json!({
+            "agent_tool_budget": true,
+            "truncated": false,
+            "envelope_ingest": "reified",
+            "envelope_parse_failure": true,
+            "tools_blocked_fallback": true,
+            "tools_blocked_nudge": true,
+            "provider_reasoning": { "reasoning_content": "because" },
+        });
+        let meta = MessageMeta::from_value(raw.clone());
+        assert!(meta.agent_tool_budget());
+        assert!(!meta.truncated());
+        assert_eq!(meta.envelope_ingest(), Some("reified"));
+        assert!(meta.tools_blocked_nudge());
+        assert_eq!(meta.provider_reasoning_content(), Some("because"));
         assert_eq!(serde_json::to_value(&meta).unwrap(), raw);
+    }
+
+    #[test]
+    fn message_meta_serialization_byte_shape_is_sorted_and_stable() {
+        // Byte-stability guard: a fully populated meta encodes with keys
+        // in sorted order, exactly as the pre-ENC-308 flattened catch-all
+        // (and plain Value objects before it) emitted them.
+        let meta = MessageMeta::new()
+            .with_call_id("c1")
+            .with_tool_name("web_search")
+            .with_rewrite_of("m0")
+            .with_compaction_tier("micro")
+            .with_agent_tool_budget()
+            .with_truncated(true)
+            .with_envelope_ingest("failed")
+            .with_envelope_parse_failure()
+            .with_tools_blocked_nudge()
+            .with_provider_reasoning_content("r");
+        let mut meta = meta;
+        meta.mark_superseded();
+        meta.mark_spilled();
+        assert_eq!(
+            meta.to_json_string(),
+            concat!(
+                "{\"agent_tool_budget\":true,\"call_id\":\"c1\",",
+                "\"compaction_tier\":\"micro\",\"envelope_ingest\":\"failed\",",
+                "\"envelope_parse_failure\":true,",
+                "\"provider_reasoning\":{\"reasoning_content\":\"r\"},",
+                "\"rewrite_of\":\"m0\",\"spilled\":true,\"superseded\":true,",
+                "\"tool_name\":\"web_search\",\"tools_blocked_nudge\":true,",
+                "\"truncated\":true}"
+            )
+        );
+    }
+
+    #[test]
+    fn agent_message_legacy_row_with_junk_keys_loads_typed_fields() {
+        // ENC-308 acceptance (D2): a stored message written by a
+        // pre-close build — typed keys, well-known engine keys, and junk
+        // host keys side by side — loads through the real deserialize
+        // path with every engine-owned value intact; the junk is gone on
+        // re-serialize. `spilled` rides along: before ENC-308 the read
+        // path parked it in the catch-all and `is_spilled()` read false
+        // on restored messages; absorb now routes it to its field.
+        let stored = r#"{
+            "id": "m7",
+            "role": "tool",
+            "content": "spill envelope",
+            "metadata": {
+                "call_id": "c9",
+                "spilled": true,
+                "superseded": false,
+                "agent_tool_budget": true,
+                "envelope_ingest": "reified",
+                "vision_ref": "asset-1",
+                "host_debug": { "trace": "abc" }
+            }
+        }"#;
+        let msg: AgentMessage = serde_json::from_str(stored).unwrap();
+        assert_eq!(msg.metadata.call_id(), Some("c9"));
+        assert!(msg.metadata.is_spilled());
+        assert!(!msg.metadata.is_superseded());
+        assert!(msg.metadata.agent_tool_budget());
+        assert_eq!(msg.metadata.envelope_ingest(), Some("reified"));
+        let value = serde_json::to_value(&msg).unwrap();
+        let metadata = value["metadata"].as_object().unwrap();
+        assert!(!metadata.contains_key("vision_ref"));
+        assert!(!metadata.contains_key("host_debug"));
+        assert_eq!(metadata["spilled"], json!(true));
+        assert_eq!(metadata["call_id"], json!("c9"));
     }
 
     #[test]
@@ -588,49 +832,65 @@ mod tests {
     }
 
     #[test]
-    fn message_meta_malformed_known_field_preserves_the_rest() {
+    fn message_meta_malformed_known_field_dropped_rest_intact() {
         let meta = MessageMeta::from_value(json!({
             "call_id": 42,
             "superseded": true,
             "custom": "x",
         }));
-        // One malformed field must not discard the whole metadata object.
+        // One malformed field must not discard the whole metadata object:
+        // the well-formed remainder still lands. The malformed value
+        // itself is dropped at the seam (pre-ENC-308 it was preserved
+        // verbatim in the catch-all; the catch-all is deleted).
         assert!(meta.is_superseded());
-        assert_eq!(meta.extra("custom"), Some(&json!("x")));
-        // The malformed value itself is preserved verbatim, not dropped.
         assert_eq!(meta.call_id(), None);
-        assert_eq!(meta.extra("call_id"), Some(&json!(42)));
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "superseded": true })
+        );
     }
 
     #[test]
-    fn message_meta_malformed_raw_tool_calls_preserved() {
+    fn message_meta_malformed_raw_tool_calls_dropped() {
         let meta = MessageMeta::from_value(json!({
             "raw_tool_calls": [{ "bogus": 1 }],
             "tool_name": "web_search",
         }));
         assert_eq!(meta.tool_name(), Some("web_search"));
         assert!(meta.raw_tool_calls().is_empty());
-        assert_eq!(meta.extra("raw_tool_calls"), Some(&json!([{ "bogus": 1 }])));
-    }
-
-    #[test]
-    fn message_meta_set_extra_routes_known_keys_to_typed_fields() {
-        let mut meta = MessageMeta::new();
-        meta.set_extra("call_id", json!("c9"));
-        assert_eq!(meta.call_id(), Some("c9"));
-        assert_eq!(meta.extra("call_id"), None);
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),
-            json!({ "call_id": "c9" })
+            json!({ "tool_name": "web_search" })
         );
     }
 
     #[test]
-    fn message_meta_typed_setter_clears_preserved_shadow() {
+    fn message_meta_absorb_routes_and_reports_outcomes() {
+        let mut meta = MessageMeta::new();
+        assert_eq!(
+            meta.absorb("call_id".into(), json!("c9")),
+            AbsorbOutcome::Landed
+        );
+        assert_eq!(meta.call_id(), Some("c9"));
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            json!({ "call_id": "c9" })
+        );
+        assert_eq!(
+            meta.absorb("vision_ref".into(), json!("asset-1")),
+            AbsorbOutcome::Unknown
+        );
+        assert_eq!(
+            meta.absorb("superseded".into(), json!("yes")),
+            AbsorbOutcome::Misfit
+        );
+    }
+
+    #[test]
+    fn message_meta_misfit_then_typed_setter() {
         let mut meta = MessageMeta::from_value(json!({ "call_id": 42 }));
-        assert_eq!(meta.extra("call_id"), Some(&json!(42)));
+        assert_eq!(meta.call_id(), None);
         meta.set_call_id("c1");
-        assert_eq!(meta.extra("call_id"), None);
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),
             json!({ "call_id": "c1" })
@@ -671,6 +931,34 @@ mod tests {
         assert!(MessageMeta::from_json_str_strict("true").is_err());
         // The lenient path is unchanged.
         assert_eq!(MessageMeta::from_json_str("bogus").to_json_string(), "null");
+    }
+
+    #[test]
+    fn message_meta_strict_rejects_unknown_and_misfit_keys_by_name() {
+        // ENC-308 item 12: the strict FFI ingress path enforces the
+        // closed schema — an unknown host key is an error naming it,
+        // and so is a known key whose value does not fit its field.
+        let err = MessageMeta::from_json_str_strict(r#"{"vision_ref":"asset-1"}"#)
+            .expect_err("unknown key must reject");
+        assert!(
+            err.to_string().contains("vision_ref"),
+            "error names the key: {err}"
+        );
+        let err = MessageMeta::from_json_str_strict(r#"{"call_id":42}"#)
+            .expect_err("misfit value must reject");
+        assert!(
+            err.to_string().contains("call_id"),
+            "error names the key: {err}"
+        );
+        // The well-known engine keys and the legacy `name` dialect are
+        // inside the schema and parse strictly.
+        let meta = MessageMeta::from_json_str_strict(
+            r#"{"name":"web_search","agent_tool_budget":true,"spilled":true}"#,
+        )
+        .expect("schema keys must parse");
+        assert_eq!(meta.tool_name(), Some("web_search"));
+        assert!(meta.agent_tool_budget());
+        assert!(meta.is_spilled());
     }
 
     #[test]

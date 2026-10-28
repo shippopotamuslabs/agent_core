@@ -114,12 +114,7 @@ fn count_budget_prose_tool_messages(messages: &[AgentMessage]) -> usize {
 }
 
 fn is_agent_tool_budget_message(message: &AgentMessage) -> bool {
-    message.role == AgentRole::Tool
-        && message
-            .metadata
-            .extra("agent_tool_budget")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+    message.role == AgentRole::Tool && message.metadata.agent_tool_budget()
 }
 
 fn synthetic_budget_messages(messages: &[AgentMessage]) -> Vec<&AgentMessage> {
