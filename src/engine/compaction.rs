@@ -1,19 +1,21 @@
 //! Compaction orchestration (ENC-286 slice 6; FRG-47 staging; ENC-306).
 //!
-//! Compaction's persistent per-turn state lives in [`CompactionState`],
-//! owned by `InnerSession` as `self.compaction`; per-pass working state
-//! lives in [`CompactionPassState`], owned by `run_compaction_pass` and
-//! lent to the operations that need it. Operations are `InnerSession`
-//! methods defined in this module (the module that owns the state) and
-//! apply their effects directly: the sync spill/snapshot block is the
-//! fused [`InnerSession::sync_spill_pass`]. What remains on the older
-//! bundle idiom for now: the pipeline-outcome decision
-//! (`decide_pipeline_outcome`) and the shared `NeedsHostCall` staging
-//! (`attach_summary_staging`) still take field bundles and return their
-//! decision/effects for the dispatch in `mod.rs` to apply.
+//! Final idiom (ENC-306): compaction's persistent per-turn state lives in
+//! [`CompactionState`], owned by `InnerSession` as `self.compaction`;
+//! per-pass working state lives in [`CompactionPassState`], owned by
+//! `run_compaction_pass` and lent to the operations that need it. The
+//! operations are `InnerSession` methods defined in this module (the
+//! module that owns the state) and apply their effects directly: the
+//! fused sync spill/snapshot pass ([`InnerSession::sync_spill_pass`]),
+//! the pipeline-outcome decision
+//! ([`InnerSession::decide_pipeline_outcome`]), and the shared summary
+//! staging ([`InnerSession::attach_summary_staging`]). The field-bundle
+//! idiom is fully gone from this module: no input/effect bags remain —
+//! only owned per-pass state and plain call-shape values
+//! ([`PipelinePassContext`]).
 //!
-//! `run_compaction_pass` keeps the loop and every phase write. The pure
-//! entry gate lives in `compact::policy` (`should_enter_compaction`).
+//! `run_compaction_pass` keeps the loop. The pure entry gate lives in
+//! `compact::policy` (`should_enter_compaction`).
 
 use super::is_destructive_compaction_tier;
 use super::state::{EnginePhase, InnerSession};
@@ -22,13 +24,11 @@ use crate::budget::{effective_tool_spill_threshold_bytes, exceeds_hard_prompt_ce
 use crate::compact::history_snapshot::snapshot_history_range;
 use crate::compact::tool_spill::spill_tool_messages_in_session;
 use crate::compact::{CompactionContext, CompactionOutcome};
-use crate::context_store::ContextStore;
 use crate::events::{AgentError, AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
 use crate::manual_compact::ManualCompactRequest;
 use crate::message::AgentMessage;
 use crate::session::AgentSession;
-use crate::session::{AgentConfig, Pressure, SessionCapabilities};
-use crate::state_ledger::StateLedger;
+use crate::session::Pressure;
 use crate::tool_semantics::ArtifactSquashSemantics;
 use crate::transcript_revision::record_destructive_compaction_boundary;
 use crate::turn_io::SummaryRequest;
@@ -159,56 +159,124 @@ impl InnerSession {
             self.emit(AgentEvent::CompactionApplied(event));
         }
     }
-}
 
-/// Shared `NeedsHostCall` staging for `run_compaction_pass` and
-/// `request_manual_compact`: replaces the session, snapshots the summary
-/// messages into the context store, and attaches history/ledger refs.
-///
-/// Returns the staged request; the dispatch owns the pending fields, the phase
-/// write, and the `RequestSummary` action.
-pub(super) struct StageSummaryInputs<'a> {
-    pub session: &'a mut AgentSession,
-    pub context_store: &'a mut ContextStore,
-    pub state_ledger: &'a mut StateLedger,
-    pub enable_context_store: bool,
-    pub enable_state_ledger: bool,
-    pub turn_index: u32,
-    pub trigger: CompactionTrigger,
-}
-
-pub(super) fn attach_summary_staging(
-    inputs: StageSummaryInputs<'_>,
-    sess: AgentSession,
-    mut req: SummaryRequest,
-) -> SummaryRequest {
-    let StageSummaryInputs {
-        session,
-        context_store,
-        state_ledger,
-        enable_context_store,
-        enable_state_ledger,
-        turn_index,
-        trigger,
-    } = inputs;
-    *session = sess;
-    if enable_context_store {
-        if let Some(reference) = snapshot_history_range(
-            context_store,
-            &req.messages_to_summarize,
-            trigger,
-            turn_index,
-        ) {
-            if enable_state_ledger {
-                state_ledger.add_history_ref(&reference.id);
+    /// Shared `NeedsHostCall` staging for `run_compaction_pass` and
+    /// `request_manual_compact` (ENC-306 D2): replaces the session with
+    /// the staged one, snapshots the summary messages into the context
+    /// store (attaching the history ref to the request and the state
+    /// ledger), and attaches a state-ledger snapshot to the request.
+    ///
+    /// Returns the staged request; the caller owns the pending fields,
+    /// the phase write, and the `RequestSummary` action.
+    pub(super) fn attach_summary_staging(
+        &mut self,
+        sess: AgentSession,
+        mut req: SummaryRequest,
+        trigger: CompactionTrigger,
+    ) -> SummaryRequest {
+        self.session = sess;
+        if self.config.enable_context_store {
+            if let Some(reference) = snapshot_history_range(
+                &mut self.context_store,
+                &req.messages_to_summarize,
+                trigger,
+                self.turn_index,
+            ) {
+                if self.config.enable_state_ledger {
+                    self.state_ledger.add_history_ref(&reference.id);
+                }
+                req.history_ref = Some(reference.id);
             }
-            req.history_ref = Some(reference.id);
+        }
+        if self.config.enable_state_ledger {
+            req.state_ledger_snapshot = Some(self.state_ledger.clone());
+        }
+        req
+    }
+
+    /// FRG-47 stage (ENC-306 D2/D4): the 4-arm pipeline-outcome match of
+    /// `run_compaction_pass`, applying every effect directly — session
+    /// replace, event push + emit, counters via
+    /// [`CompactionState::record_applied`], pending summary writes, the
+    /// `AwaitingSummary` phase write, and the `NotApplicable` arm's
+    /// boundary recording. Returns [`Flow::Loop`] to run another pipeline
+    /// iteration (the caller carries `pass` across iterations) or
+    /// [`Flow::Done`] with the pass's final action.
+    pub(super) fn decide_pipeline_outcome(
+        &mut self,
+        outcome: CompactionOutcome,
+        pass: &mut CompactionPassState,
+        pass_ctx: PipelinePassContext,
+    ) -> Result<Flow, AgentError> {
+        match outcome {
+            CompactionOutcome::NeedsHostCall(mut req, sess) => {
+                // If we forced MidTurn context for non-ratio compaction,
+                // restore the original trigger in the SummaryRequest.
+                if pass_ctx.forced_by_non_ratio {
+                    req.trigger = pass_ctx.trigger;
+                }
+                // Shared staging: session replace + history/ledger refs.
+                let req = self.attach_summary_staging(sess, req, pass_ctx.trigger);
+                self.pending.summary_req = Some(req.clone());
+                self.pending.summary_ctx = Some(pass_ctx.loop_ctx);
+                self.phase = EnginePhase::AwaitingSummary;
+                Ok(Flow::Done(Some(AgentAction::RequestSummary(req))))
+            }
+            CompactionOutcome::Applied(sess, ev) => {
+                let destructive = is_destructive_compaction_tier(&ev.tier);
+                if destructive {
+                    pass.destructive_tiers.push(ev.tier.clone());
+                }
+                self.compaction.record_applied(destructive);
+                self.session = sess;
+                self.emit(AgentEvent::CompactionApplied(ev.clone()));
+                pass.sync_applied = true;
+                if self.capabilities.kv_fixed {
+                    self.emit(AgentEvent::KvCacheInvalidated {
+                        reason: format!("Compacted: {}", ev.tier),
+                    });
+                }
+                // loop until under threshold or NeedsHostCall / stuck
+                Ok(Flow::Loop)
+            }
+            CompactionOutcome::NotApplicable => {
+                let post_pressure = pass_ctx
+                    .post_pressure
+                    .expect("post pressure for NotApplicable");
+                if exceeds_hard_prompt_ceiling(&post_pressure)
+                    && !pass_ctx.entered_for_long_loop_only
+                    && !pass.sync_applied
+                    && !pass_ctx.defer_compaction_failure
+                {
+                    return Err(AgentError::CompactionFailed {
+                        tier: "pipeline".into(),
+                        reason: "No compaction tier applied while context remains over threshold"
+                            .into(),
+                    });
+                }
+                if pass.sync_applied {
+                    // Inline `emit_post_compact(trigger, None, history_ref, tiers, count)`.
+                    if !pass.destructive_tiers.is_empty() {
+                        let boundary = record_destructive_compaction_boundary(
+                            &mut self.session,
+                            pass_ctx.trigger,
+                            pass.destructive_tiers.clone(),
+                            pass.message_count_before,
+                        );
+                        self.emit(AgentEvent::CompactionBoundary(boundary));
+                    }
+                    self.emit(AgentEvent::PostCompact {
+                        trigger: pass_ctx.trigger,
+                        summary_ref: None,
+                        history_ref: pass.last_history_ref.clone(),
+                        transcript_revision_after: self.session.transcript_revision,
+                    });
+                }
+                Ok(Flow::Done(None))
+            }
+            CompactionOutcome::Failed(err) => Err(err),
         }
     }
-    if enable_state_ledger {
-        req.state_ledger_snapshot = Some(state_ledger.clone());
-    }
-    req
 }
 
 /// Manual-compaction request plumbing shared with the pass dispatch: the
@@ -266,141 +334,28 @@ pub(super) fn last_message_role(messages: &[AgentMessage]) -> Option<crate::mess
     messages.last().map(|m| m.role.clone())
 }
 
-/// FRG-47 stage: the 4-arm pipeline-outcome match of `run_compaction_pass`.
-/// Returns a decision; the dispatch owns the loop and the `Ok`/`Err` return.
-pub(super) struct PipelineOutcomeInputs<'a> {
-    pub session: &'a mut AgentSession,
-    pub config: &'a AgentConfig,
-    pub capabilities: &'a SessionCapabilities,
-    pub context_store: &'a mut ContextStore,
-    pub state_ledger: &'a mut StateLedger,
-    pub events: &'a mut Vec<AgentEvent>,
-    pub pending_summary_req: &'a mut Option<SummaryRequest>,
-    pub pending_summary_ctx: &'a mut Option<CompactionContext>,
-    pub phase: &'a mut EnginePhase,
-    pub turn_index: u32,
+/// Loop-control signal returned by
+/// [`InnerSession::decide_pipeline_outcome`] (ENC-306 D4): the 4-arm
+/// `CompactionOutcome` match exists exactly once, inside the method; this
+/// 2-variant signal is all the pass loop in `run_compaction_pass` needs
+/// to continue or finish. It carries no re-encoded outcome data — every
+/// effect has already been applied by the method.
+pub(super) enum Flow {
+    Loop,
+    Done(Option<AgentAction>),
+}
+
+/// Call-shape data for one pipeline iteration (ENC-306 D4): plain owned
+/// values computed by `run_compaction_pass`'s loop for this iteration —
+/// the trigger, the loop's `CompactionContext`, the entry-gate flags, the
+/// failure-deferral flag, and the post pressure read only for the
+/// `NotApplicable` arm. No borrows and no `InnerSession` mirrors: like
+/// `FireConditionInputs`, this is per-call data, not state.
+pub(super) struct PipelinePassContext {
     pub trigger: CompactionTrigger,
     pub loop_ctx: CompactionContext,
     pub forced_by_non_ratio: bool,
     pub entered_for_long_loop_only: bool,
     pub post_pressure: Option<Pressure>,
-    pub sync_applied: &'a mut bool,
-    pub last_history_ref: &'a mut Option<String>,
-    pub destructive_tiers: &'a mut Vec<CompactionTier>,
-    pub compaction: &'a mut CompactionState,
     pub defer_compaction_failure: bool,
-    pub message_count_before: u32,
-}
-
-pub(super) enum PipelineDecision {
-    ReturnOk(Option<Box<AgentAction>>),
-    ReturnErr(AgentError),
-    LoopAgain,
-}
-
-pub(super) fn decide_pipeline_outcome(
-    inputs: PipelineOutcomeInputs<'_>,
-    outcome: CompactionOutcome,
-) -> PipelineDecision {
-    let PipelineOutcomeInputs {
-        session,
-        config,
-        capabilities,
-        context_store,
-        state_ledger,
-        events,
-        pending_summary_req,
-        pending_summary_ctx,
-        phase,
-        turn_index,
-        trigger,
-        loop_ctx,
-        forced_by_non_ratio,
-        entered_for_long_loop_only,
-        post_pressure,
-        sync_applied,
-        last_history_ref,
-        destructive_tiers,
-        compaction,
-        defer_compaction_failure,
-        message_count_before,
-    } = inputs;
-    match outcome {
-        CompactionOutcome::NeedsHostCall(mut req, sess) => {
-            // If we forced MidTurn context for non-ratio compaction,
-            // restore the original trigger in the SummaryRequest.
-            if forced_by_non_ratio {
-                req.trigger = trigger;
-            }
-            // Shared staging: session replace + history/ledger refs.
-            let req = attach_summary_staging(
-                StageSummaryInputs {
-                    session,
-                    context_store,
-                    state_ledger,
-                    enable_context_store: config.enable_context_store,
-                    enable_state_ledger: config.enable_state_ledger,
-                    turn_index,
-                    trigger,
-                },
-                sess,
-                req,
-            );
-            *pending_summary_req = Some(req.clone());
-            *pending_summary_ctx = Some(loop_ctx);
-            *phase = EnginePhase::AwaitingSummary;
-            PipelineDecision::ReturnOk(Some(Box::new(AgentAction::RequestSummary(req))))
-        }
-        CompactionOutcome::Applied(sess, ev) => {
-            let destructive = is_destructive_compaction_tier(&ev.tier);
-            if destructive {
-                destructive_tiers.push(ev.tier.clone());
-            }
-            compaction.record_applied(destructive);
-            *session = sess;
-            events.push(AgentEvent::CompactionApplied(ev.clone()));
-            *sync_applied = true;
-            if capabilities.kv_fixed {
-                events.push(AgentEvent::KvCacheInvalidated {
-                    reason: format!("Compacted: {}", ev.tier),
-                });
-            }
-            // loop until under threshold or NeedsHostCall / stuck
-            PipelineDecision::LoopAgain
-        }
-        CompactionOutcome::NotApplicable => {
-            let post_pressure = post_pressure.expect("post pressure for NotApplicable");
-            if exceeds_hard_prompt_ceiling(&post_pressure)
-                && !entered_for_long_loop_only
-                && !*sync_applied
-                && !defer_compaction_failure
-            {
-                return PipelineDecision::ReturnErr(AgentError::CompactionFailed {
-                    tier: "pipeline".into(),
-                    reason: "No compaction tier applied while context remains over threshold"
-                        .into(),
-                });
-            }
-            if *sync_applied {
-                // Inline `emit_post_compact(trigger, None, history_ref, tiers, count)`.
-                if !destructive_tiers.is_empty() {
-                    let boundary = record_destructive_compaction_boundary(
-                        session,
-                        trigger,
-                        destructive_tiers.clone(),
-                        message_count_before,
-                    );
-                    events.push(AgentEvent::CompactionBoundary(boundary));
-                }
-                events.push(AgentEvent::PostCompact {
-                    trigger,
-                    summary_ref: None,
-                    history_ref: last_history_ref.clone(),
-                    transcript_revision_after: session.transcript_revision,
-                });
-            }
-            PipelineDecision::ReturnOk(None)
-        }
-        CompactionOutcome::Failed(err) => PipelineDecision::ReturnErr(err),
-    }
 }

@@ -1040,27 +1040,15 @@ impl InnerSession {
         }
     }
 
-    /// Dispatch glue for slice 6: the shared `NeedsHostCall` staging takes a
-    /// field bundle, so construction goes through `&mut InnerSession`.
+    /// Manual-compact entry to the shared `NeedsHostCall` staging, which is
+    /// an `InnerSession` method in the compaction module (ENC-306 D2).
     fn stage_summary_request(
         g: &mut InnerSession,
         sess: AgentSession,
         req: SummaryRequest,
         trigger: CompactionTrigger,
     ) -> SummaryRequest {
-        compaction::attach_summary_staging(
-            compaction::StageSummaryInputs {
-                session: &mut g.session,
-                context_store: &mut g.context_store,
-                state_ledger: &mut g.state_ledger,
-                enable_context_store: g.config.enable_context_store,
-                enable_state_ledger: g.config.enable_state_ledger,
-                turn_index: g.turn_index,
-                trigger,
-            },
-            sess,
-            req,
-        )
+        g.attach_summary_staging(sess, req, trigger)
     }
 
     /// FRG-47: shared empty-summary fallback — re-runs compaction without the
@@ -1292,42 +1280,28 @@ impl InnerSession {
                 &self.config,
                 &effective_plan,
             );
-            // FRG-47: the 4-arm outcome match is a decision stage; the
-            // dispatch owns the loop and the return. Post pressure is read
-            // only for the NotApplicable arm, exactly as before.
+            // FRG-47 / ENC-306 D2+D4: the 4-arm outcome match lives exactly
+            // once, inside `decide_pipeline_outcome`, which applies its
+            // effects directly; the dispatch owns the loop and the return.
+            // Post pressure is read only for the NotApplicable arm, exactly
+            // as before.
             let post_pressure = matches!(outcome, CompactionOutcome::NotApplicable)
                 .then(|| self.estimate_pressure(trigger));
-            match compaction::decide_pipeline_outcome(
-                compaction::PipelineOutcomeInputs {
-                    session: &mut self.session,
-                    config: &self.config,
-                    capabilities: &self.capabilities,
-                    context_store: &mut self.context_store,
-                    state_ledger: &mut self.state_ledger,
-                    events: &mut self.events,
-                    pending_summary_req: &mut self.pending.summary_req,
-                    pending_summary_ctx: &mut self.pending.summary_ctx,
-                    phase: &mut self.phase,
-                    turn_index: self.turn_index,
+            match self.decide_pipeline_outcome(
+                outcome,
+                &mut pass,
+                compaction::PipelinePassContext {
                     trigger,
                     loop_ctx: ctx,
                     forced_by_non_ratio,
                     entered_for_long_loop_only,
                     post_pressure,
-                    sync_applied: &mut pass.sync_applied,
-                    last_history_ref: &mut pass.last_history_ref,
-                    destructive_tiers: &mut pass.destructive_tiers,
-                    compaction: &mut self.compaction,
                     defer_compaction_failure,
-                    message_count_before: pass.message_count_before,
                 },
-                outcome,
             ) {
-                compaction::PipelineDecision::ReturnOk(action) => {
-                    return Ok(action.map(|boxed| *boxed));
-                }
-                compaction::PipelineDecision::ReturnErr(err) => return Err(err),
-                compaction::PipelineDecision::LoopAgain => {}
+                Ok(compaction::Flow::Loop) => continue,
+                Ok(compaction::Flow::Done(action)) => return Ok(action),
+                Err(e) => return Err(e),
             }
         }
     }
