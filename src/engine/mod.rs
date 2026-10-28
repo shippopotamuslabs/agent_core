@@ -1189,7 +1189,7 @@ impl AgentEngine {
             CompactionOutcome::NeedsHostCall(req, sess) => {
                 let req = compaction::apply_manual_focus_instruction(req, &request);
                 // Shared staging: session replace + history/ledger refs.
-                let req = g.attach_summary_staging(sess, req, trigger);
+                let req = g.attach_summary_staging(sess, req);
                 g.pending.summary_req = Some(req.clone());
                 g.pending.summary_ctx = Some(ctx);
                 g.phase = EnginePhase::AwaitingSummary;
@@ -1279,15 +1279,18 @@ impl InnerSession {
     /// summary tier so the next tier can make progress. Owns no phase
     /// transition itself; `run_compaction_pass` does.
     fn retry_without_summary(&mut self, trigger: CompactionTrigger) {
-        self.compaction.set_suppress_summary_tier(true);
-        match self.run_compaction_pass(trigger) {
+        // ENC-308: the suppression set/reset pairing is owned by
+        // CompactionState; this site just brackets the re-run.
+        let previous = self.compaction.begin_summary_tier_suppression();
+        let result = self.run_compaction_pass(trigger);
+        self.compaction.end_summary_tier_suppression(previous);
+        match result {
             Ok(Some(_)) => {}
             Ok(None) => {}
             Err(e) => {
                 self.set_terminal(AgentAction::Failed(e));
             }
         }
-        self.compaction.set_suppress_summary_tier(false);
     }
 
     pub(super) fn set_terminal(&mut self, a: AgentAction) {
@@ -1455,7 +1458,7 @@ impl InnerSession {
                         None,
                         pass.take_history_ref(),
                         pass.destructive_tiers(),
-                        pass.message_count_before(),
+                        pass.message_count_before,
                     );
                 }
                 return Ok(None);

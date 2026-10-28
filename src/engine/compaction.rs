@@ -71,8 +71,9 @@ impl CompactionState {
     }
 
     /// Start a new user turn: zeroes both counters. The suppression flag
-    /// is NOT reset here — it is written only by `retry_without_summary`,
-    /// which sets it for the duration of one re-run.
+    /// is NOT reset here — it is written only through the
+    /// begin/end suppression pair below, driven by
+    /// `retry_without_summary` for the duration of one re-run.
     pub(super) fn begin_turn(&mut self) {
         self.passes_this_turn = 0;
         self.destructive_tiers_this_turn = 0;
@@ -99,21 +100,39 @@ impl CompactionState {
         self.suppress_summary_tier
     }
 
-    pub(super) fn set_suppress_summary_tier(&mut self, suppress: bool) {
-        self.suppress_summary_tier = suppress;
+    /// Begin summary-tier suppression for one re-run; returns the
+    /// previous flag value, which the caller hands back to
+    /// [`CompactionState::end_summary_tier_suppression`] when the re-run
+    /// finishes (ENC-308). The pair owns the flag's write discipline —
+    /// callers no longer set/reset it by hand — and restoring the
+    /// PREVIOUS value (rather than a hard-coded `false`) keeps a nested
+    /// suppression correct.
+    pub(super) fn begin_summary_tier_suppression(&mut self) -> bool {
+        std::mem::replace(&mut self.suppress_summary_tier, true)
+    }
+
+    /// End a suppression begun by
+    /// [`CompactionState::begin_summary_tier_suppression`], restoring
+    /// the flag value that call returned.
+    pub(super) fn end_summary_tier_suppression(&mut self, previous: bool) {
+        self.suppress_summary_tier = previous;
     }
 }
 
 /// Per-pass working state for one `run_compaction_pass` invocation
 /// (ENC-306 D3). Owns its fields outright (no lifetimes, no mirrors of
 /// `InnerSession` fields); constructed by `run_compaction_pass` and lent
-/// `&mut` to the pass operations. Like [`CompactionState`], the fields
-/// stay private and every reader/writer goes through these methods.
+/// `&mut` to the pass operations. The mutable working fields stay
+/// private behind these methods; `message_count_before` is fixed at
+/// construction — it has no writer and no invariant to guard — so it is
+/// a plain field read directly (ENC-308).
 pub(super) struct CompactionPassState {
     sync_applied: bool,
     last_history_ref: Option<String>,
     destructive_tiers: Vec<CompactionTier>,
-    message_count_before: u32,
+    /// Message count captured when the pass began; immutable for the
+    /// pass's lifetime.
+    pub(super) message_count_before: u32,
 }
 
 impl CompactionPassState {
@@ -141,12 +160,11 @@ impl CompactionPassState {
         self.last_history_ref = Some(history_ref);
     }
 
-    pub(super) fn last_history_ref(&self) -> Option<&String> {
-        self.last_history_ref.as_ref()
-    }
-
-    /// Take the remembered history ref, leaving `None` behind (the pass
-    /// loop's early-exit branch hands it to `emit_post_compact`).
+    /// Take the remembered history ref, leaving `None` behind. This is
+    /// the single read path for the ref (ENC-308): both consumers — the
+    /// pass loop's early-exit branch and the pipeline's `NotApplicable`
+    /// arm — hand it to `emit_post_compact` as their last use of the
+    /// pass state, so neither needs a borrowing accessor.
     pub(super) fn take_history_ref(&mut self) -> Option<String> {
         self.last_history_ref.take()
     }
@@ -159,10 +177,6 @@ impl CompactionPassState {
 
     pub(super) fn destructive_tiers(&self) -> &[CompactionTier] {
         &self.destructive_tiers
-    }
-
-    pub(super) fn message_count_before(&self) -> u32 {
-        self.message_count_before
     }
 }
 
@@ -233,6 +247,9 @@ impl InnerSession {
     /// the staged one, snapshots the summary messages into the context
     /// store (attaching the history ref to the request and the state
     /// ledger), and attaches a state-ledger snapshot to the request.
+    /// The snapshot is stamped with the request's own `trigger` — the
+    /// callers have already restored it to the run's trigger, so no
+    /// separate trigger parameter is carried (ENC-308).
     ///
     /// Returns the staged request; the caller owns the pending fields,
     /// the phase write, and the `RequestSummary` action.
@@ -240,14 +257,13 @@ impl InnerSession {
         &mut self,
         sess: AgentSession,
         mut req: SummaryRequest,
-        trigger: CompactionTrigger,
     ) -> SummaryRequest {
         self.session = sess;
         if self.config.enable_context_store {
             if let Some(reference) = snapshot_history_range(
                 &mut self.context_store,
                 &req.messages_to_summarize,
-                trigger,
+                req.trigger,
                 self.turn_index,
             ) {
                 if self.config.enable_state_ledger {
@@ -284,7 +300,7 @@ impl InnerSession {
                     req.trigger = pass_ctx.loop_ctx.trigger;
                 }
                 // Shared staging: session replace + history/ledger refs.
-                let req = self.attach_summary_staging(sess, req, pass_ctx.loop_ctx.trigger);
+                let req = self.attach_summary_staging(sess, req);
                 self.pending.summary_req = Some(req.clone());
                 self.pending.summary_ctx = Some(pass_ctx.loop_ctx);
                 self.phase = EnginePhase::AwaitingSummary;
@@ -326,9 +342,9 @@ impl InnerSession {
                     self.emit_post_compact(
                         pass_ctx.loop_ctx.trigger,
                         None,
-                        pass.last_history_ref().cloned(),
+                        pass.take_history_ref(),
                         pass.destructive_tiers(),
-                        pass.message_count_before(),
+                        pass.message_count_before,
                     );
                 }
                 Ok(Flow::Done(None))
