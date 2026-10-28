@@ -100,3 +100,27 @@ Implementation (chunk B1)
   pre-existing) and was not run there. A2 goldens pass unchanged
   (golden snapshot's session_context is `{}`, no drift).
   Next: chunk B2.
+- B2 COMPLETE (worker report 2026-10-28; orchestrator committed — the
+  worker's reported commits never landed, its changes were all in the
+  working tree; code verified against its on-disk gate logs):
+  item 9 FfiStateLedger + FfiArtifactStateAnchor (all 11 fields, total
+  Froms both directions, both .ok()s dead); item 11 fallible
+  tool_result_record + submit_tool_results -> Result (batch converts
+  before the engine call; blanks drop; non-blank invalid names error —
+  currently unreachable since ToolName::new only fails on blank);
+  item 12 MessageMeta.extra deleted, seven well-known bag keys promoted
+  to typed fields, absorb() is the single routing table (strict ingress
+  errors naming the key; stored reads tolerate-and-drop), byte-stable
+  manual Serialize pinned by literal test.
+  LATENT BUG FIXED en route: absorb had no "spilled" arm — restored
+  sessions lost is_spilled() and thus the spill exemption; now routed
+  to its field and pinned by the legacy-row test.
+  Gates (worker logs ~/workspace/tmp/enc308-b2-*.log): default full
+  suite 0 failed (~720 passed); no-default targeted 290/0. fmt/clippy
+  clean per worker logs, re-verified by orchestrator pre-commit.
+  ENC-294 deltas: FfiSummaryRequest carries FfiStateLedger;
+  submit_tool_results is fallible; FfiAgentAction RequestSummary
+  variant grew (scoped clippy allow — UniFFI cannot Box records in
+  enum variants); MessageMeta schema closed (unknown keys rejected at
+  FFI ingress, dropped at stored reads).
+  Next: chunk C.
