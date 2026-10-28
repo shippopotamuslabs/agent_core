@@ -25,7 +25,7 @@ Implementation
     validate-only re-sync at session creation); merge_catalog_json +
     load_semantics_with_session_catalog deleted; guards re-source to
     ToolCatalog presence; rendered_tool_catalog renamed rendered_runtime_tools.
-  - Chunk 2 (see commit below): FFI typed tree (D1–D3). New src/ffi/semantics.rs
+  - Chunk 2 (0be1111): FFI typed tree (D1–D3). New src/ffi/semantics.rs
     (FfiToolSemantics + 13 sibling record/enum types; D3 Option<String> payloads
     parsed once at conversion); FfiAgentConfig reshaped (tool_semantics:
     Option + tool_specs sibling; both JSON strings deleted); infallible From
