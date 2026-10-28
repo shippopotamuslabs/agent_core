@@ -19,12 +19,12 @@ use std::collections::{HashMap, HashSet};
 use serde_json::json;
 
 use super::activate_tools_for_spill_reference;
-use crate::artifact_finalize::record_artifact_progress_with_semantics;
+use crate::artifact_finalize::record_artifact_progress_with_parsed;
 use crate::compact::tool_spill::spill_tool_result_if_needed;
 use crate::context_store::{ContextReference, ContextStore};
 use crate::events::{AgentEvent, CompactionEvent, CompactionTier, CompactionTrigger};
-use crate::guardrails::is_soft_failure_result_json;
 use crate::message::{AgentMessage, AgentRole, MessageMeta, ToolCallRecord, ToolResultRecord};
+use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::session::AgentSession;
 use crate::state_ledger::StateLedger;
 use crate::tool_semantics::ToolSemanticsConfig;
@@ -148,12 +148,15 @@ pub(super) fn process_one_result(
     }
 
     if semantics.artifact.is_some() {
-        record_artifact_progress_with_semantics(
+        // ENC-288: parse each payload once; typed accessors downstream.
+        let args = ParsedToolArgs::parse(&call.arguments_json);
+        let result = ParsedToolResult::parse(&res.result_json);
+        record_artifact_progress_with_parsed(
             pending_artifact_ids,
             semantics,
             &call.name,
-            &call.arguments_json,
-            &res.result_json,
+            &args,
+            &result,
         );
     }
 
@@ -223,8 +226,10 @@ pub(super) fn apply_processed_tool_result(
 }
 
 /// Guardrail-accounting read of a finished batch (unchanged semantics).
+/// Each result payload is parsed once; the soft-failure read uses the typed
+/// accessor instead of re-parsing per consumer.
 pub(super) fn batch_has_non_soft_outcome(processed_results: &[ToolResultRecord]) -> bool {
-    processed_results
-        .iter()
-        .any(|res| !res.soft_failure && !is_soft_failure_result_json(&res.result_json))
+    processed_results.iter().any(|res| {
+        !res.soft_failure && !ParsedToolResult::parse(&res.result_json).is_soft_failure()
+    })
 }

@@ -9,6 +9,7 @@ use regex::Regex;
 use super::estimate_session_pressure;
 use crate::events::{CompactionEvent, CompactionTier as TierEnum};
 use crate::message::{AgentMessage, AgentRole, MessageMeta};
+use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::session::{AgentConfig, AgentSession};
 use crate::state_ledger::ArtifactStateAnchor;
 use crate::tool_semantics::ArtifactSquashSemantics;
@@ -49,13 +50,22 @@ fn metadata_has_tool(msg: &AgentMessage, tool_name: &str) -> bool {
         .any(|call| call.name == tool_name)
 }
 
-fn is_semantic_success_payload(content: &str, semantics: &ArtifactSquashSemantics) -> bool {
-    let Ok(v) = serde_json::from_str::<Value>(content) else {
-        return false;
-    };
-    v.get(&semantics.status_field).and_then(|s| s.as_str())
-        == Some(semantics.success_status_value.as_str())
-        && v.get(&semantics.total_blocks_result_field).is_some()
+/// ENC-288: single ingress parse of a result payload; typed accessors only.
+/// Returns the total-blocks value (`0` when the field is present but not an
+/// integer, matching the previous `unwrap_or(0)` behavior).
+fn semantic_success_total_blocks(
+    content: &str,
+    semantics: &ArtifactSquashSemantics,
+) -> Option<i64> {
+    let parsed = ParsedToolResult::parse(content);
+    let v = parsed.value();
+    if v.get(&semantics.status_field).and_then(|s| s.as_str())
+        != Some(semantics.success_status_value.as_str())
+        || v.get(&semantics.total_blocks_result_field).is_none()
+    {
+        return None;
+    }
+    Some(parse_semantic_total_blocks(v, semantics).unwrap_or(0))
 }
 
 fn parse_semantic_total_blocks(v: &Value, semantics: &ArtifactSquashSemantics) -> Option<i64> {
@@ -92,7 +102,7 @@ fn is_semantic_append_message(msg: &AgentMessage, semantics: &ArtifactSquashSema
             || metadata_has_tool(msg, &semantics.append_tool_name);
     }
     if matches!(msg.role, AgentRole::Tool | AgentRole::User) {
-        return is_semantic_success_payload(&msg.content, semantics);
+        return semantic_success_total_blocks(&msg.content, semantics).is_some();
     }
     false
 }
@@ -105,23 +115,9 @@ fn artifact_id_from_assistant_metadata(
         if call.name != semantics.append_tool_name {
             return None;
         }
-        let parsed: Value = serde_json::from_str(&call.arguments_json).ok()?;
-        parsed
-            .get(&semantics.id_field)
-            .and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .map(ToString::to_string)
+        // ENC-288: single ingress parse; typed accessor instead of re-parsing.
+        ParsedToolArgs::parse(&call.arguments_json).get_str(&semantics.id_field)
     })
-}
-
-/// Index of the most recent successful append-result payload, if any.
-fn last_success_payload_index(
-    messages: &[AgentMessage],
-    semantics: &ArtifactSquashSemantics,
-) -> Option<usize> {
-    messages
-        .iter()
-        .rposition(|msg| is_semantic_success_payload(&msg.content, semantics))
 }
 
 /// The assistant message immediately preceding `result_idx`, if it exists
@@ -171,15 +167,18 @@ fn anchor_artifact_id(
 /// index, its total-block count, and the preceding assistant's last-block
 /// text, if any. The one canonical definition of "most recent successful
 /// append" shared by the anchor extraction and the squash scan.
+///
+/// ENC-288 fusion, kept inside the FRG-43 structure: the reverse scan calls
+/// the single-parse `semantic_success_total_blocks` once per message, so the
+/// success check and the total-block extraction share one parse — the found
+/// payload is never parsed a second time.
 fn last_append_lookup(
     messages: &[AgentMessage],
     semantics: &ArtifactSquashSemantics,
 ) -> Option<(usize, i64, Option<String>)> {
-    let result_idx = last_success_payload_index(messages, semantics)?;
-    let total_blocks = serde_json::from_str::<Value>(&messages[result_idx].content)
-        .ok()
-        .and_then(|v| parse_semantic_total_blocks(&v, semantics))
-        .unwrap_or(0);
+    let (result_idx, total_blocks) = messages.iter().enumerate().rev().find_map(|(i, msg)| {
+        semantic_success_total_blocks(&msg.content, semantics).map(|t| (i, t))
+    })?;
     Some((
         result_idx,
         total_blocks,

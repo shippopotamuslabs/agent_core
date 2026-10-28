@@ -1,8 +1,7 @@
 //! Tool-loop guardrails: max turn count, soft-failure streak, configurable greedy extension.
 
-use serde_json::Value;
-
 use crate::agent_tool_budget::AgentToolBudgetMeta;
+use crate::parsed_tool_args::ParsedToolResult;
 use crate::session::AgentConfig;
 use log::warn;
 
@@ -14,24 +13,13 @@ pub struct TurnBookkeepingResult {
 
 /// Kotlin-compatible soft failure: JSON object with top-level `error` key,
 /// `status: "error"`, or `data: null` when no `results` array is present.
+///
+/// FFI/boundary entry for raw result strings: parses once via
+/// [`ParsedToolResult`]. The single implementation is
+/// `is_soft_failure_value` in `parsed_tool_args`; hot paths parse once and
+/// call [`ParsedToolResult::is_soft_failure`] instead of this entry.
 pub fn is_soft_failure_result_json(result_json: &str) -> bool {
-    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(result_json) else {
-        return false;
-    };
-
-    if obj.contains_key("error") {
-        return true;
-    }
-
-    if obj
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
-    {
-        return true;
-    }
-
-    obj.get("data").is_some_and(Value::is_null) && !obj.contains_key("results")
+    ParsedToolResult::parse(result_json).is_soft_failure()
 }
 
 #[derive(Debug, Clone, Default)]

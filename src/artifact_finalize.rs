@@ -5,8 +5,12 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::message::ToolCallRecord;
+use crate::parsed_tool_args::{ParsedToolArgs, ParsedToolResult};
 use crate::tool_semantics::ToolSemanticsConfig;
 
+/// Boundary entry: parses both payloads once, then delegates to
+/// [`record_artifact_progress_with_parsed`]. Hot paths should parse once and
+/// call the parsed entry directly.
 pub fn record_artifact_progress_with_semantics(
     pending: &mut HashSet<String>,
     semantics: &ToolSemanticsConfig,
@@ -14,12 +18,25 @@ pub fn record_artifact_progress_with_semantics(
     arguments_json: &str,
     result_json: &str,
 ) {
+    let args = ParsedToolArgs::parse(arguments_json);
+    let result = ParsedToolResult::parse(result_json);
+    record_artifact_progress_with_parsed(pending, semantics, tool_name, &args, &result);
+}
+
+/// Hot-path entry over already-parsed payloads (no re-parse).
+pub fn record_artifact_progress_with_parsed(
+    pending: &mut HashSet<String>,
+    semantics: &ToolSemanticsConfig,
+    tool_name: &str,
+    args: &ParsedToolArgs,
+    result: &ParsedToolResult,
+) {
     let Some(artifact) = &semantics.artifact else {
         return;
     };
     if tool_name == artifact.start_tool_name {
         if let Some(id) = extract_success_field(
-            result_json,
+            result.value(),
             &artifact.status_field,
             &artifact.success_status_value,
             &artifact.id_field,
@@ -28,14 +45,14 @@ pub fn record_artifact_progress_with_semantics(
         }
     } else if tool_name == artifact.append_tool_name {
         let Some(complete) = parse_success_bool_field(
-            result_json,
+            result,
             &artifact.status_field,
             &artifact.success_status_value,
             &artifact.completion_field,
         ) else {
             return;
         };
-        let Some(aid) = extract_field(arguments_json, &artifact.id_field) else {
+        let Some(aid) = args.get_str(&artifact.id_field) else {
             return;
         };
         if complete {
@@ -47,13 +64,12 @@ pub fn record_artifact_progress_with_semantics(
 }
 
 fn extract_success_field(
-    result_json: &str,
+    result: &Value,
     status_field: &str,
     success_status_value: &str,
     field: &str,
 ) -> Option<String> {
-    let v: Value = serde_json::from_str(result_json).ok()?;
-    let o = v.as_object()?;
+    let o = result.as_object()?;
     if o.get(status_field)?.as_str()? != success_status_value {
         return None;
     }
@@ -66,34 +82,16 @@ fn extract_success_field(
 }
 
 fn parse_success_bool_field(
-    result_json: &str,
+    result: &ParsedToolResult,
     status_field: &str,
     success_status_value: &str,
     field: &str,
 ) -> Option<bool> {
-    let v: Value = serde_json::from_str(result_json).ok()?;
-    let o = v.as_object()?;
+    let o = result.value().as_object()?;
     if o.get(status_field)?.as_str()? != success_status_value {
         return None;
     }
-    match o.get(field)? {
-        Value::Bool(b) => Some(*b),
-        Value::String(s) => {
-            Some(s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes"))
-        }
-        Value::Number(n) => n.as_u64().map(|u| u == 1).or(Some(false)),
-        _ => Some(false),
-    }
-}
-
-fn extract_field(json: &str, field: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(json).ok()?;
-    let id = v.get(field)?.as_str()?;
-    if id.is_empty() {
-        None
-    } else {
-        Some(id.to_string())
-    }
+    result.get_bool_coerced(field)
 }
 
 pub fn synthetic_finalize_calls_with_semantics(
