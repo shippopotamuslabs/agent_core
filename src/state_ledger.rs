@@ -82,6 +82,54 @@ const PREFIX_TOUCHED_FILE: &[&str] = &["file:", "touched:"];
 const PREFIX_REVERSAL: &[&str] = &["reversal:", "supersedes:"];
 const PREFIX_RESOLVED: &[&str] = &["resolved:"];
 
+/// Tag table for the observation scanner: prefix spellings per kind.
+const TAG_PREFIXES: &[(&[&str], &str)] = &[
+    (PREFIX_OBJECTIVE, "objective"),
+    (PREFIX_CONSTRAINT, "constraint"),
+    (PREFIX_DECISION, "decision"),
+    (PREFIX_OPEN_QUESTION, "open_question"),
+    (PREFIX_TOUCHED_FILE, "touched_file"),
+    (PREFIX_REVERSAL, "reversal"),
+    (PREFIX_RESOLVED, "resolved"),
+];
+
+/// Find the earliest tag at or after `search_from`: returns its byte
+/// position, prefix length, and kind. A tag fires only on a left
+/// word-boundary (start of text or a non-alphanumeric predecessor) so
+/// `Unresolved:` / `Indecision:` never false-fire on the `resolved:` /
+/// `decision:` suffix. `lower` is `content` ASCII-lowercased (match
+/// offsets index into both).
+fn next_tag(
+    content: &str,
+    lower: &str,
+    search_from: usize,
+) -> Option<(usize, usize, &'static str)> {
+    let content_bytes = content.as_bytes();
+    let mut earliest: Option<(usize, usize, &'static str)> = None;
+    for (list, kind) in TAG_PREFIXES {
+        for p in *list {
+            let mut off = search_from;
+            while off < lower.len() {
+                match lower[off..].find(p) {
+                    Some(rel) => {
+                        let abs = off + rel;
+                        if abs == 0 || !content_bytes[abs - 1].is_ascii_alphanumeric() {
+                            match earliest {
+                                Some((cur, _, _)) if cur <= abs => {}
+                                _ => earliest = Some((abs, p.len(), kind)),
+                            }
+                            break;
+                        }
+                        off = abs + 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    earliest
+}
+
 /// Trim leading whitespace and end at the next sentence boundary
 /// (`.`/`?`/`!` followed by space, or end-of-string). Returns the value plus
 /// its end byte-offset within `s` so the scanner can advance past the whole
@@ -161,19 +209,21 @@ impl StateLedger {
     }
 
     /// Retire matching entries from the given fact-class fields (precedence
-    /// rule 3). Returns true when at least one live entry — or an existing
-    /// tombstone — matched, in which case the tombstone is recorded (or kept).
-    /// A tombstone hit stays silent and keeps everything: this covers both
-    /// genuinely retired facts and unmatched-retirement artifacts (appended
-    /// visibly AND tombstoned, so a repeat is a no-op and the entry stays).
+    /// rule 3). Returns true when at least one live entry in the TARGETED
+    /// fields drained, or — with nothing live left in them — an existing
+    /// tombstone makes this a repeat (a silent no-op).
+    ///
+    /// The targeted fields drain FIRST and the tombstone is consulted only
+    /// afterwards: tombstones are global across classes, retirements are
+    /// class-scoped, so a tombstone left by a retirement aimed at another
+    /// class (e.g. `resolved:` against open_questions) must never shield a
+    /// live entry sitting in THIS call's classes (e.g. the same text as a
+    /// decision, later reversed) from being retired.
     fn retire_matches(
         retired: &mut Vec<String>,
         fields: &mut [&mut Vec<String>],
         key: &str,
     ) -> bool {
-        if retired.iter().any(|k| k == key) {
-            return true;
-        }
         let mut matched = false;
         for field in fields.iter_mut() {
             let before = field.len();
@@ -183,10 +233,24 @@ impl StateLedger {
             }
         }
         if matched {
-            retired.push(key.to_string());
+            if !retired.iter().any(|k| k == key) {
+                retired.push(key.to_string());
+            }
             return true;
         }
-        false
+        retired.iter().any(|k| k == key)
+    }
+
+    /// The unmatched-retirement policy, shared by the `reversal:` and
+    /// `resolved:` arms: the retirement stays visible — its text is
+    /// appended as a decision instead of silently dropped — and the
+    /// tombstone is recorded so a repeat is a no-op (the appended entry
+    /// stays).
+    fn record_unmatched_retirement(&mut self, value: String, key: &str, source: ObserveSource) {
+        Self::insert_fact(&mut self.retired, &mut self.decisions, value, source);
+        if !self.retired.iter().any(|k| k == key) {
+            self.retired.push(key.to_string());
+        }
     }
 
     fn observe_text(&mut self, content: &str, source: ObserveSource) {
@@ -197,44 +261,8 @@ impl StateLedger {
         // lengths, and the match offsets below index into the original `content`.
         let lower = content.to_ascii_lowercase();
         // Walk through, finding any of the relevant prefixes.
-        let prefixes: &[(&[&str], &str)] = &[
-            (PREFIX_OBJECTIVE, "objective"),
-            (PREFIX_CONSTRAINT, "constraint"),
-            (PREFIX_DECISION, "decision"),
-            (PREFIX_OPEN_QUESTION, "open_question"),
-            (PREFIX_TOUCHED_FILE, "touched_file"),
-            (PREFIX_REVERSAL, "reversal"),
-            (PREFIX_RESOLVED, "resolved"),
-        ];
-        let content_bytes = content.as_bytes();
         while search_from < content.len() {
-            // Find the earliest prefix match starting at `search_from`. A
-            // tag fires only on a left word-boundary (start of text or a
-            // non-alphanumeric predecessor) so `Unresolved:` / `Indecision:`
-            // never false-fire on the `resolved:` / `decision:` suffix.
-            let mut earliest: Option<(usize, usize, &str)> = None; // (pos, prefix_len, kind)
-            for (list, kind) in prefixes {
-                for p in *list {
-                    let mut off = search_from;
-                    while off < lower.len() {
-                        match lower[off..].find(p) {
-                            Some(rel) => {
-                                let abs = off + rel;
-                                if abs == 0 || !content_bytes[abs - 1].is_ascii_alphanumeric() {
-                                    match earliest {
-                                        Some((cur, _, _)) if cur <= abs => {}
-                                        _ => earliest = Some((abs, p.len(), kind)),
-                                    }
-                                    break;
-                                }
-                                off = abs + 1;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-            let Some((pos, plen, kind)) = earliest else {
+            let Some((pos, plen, kind)) = next_tag(&content, &lower, search_from) else {
                 break;
             };
             let after = &content[pos + plen..];
@@ -290,19 +318,7 @@ impl StateLedger {
                             &key,
                         );
                         if !matched {
-                            // Unmatched retirement stays visible: append as a
-                            // decision instead of silently dropping it, and
-                            // record the tombstone so a repeat is a no-op
-                            // (the appended entry stays).
-                            Self::insert_fact(
-                                &mut self.retired,
-                                &mut self.decisions,
-                                value,
-                                source,
-                            );
-                            if !self.retired.iter().any(|k| k == &key) {
-                                self.retired.push(key);
-                            }
+                            self.record_unmatched_retirement(value, &key, source);
                         }
                     }
                     "resolved" => {
@@ -313,16 +329,7 @@ impl StateLedger {
                             &key,
                         );
                         if !matched {
-                            // Same visibility rule as unmatched reversal.
-                            Self::insert_fact(
-                                &mut self.retired,
-                                &mut self.decisions,
-                                value,
-                                source,
-                            );
-                            if !self.retired.iter().any(|k| k == &key) {
-                                self.retired.push(key);
-                            }
+                            self.record_unmatched_retirement(value, &key, source);
                         }
                     }
                     _ => {}

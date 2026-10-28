@@ -347,6 +347,26 @@ fn enc301_set_semantics_dedupe_and_retirement_tags() {
 }
 
 #[test]
+fn enc301_cross_class_tombstone_does_not_shield_live_entry() {
+    let mut l = StateLedger::default();
+    // A decision whose text is later named by a resolved: tag. resolved:
+    // targets open_questions only, so for its class this retirement is
+    // unmatched: the text stays as a decision AND picks up a tombstone.
+    l.observe_user_message(&user_msg("Decision: ship the beta."));
+    l.observe_user_message(&user_msg("Resolved: ship the beta."));
+    assert_eq!(l.decisions, vec!["ship the beta".to_string()]);
+    assert_eq!(l.retired, vec!["ship the beta".to_string()]);
+    // A reversal targets decisions: the tombstone left by the other
+    // class's retirement must not shield the live decision.
+    l.observe_user_message(&user_msg("Reversal: ship the beta."));
+    assert!(l.decisions.is_empty());
+    assert_eq!(l.retired, vec!["ship the beta".to_string()]);
+    // A repeat resolved: afterwards is still a silent no-op.
+    l.observe_user_message(&user_msg("Resolved: ship the beta."));
+    assert!(l.decisions.is_empty());
+}
+
+#[test]
 fn enc301_live_reassert_clears_tombstone_and_restores() {
     let mut l = StateLedger::default();
     l.observe_user_message(&user_msg("Decision: use FIFO. Decision: keep cache."));
