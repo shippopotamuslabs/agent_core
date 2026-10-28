@@ -26,3 +26,6 @@ None.
 
 ## Disposition
 J1 + M1-M5: fix pass before ship.
+
+## Fix pass (31be349)
+J1 + M1-M5 fixed. Gates: fmt/clippy clean; 567/0 default, 541/0 no-default (worker + orchestrator recount default). Open Critical/Major: 0.

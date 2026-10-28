@@ -3,15 +3,15 @@
 ## Phase Checklist
 - [x] Research — vision approval: approved (mission; Sean-ratified design on ticket)
 - [x] Plan
-- [ ] Implementation
-- [ ] Review — rounds: 0/3, result: pending
+- [x] Implementation
+- [x] Review — rounds: 1/3, result: clean after fix pass (J1 Major + M1-M5 fixed 31be349)
 - [ ] Ship — PR: none (stacked on #29)
 
 ## Current Gate
 none
 
 ## Next Phase
-Implementation
+Ship
 
 ## Notes
 - Base: ENC-296 branch tip (PR #29). Worktree /home/sean/Code/agent_core-ENC-297.
