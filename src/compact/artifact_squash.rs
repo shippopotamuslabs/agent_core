@@ -493,7 +493,12 @@ mod tests {
                     role: AgentRole::Assistant,
                     content: r#"call:append_blocks{"artifactId":"123","blocks":[{"type":"paragraph","text":"Part 1"}]}"#
                         .into(),
-                    metadata: MessageMeta::new(),
+                    // ENC-293: assistant append detection reads metadata only.
+                    metadata: MessageMeta::new().with_raw_tool_calls(vec![RawToolCall {
+                        id: None,
+                        name: "append_blocks".into(),
+                        arguments_json: "{}".into(),
+                    }]),
                 },
                 AgentMessage {
                     id: "m2".into(),
