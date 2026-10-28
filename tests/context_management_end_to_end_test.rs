@@ -67,7 +67,6 @@ fn s19_end_to_end_mixed_pressure_preserves_semantic_continuity() {
             "anthropic".into(),
             256,
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),

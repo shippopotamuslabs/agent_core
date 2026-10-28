@@ -87,7 +87,6 @@ fn s22_high_context_raises_thresholds() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),

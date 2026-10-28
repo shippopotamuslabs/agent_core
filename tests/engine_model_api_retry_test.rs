@@ -18,7 +18,6 @@ fn io() -> SessionIoParams {
         "openrouter".into(),
         200_000,
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid test io params")

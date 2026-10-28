@@ -27,7 +27,6 @@ fn main() {
             "openai".into(),
             128_000,
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid example io params"),

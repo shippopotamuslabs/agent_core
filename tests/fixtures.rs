@@ -128,7 +128,6 @@ fn run_fixture(path: &PathBuf, exec_mode: ExecMode) -> (String, Vec<String>, Vec
     let io = SessionIoParams::new(
         f.io.provider.clone(),
         f.io.context_window_tokens,
-        "[]".into(),
         f.io.tools_schema_json.clone(),
         f.io.system_prompt.clone(),
     )

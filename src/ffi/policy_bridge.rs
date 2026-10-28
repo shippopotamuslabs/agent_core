@@ -6,7 +6,8 @@ use super::types::{
 use crate::guardrails::is_soft_failure_result_json;
 use crate::repair::ToolRepairPipeline;
 use crate::tool_parse;
-use crate::tool_semantics::{load_semantics_with_session_catalog, ToolSemanticsConfig};
+use crate::catalog::ToolSpec;
+use crate::tool_semantics::{ToolCatalogConfig, ToolSemanticsConfig};
 use crate::truncate::truncate_tool_result_json;
 use crate::turn_io::RawToolCall;
 
@@ -20,14 +21,40 @@ pub struct RepairResult {
     pub repaired: bool,
 }
 
+/// ENC-297 Chunk 1 interim: parse the two JSON strings directly (the core
+/// merge helper is deleted). Replicates the old merge exactly — catalog JSON
+/// (array or `{tools:}` object form) fills an empty semantics catalog, then
+/// validates — until Chunk 2 deletes both JSON strings for typed records.
 fn load_policy_semantics(
     tool_semantics_json: &str,
     tool_catalog_json: &str,
 ) -> Result<(ToolSemanticsConfig, crate::catalog::ToolCatalog), String> {
-    load_semantics_with_session_catalog(tool_semantics_json, tool_catalog_json).map_err(|error| {
-        eprintln!("agent_core: {error}");
-        error
-    })
+    let mut semantics = ToolSemanticsConfig::from_json(tool_semantics_json)
+        .map_err(|error| format!("invalid tool_semantics_json: {error}"))?;
+    let trimmed = tool_catalog_json.trim();
+    if !trimmed.is_empty() && trimmed != "[]" {
+        #[derive(serde::Deserialize)]
+        struct CatalogFile {
+            tools: Vec<ToolSpec>,
+        }
+        let tools = if trimmed.starts_with('[') {
+            serde_json::from_str(trimmed)
+                .map_err(|error| format!("invalid tool catalog json: {error}"))?
+        } else {
+            serde_json::from_str::<CatalogFile>(trimmed)
+                .map_err(|error| format!("invalid tool catalog json: {error}"))?
+                .tools
+        };
+        if semantics.catalog.tools.is_empty() {
+            semantics.catalog = ToolCatalogConfig { tools };
+        }
+        semantics
+            .validate()
+            .map_err(|error| format!("tool catalog merge failed: {error:?}"))?;
+    }
+    let catalog = crate::catalog::ToolCatalog::from_semantics(&semantics)
+        .map_err(|error| format!("invalid merged tool catalog: {error:?}"))?;
+    Ok((semantics, catalog))
 }
 
 #[uniffi::export]
@@ -126,17 +153,36 @@ pub fn parse_tool_calls(
 
 #[uniffi::export]
 pub fn has_local_tool_contract(system_prompt: &str, tool_catalog_json: &str) -> bool {
+    // ENC-297 Chunk 1 interim: agnostic semantics plus the catalog JSON
+    // parsed directly (the core merge helper is deleted; typed records
+    // arrive in Chunk 2). Invalid input yields false — the infallible
+    // contract is preserved, minus the eprintln.
     let mut semantics = ToolSemanticsConfig::agnostic();
-    if let Err(error) = semantics.merge_catalog_json(tool_catalog_json) {
-        eprintln!("agent_core: tool catalog merge failed: {error:?}");
-        return false;
+    let trimmed = tool_catalog_json.trim();
+    if !trimmed.is_empty() && trimmed != "[]" {
+        #[derive(serde::Deserialize)]
+        struct CatalogFile {
+            tools: Vec<ToolSpec>,
+        }
+        let tools: Vec<ToolSpec> = if trimmed.starts_with('[') {
+            match serde_json::from_str(trimmed) {
+                Ok(tools) => tools,
+                Err(_) => return false,
+            }
+        } else {
+            match serde_json::from_str::<CatalogFile>(trimmed) {
+                Ok(file) => file.tools,
+                Err(_) => return false,
+            }
+        };
+        semantics.catalog = ToolCatalogConfig { tools };
+        if semantics.validate().is_err() {
+            return false;
+        }
     }
     let catalog = match crate::catalog::ToolCatalog::from_semantics(&semantics) {
         Ok(catalog) => catalog,
-        Err(error) => {
-            eprintln!("agent_core: invalid merged tool catalog: {error:?}");
-            return false;
-        }
+        Err(_) => return false,
     };
     tool_parse::has_local_tool_contract(system_prompt, &catalog)
 }

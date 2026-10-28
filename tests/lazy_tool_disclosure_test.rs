@@ -9,15 +9,6 @@ use agent_core::session::{AgentConfig, SessionCapabilities};
 use agent_core::turn_io::{FinishReason, ModelRequest, ModelResponse, RawToolCall};
 use support::enclave_test_agent_config::enclave_test_agent_config;
 
-const CATALOG_JSON: &str = r#"[
-  {"name":"tool_discovery_tool","aliases":[],"reproducible":true,"schema_hint":{"required_fields":[{"name":"capability","ty":"string","description":"capability"}],"defaults":{}}},
-  {"name":"web_search","aliases":["websearch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"query","ty":"string","description":"query"}],"defaults":{}}},
-  {"name":"web_extract","aliases":["web_fetch"],"reproducible":true,"schema_hint":{"required_fields":[{"name":"urls","ty":"array","description":"urls"}],"defaults":{}}},
-  {"name":"search_chat_history","aliases":[],"reproducible":true,"schema_hint":null},
-  {"name":"append_blocks","aliases":[],"reproducible":false,"schema_hint":{"required_fields":[{"name":"artifactId","ty":"string","description":"id"},{"name":"blocks","ty":"array","description":"blocks"}],"defaults":{"isComplete":false}}},
-  {"name":"search_current_artifact","aliases":[],"reproducible":true,"schema_hint":null}
-]"#;
-
 const ACTIVE_SCHEMA_JSON: &str = r#"[
   {"name":"tool_discovery_tool","parameters":{}},
   {"name":"web_search","parameters":{}},
@@ -61,7 +52,6 @@ fn create_session(
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            CATALOG_JSON.into(),
             tools_schema_json.into(),
             "sys".into(),
         )
@@ -216,9 +206,8 @@ fn enc_296_activated_tool_renders_active_entry_or_name_stub() {
 
     let set = ToolSchemaSet::parse(
         r#"[{"name":"web_search","description":"Search","parameters":{}}]"#,
-        "[]",
     )
-    .expect("valid channels");
+    .expect("valid channel");
     let rendered =
         set.render_active_schemas(&["web_search".to_string(), "brand_new_tool".to_string()]);
     let json = serde_json::to_value(&rendered).expect("entries serialize");

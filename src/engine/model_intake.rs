@@ -212,7 +212,10 @@ pub(super) fn repair_tool_turn(
             rejects += 1;
             continue;
         }
-        let (outcome, evs) = match ToolCatalog::from_semantics(semantics) {
+        // ENC-297: `catalog` is the construction-time validated policy
+        // catalog, so this validity check runs on the semantics directly
+        // instead of rebuilding (and silently defaulting) per tool call.
+        let (outcome, evs) = match semantics.validate() {
             Ok(_) => ToolRepairPipeline::repair_with_semantics(raw, catalog, semantics),
             Err(_) => (
                 RepairOutcome::Reject {

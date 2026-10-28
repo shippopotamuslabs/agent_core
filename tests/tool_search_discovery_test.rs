@@ -38,7 +38,11 @@ fn engine() -> AgentEngine {
 
 fn search_discovery_config() -> AgentConfig {
     let mut config = enclave_test_agent_config();
-    config.tool_semantics = agent_core::tool_semantics::ToolSemanticsConfig::from_json(
+    // ENC-297 D4: the catalog merge is deleted; the host catalog now travels
+    // as typed ToolSpec values at config construction. The legacy
+    // SEARCH_CATALOG_JSON channel text is parsed here into specs (the only
+    // JSON->typed parse, at this test's construction edge).
+    let mut semantics = agent_core::tool_semantics::ToolSemanticsConfig::from_json(
         r#"{
           "catalog": { "tools": [] },
           "discovery": {
@@ -54,6 +58,9 @@ fn search_discovery_config() -> AgentConfig {
         }"#,
     )
     .expect("search discovery semantics json must parse");
+    semantics.catalog.tools = serde_json::from_str(SEARCH_CATALOG_JSON)
+        .expect("search catalog json must parse as tool specs");
+    config.tool_semantics = semantics;
     config
 }
 
@@ -79,7 +86,6 @@ fn create_session(eng: &AgentEngine) -> agent_core::SessionHandle {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            SEARCH_CATALOG_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
         )
@@ -181,7 +187,6 @@ fn enclave_discovery_session(eng: &AgentEngine, config: AgentConfig) -> agent_co
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            SEARCH_CATALOG_JSON.into(),
             SEARCH_ACTIVE_SCHEMA_JSON.into(),
             "sys".into(),
         )

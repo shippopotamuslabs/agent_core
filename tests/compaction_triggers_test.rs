@@ -26,7 +26,6 @@ fn io_large() -> SessionIoParams {
         "anthropic".into(),
         200_000,
         "[]".into(),
-        "[]".into(),
         "sys".into(),
     )
     .expect("valid test io params")
@@ -35,7 +34,6 @@ fn io_small() -> SessionIoParams {
     SessionIoParams::new(
         "anthropic".into(),
         256,
-        "[]".into(),
         "[]".into(),
         "sys".into(),
     )

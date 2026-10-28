@@ -19,13 +19,6 @@ fn engine() -> AgentEngine {
     AgentEngine::new()
 }
 
-const CATALOG_JSON: &str = r#"[
-  {"name":"open_tools","aliases":[],"reproducible":true,"schema_hint":null},
-  {"name":"search_web","aliases":[],"reproducible":true,"schema_hint":null},
-  {"name":"write_doc","aliases":[],"reproducible":false,"schema_hint":null},
-  {"name":"lookup_memory","aliases":[],"reproducible":true,"schema_hint":null}
-]"#;
-
 fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_core::SessionHandle {
     let eng = engine();
     eng.create_session(
@@ -51,7 +44,6 @@ fn session_with(active_schema: &str, semantics: ToolSemanticsConfig) -> agent_co
         SessionIoParams::new(
             "anthropic".to_string(),
             200_000,
-            CATALOG_JSON.to_string(),
             active_schema.to_string(),
             "sys".to_string(),
         )

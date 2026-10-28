@@ -30,6 +30,13 @@ struct CatalogFile {
     tools: Vec<ToolSpec>,
 }
 
+/// Policy catalog: the validated executable tool set for a session (ENC-297).
+///
+/// Built once at config construction by [`AgentConfig::with_tool_semantics`](crate::session::AgentConfig::with_tool_semantics)
+/// (via [`ToolCatalog::from_semantics`]) and re-synced at session creation by
+/// [`AgentConfig::prepare_tool_semantics`](crate::session::AgentConfig::prepare_tool_semantics);
+/// per-turn engine code borrows it and never rebuilds it.
+#[derive(Debug, Clone, Default)]
 pub struct ToolCatalog {
     tools: Vec<ToolSpec>,
     index: HashMap<String, usize>,
@@ -59,6 +66,15 @@ impl ToolCatalog {
 
     pub fn all(&self) -> &[ToolSpec] {
         &self.tools
+    }
+
+    /// Presence gate (ENC-297 D5): true when the host supplied at least one tool spec.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tools.len()
     }
 }
 

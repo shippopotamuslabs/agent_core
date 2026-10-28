@@ -142,7 +142,6 @@ fn s9_raw_spilled_tool_output_can_be_read_by_reference_id() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),
@@ -248,7 +247,6 @@ fn browsable_context_references_exclude_infrastructure_kinds() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             r#"[{"name":"web_search"}]"#.into(),
             "sys".into(),
         )
@@ -288,7 +286,6 @@ fn s23_terminal_output_references_share_retrieval_path() {
             "anthropic".into(),
             200_000,
             "[]".into(),
-            "[]".into(),
             "sys".into(),
         )
         .expect("valid test io params"),
@@ -322,7 +319,6 @@ fn e4_missing_context_reference_read_returns_not_found() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "sys".into(),
         )
@@ -447,7 +443,6 @@ fn spilled_reference_remains_readable_across_turn_compaction_passes() {
         SessionIoParams::new(
             "anthropic".into(),
             200_000,
-            "[]".into(),
             "[]".into(),
             "sys".into(),
         )

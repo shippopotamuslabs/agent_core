@@ -74,7 +74,7 @@ fn kv_fixed_preflight_compacts_large_system_prompt_before_call_model() {
         cfg,
         caps,
         serde_json::Value::Null,
-        SessionIoParams::new("LLAMA".into(), 4096, "[]".into(), "[]".into(), system)
+        SessionIoParams::new("LLAMA".into(), 4096, "[]".into(), system)
             .expect("valid test io params"),
     );
 

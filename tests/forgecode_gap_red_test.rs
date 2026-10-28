@@ -57,7 +57,7 @@ fn model_request(system_prompt: &str) -> ModelRequest {
         session_messages: vec![],
         system_prompt: system_prompt.into(),
         tool_schemas: Vec::new(),
-        rendered_tool_catalog: Vec::new(),
+        rendered_runtime_tools: Vec::new(),
         allow_tool_call: true,
         context_references: vec![],
         state_ledger: None,
@@ -92,7 +92,6 @@ fn session_io(tools_schema_json: &str, context_window_tokens: u32) -> SessionIoP
     SessionIoParams::new(
         "anthropic".into(),
         context_window_tokens,
-        "[]".into(),
         tools_schema_json.into(),
         "sys".into(),
     )
@@ -452,8 +451,8 @@ fn fcg_011_runtime_tool_view_hides_unsafe_edit_tools() {
     let catalog_json = r#"[{"name":"web_search","parameters":{"type":"object"}},{"name":"patch_file","parameters":{"type":"object"}},{"name":"write_file","parameters":{"type":"object"}}]"#;
 
     let request = next_model_request(config, SessionCapabilities::default(), catalog_json);
-    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
-        .expect("rendered_tool_catalog_json must be valid JSON");
+    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_runtime_tools_json())
+        .expect("rendered_runtime_tools_json must be valid JSON");
 
     assert!(rendered
         .as_array()
@@ -564,8 +563,8 @@ fn fcg_016_delegation_tools_are_removed_when_unsupported() {
         capabilities,
         r#"[{"name":"task_delegate","parameters":{"type":"object"}}]"#,
     );
-    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_tool_catalog_json())
-        .expect("rendered_tool_catalog_json must be valid JSON");
+    let rendered: serde_json::Value = serde_json::from_str(&request.rendered_runtime_tools_json())
+        .expect("rendered_runtime_tools_json must be valid JSON");
 
     assert!(!rendered
         .as_array()

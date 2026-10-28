@@ -70,14 +70,20 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     // shipped via the tail-volatile sidecar (`stateLedgerJson` → `compactLedger`).
 
     // All renders below work on the session-parsed entries: no schema text is
-    // parsed per turn. `rendered_tool_catalog` mirrors
+    // parsed per turn. `rendered_runtime_tools` mirrors
     // `request_pipeline::render_runtime_tool_view` (FRG-36 gates) over the
-    // parsed active channel; serialize at the edge.
-    let rendered_tool_catalog = io
+    // parsed active channel; serialize at the edge. (ENC-297: catalog
+    // presence comes from the typed `ToolCatalog` on the config, not from
+    // schema-channel text.)
+    let rendered_runtime_tools = io
         .schemas
         .render_runtime_view(config, capabilities, loop_metrics);
 
-    let has_catalog = io.schemas.has_catalog();
+    // ENC-297 D5: the gate re-sources to typed catalog presence (non-empty
+    // tools). Equivalent inputs keep exact gate semantics; the pinned delta
+    // is that legacy catalog-channel text (e.g. a semantics-file '{}' object)
+    // no longer counts as a catalog.
+    let has_catalog = !config.tool_catalog.is_empty();
 
     // ENC-296: render from the active channel (registry deleted). Names the
     // active channel does not carry — tools activated mid-session — render
@@ -86,7 +92,7 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
 
     let tool_context_index = build_tool_context_index_from_set(
         &active_schemas,
-        io.schemas.catalog_has_entries(),
+        &config.tool_catalog,
         config,
         capabilities,
     );
@@ -131,7 +137,7 @@ pub(super) fn build_model_request(inputs: ModelRequestInputs<'_>) -> ModelReques
     ModelRequest {
         session_messages,
         system_prompt: io.system_prompt.clone(),
-        rendered_tool_catalog,
+        rendered_runtime_tools,
         tool_schemas,
         allow_tool_call,
         context_references: context_store

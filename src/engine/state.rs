@@ -22,10 +22,12 @@ use crate::turn_io::{ModelRequest, RawToolCall, SummaryRequest};
 
 /// Provider/runtime parameters needed for pressure + compaction + model requests.
 ///
-/// The two tool-schema channels travel as a [`ToolSchemaSet`] parsed once
+/// The active tool-schema channel travels as a [`ToolSchemaSet`] parsed once
 /// at construction ([`SessionIoParams::new`]); per-turn code borrows the
 /// parsed entries and never re-parses schema text. (ENC-296: the registry
-/// channel is deleted; the host owns the registry.)
+/// channel is deleted, the host owns the registry; ENC-297: the render
+/// catalog channel is deleted, catalog presence comes from the typed
+/// [`crate::catalog::ToolCatalog`] on [`crate::session::AgentConfig`].)
 #[derive(Debug, Clone)]
 pub struct SessionIoParams {
     pub provider: String,
@@ -35,9 +37,9 @@ pub struct SessionIoParams {
 }
 
 impl SessionIoParams {
-    /// Build session IO params, parsing the schema channels exactly once via
+    /// Build session IO params, parsing the schema channel exactly once via
     /// [`ToolSchemaSet::parse`]. Parameter order mirrors the legacy struct
-    /// literal field order (minus the deleted registry channel).
+    /// literal field order (minus the deleted registry and catalog channels).
     ///
     /// Fallible: a schema channel that violates the host contract (see
     /// [`ToolSchemaError`]) rejects construction here, at the boundary,
@@ -45,14 +47,13 @@ impl SessionIoParams {
     pub fn new(
         provider: String,
         context_window_tokens: u32,
-        tool_catalog_json: String,
         tools_schema_json: String,
         system_prompt: String,
     ) -> Result<Self, ToolSchemaError> {
         Ok(Self {
             provider,
             context_window_tokens,
-            schemas: ToolSchemaSet::parse(&tools_schema_json, &tool_catalog_json)?,
+            schemas: ToolSchemaSet::parse(&tools_schema_json)?,
             system_prompt,
         })
     }

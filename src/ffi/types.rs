@@ -224,10 +224,10 @@ impl From<FfiModelRequest> for ModelRequest {
             // the string echoes a request the engine itself rendered, so a
             // contract violation here falls back to an empty active set
             // rather than failing a conversion that cannot return an error.
-            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json, "[]")
+            tool_schemas: crate::tool_schema::ToolSchemaSet::parse(&m.tools_schema_json)
                 .map(|schemas| schemas.active)
                 .unwrap_or_default(),
-            rendered_tool_catalog: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
             allow_tool_call: m.allow_tool_call,
             context_references: m.context_references.into_iter().map(Into::into).collect(),
             state_ledger: m
@@ -854,18 +854,17 @@ fn tool_schema_entries(
 }
 
 /// FFI session edge: convert the typed params into `SessionIoParams`,
-/// constructing the parsed schema set directly from the typed entries
-/// (only the catalog channel still arrives as JSON text). Fallible
-/// (never panics): a malformed entry is an `AgentException` the caller
-/// must handle.
+/// constructing the parsed schema set directly from the typed entries.
+/// (ENC-297 Chunk 1 interim: the `tool_catalog_json` string channel is still
+/// carried on `FfiSessionIoParams` and ignored here — the catalog now lives
+/// on the typed `AgentConfig` construction path. Chunk 2 deletes the field.)
+/// Fallible (never panics): a malformed entry is an `AgentException` the
+/// caller must handle.
 pub(crate) fn session_io_params(
     p: FfiSessionIoParams,
 ) -> Result<crate::engine::SessionIoParams, AgentException> {
     let active = tool_schema_entries(&p.tool_schemas)?;
-    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(active, &p.tool_catalog_json)
-        .map_err(|error| AgentException::Internal {
-            detail: error.to_string(),
-        })?;
+    let schemas = crate::tool_schema::ToolSchemaSet::from_entries(active);
     Ok(crate::engine::SessionIoParams {
         provider: p.provider,
         context_window_tokens: p.context_window_tokens,
@@ -1001,6 +1000,14 @@ impl Default for FfiAgentConfig {
 
 impl From<FfiAgentConfig> for AgentConfig {
     fn from(f: FfiAgentConfig) -> Self {
+        // ENC-297 Chunk 1 interim: derive the policy catalog from the
+        // (possibly fallback) semantics. Chunk 2 replaces this infallible
+        // conversion with a fallible typed one (no fallback).
+        let tool_semantics =
+            crate::tool_semantics::ToolSemanticsConfig::from_json(&f.tool_semantics_json)
+                .unwrap_or_else(|_| crate::tool_semantics::ToolSemanticsConfig::agnostic());
+        let tool_catalog = crate::catalog::ToolCatalog::from_semantics(&tool_semantics)
+            .unwrap_or_default();
         Self {
             max_turns: f.max_turns,
             threshold_ratio: f.threshold_ratio,
@@ -1048,13 +1055,8 @@ impl From<FfiAgentConfig> for AgentConfig {
             require_read_before_edit: false,
             default_tool_timeout_ms: None,
             long_loop: LongLoopPolicy::from(f.long_loop),
-            tool_semantics: crate::tool_semantics::ToolSemanticsConfig::from_json(
-                &f.tool_semantics_json,
-            )
-            .unwrap_or_else(|error| {
-                eprintln!("agent_core: invalid tool_semantics_json on FfiAgentConfig: {error}");
-                crate::tool_semantics::ToolSemanticsConfig::agnostic()
-            }),
+            tool_semantics,
+            tool_catalog,
         }
     }
 }

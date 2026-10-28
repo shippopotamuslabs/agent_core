@@ -54,7 +54,7 @@ mod tests {
             session_messages: vec![],
             system_prompt: "test".into(),
             tool_schemas: Vec::new(),
-            rendered_tool_catalog: Vec::new(),
+            rendered_runtime_tools: Vec::new(),
             allow_tool_call: true,
             context_references: vec![],
             state_ledger: None,

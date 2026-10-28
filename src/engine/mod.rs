@@ -131,7 +131,11 @@ impl AgentEngine {
     ) -> SessionHandle {
         config
             .apply_policy_tier_defaults(capabilities.context_policy_tier, io.context_window_tokens);
-        config.prepare_tool_semantics(&io.schemas);
+        // ENC-297: re-sync the policy catalog from the construction-time
+        // semantics (validate only; the fallible construction surfaces report
+        // errors, so an invalid literal config keeps its previous catalog
+        // here rather than failing session creation).
+        let _ = config.prepare_tool_semantics();
         let mut state_ledger = StateLedger::default();
         if config.enable_state_ledger {
             for message in &initial_messages {
@@ -252,9 +256,13 @@ impl AgentEngine {
 
         // ENC-286 slice 5: the catalog is built once here and passed into the
         // repair stage (previously cloned + rebuilt per tool call).
+        // ENC-297: the catalog is built once at config construction
+        // (AgentConfig::with_tool_semantics, re-synced by
+        // prepare_tool_semantics at session creation), so the per-turn path
+        // borrows the stored value instead of rebuilding + silently
+        // falling back to empty on invalid semantics.
         let semantics = g.config.tool_semantics.clone();
-        let catalog = ToolCatalog::from_semantics(&semantics)
-            .unwrap_or_else(|_| ToolCatalog::from_specs(Vec::new()));
+        let catalog = g.config.tool_catalog.clone();
         let (ingest_outcome, merged_tool_calls) = ingest_model_response_envelopes(
             response.assistant_text.as_deref(),
             &response.tool_calls,
@@ -1405,25 +1413,13 @@ mod tests {
     use crate::turn_io::RawToolCall;
 
     fn io_small_window() -> SessionIoParams {
-        SessionIoParams::new(
-            "anthropic".into(),
-            256,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params")
+        SessionIoParams::new("anthropic".into(), 256, "[]".into(), "sys".into())
+            .expect("valid test io params")
     }
 
     fn io_large_window() -> SessionIoParams {
-        SessionIoParams::new(
-            "anthropic".into(),
-            200_000,
-            "[]".into(),
-            "[]".into(),
-            "sys".into(),
-        )
-        .expect("valid test io params")
+        SessionIoParams::new("anthropic".into(), 200_000, "[]".into(), "sys".into())
+            .expect("valid test io params")
     }
 
     #[test]
