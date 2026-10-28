@@ -64,6 +64,18 @@ pub struct StateLedger {
     /// re-assertion clears the tombstone and re-adds the entry.
     #[serde(default)]
     pub retired: Vec<String>,
+    /// Normalized keys of `decisions` entries that are unmatched-retirement
+    /// records (precedence rule 3): an entry appended by
+    /// `record_unmatched_retirement` is the retirement's own visible record,
+    /// not a live fact, so a repeat of that same retirement must not drain
+    /// it — the tombstone already makes the repeat a no-op. A live
+    /// re-assertion of the same key ADOPTS the entry: `insert_fact` clears
+    /// both the tombstone and this mark, and a later retirement then drains
+    /// it like any genuine decision. Marks only ever name keys whose
+    /// `decisions` entry landed as a retirement record; a genuine entry a
+    /// record-append deduped against is never marked.
+    #[serde(default)]
+    pub retirement_artifacts: Vec<String>,
 }
 
 /// Pulled-from-text patterns. Each tag maps to a `Vec<String>` field; the
@@ -180,6 +192,7 @@ impl StateLedger {
     /// live re-assertion clears the tombstone and re-adds.
     fn insert_fact(
         retired: &mut Vec<String>,
+        artifacts: &mut Vec<String>,
         field: &mut Vec<String>,
         value: String,
         source: ObserveSource,
@@ -188,9 +201,11 @@ impl StateLedger {
         // A live observation is newest: it always clears a stale tombstone
         // for its key, even when the entry itself is already present (dedupe
         // no-op below). This lets a live re-assertion adopt an
-        // unmatched-retirement artifact so a later reversal retires it.
+        // unmatched-retirement artifact so a later reversal retires it:
+        // adoption clears the artifact mark on the same pass.
         if source == ObserveSource::Live {
             retired.retain(|k| k != &key);
+            artifacts.retain(|k| k != &key);
         }
         if field.iter().any(|e| normalize_key(e) == key) {
             return;
@@ -219,15 +234,27 @@ impl StateLedger {
     /// class (e.g. `resolved:` against open_questions) must never shield a
     /// live entry sitting in THIS call's classes (e.g. the same text as a
     /// decision, later reversed) from being retired.
+    ///
+    /// Retirement records are exempt from the drain: an entry whose key is
+    /// in `artifacts` is an unmatched retirement's own visible record in
+    /// `decisions`, not a live fact. Draining it would let a repeat of that
+    /// same retirement self-cancel its record; with the record exempt, the
+    /// repeat drains nothing and the tombstone fallthrough below reports
+    /// it as the no-op it is. Genuine entries carry no mark and always
+    /// drain, shielded by nothing.
     fn retire_matches(
         retired: &mut Vec<String>,
+        artifacts: &[String],
         fields: &mut [&mut Vec<String>],
         key: &str,
     ) -> bool {
         let mut matched = false;
         for field in fields.iter_mut() {
             let before = field.len();
-            field.retain(|e| normalize_key(e) != key);
+            field.retain(|e| {
+                let entry_key = normalize_key(e);
+                entry_key != key || artifacts.iter().any(|a| a == &entry_key)
+            });
             if field.len() != before {
                 matched = true;
             }
@@ -245,9 +272,25 @@ impl StateLedger {
     /// `resolved:` arms: the retirement stays visible — its text is
     /// appended as a decision instead of silently dropped — and the
     /// tombstone is recorded so a repeat is a no-op (the appended entry
-    /// stays).
+    /// stays). When the append actually lands, the entry is marked in
+    /// `retirement_artifacts` as this retirement's own record; when it
+    /// dedupes against a pre-existing genuine entry, that entry keeps its
+    /// genuine status (no mark) and a later retirement still drains it.
     fn record_unmatched_retirement(&mut self, value: String, key: &str, source: ObserveSource) {
-        Self::insert_fact(&mut self.retired, &mut self.decisions, value, source);
+        let already_present = self.decisions.iter().any(|e| normalize_key(e) == key);
+        Self::insert_fact(
+            &mut self.retired,
+            &mut self.retirement_artifacts,
+            &mut self.decisions,
+            value,
+            source,
+        );
+        if !already_present
+            && self.decisions.iter().any(|e| normalize_key(e) == key)
+            && !self.retirement_artifacts.iter().any(|k| k == key)
+        {
+            self.retirement_artifacts.push(key.to_string());
+        }
         if !self.retired.iter().any(|k| k == key) {
             self.retired.push(key.to_string());
         }
@@ -262,7 +305,7 @@ impl StateLedger {
         let lower = content.to_ascii_lowercase();
         // Walk through, finding any of the relevant prefixes.
         while search_from < content.len() {
-            let Some((pos, plen, kind)) = next_tag(&content, &lower, search_from) else {
+            let Some((pos, plen, kind)) = next_tag(content, &lower, search_from) else {
                 break;
             };
             let after = &content[pos + plen..];
@@ -290,14 +333,23 @@ impl StateLedger {
                             }
                         }
                     },
-                    "constraint" => {
-                        Self::insert_fact(&mut self.retired, &mut self.constraints, value, source)
-                    }
-                    "decision" => {
-                        Self::insert_fact(&mut self.retired, &mut self.decisions, value, source)
-                    }
+                    "constraint" => Self::insert_fact(
+                        &mut self.retired,
+                        &mut self.retirement_artifacts,
+                        &mut self.constraints,
+                        value,
+                        source,
+                    ),
+                    "decision" => Self::insert_fact(
+                        &mut self.retired,
+                        &mut self.retirement_artifacts,
+                        &mut self.decisions,
+                        value,
+                        source,
+                    ),
                     "open_question" => Self::insert_fact(
                         &mut self.retired,
+                        &mut self.retirement_artifacts,
                         &mut self.open_questions,
                         value,
                         source,
@@ -314,6 +366,7 @@ impl StateLedger {
                         let key = normalize_key(&value);
                         let matched = Self::retire_matches(
                             &mut self.retired,
+                            &self.retirement_artifacts,
                             &mut [&mut self.constraints, &mut self.decisions],
                             &key,
                         );
@@ -325,6 +378,7 @@ impl StateLedger {
                         let key = normalize_key(&value);
                         let matched = Self::retire_matches(
                             &mut self.retired,
+                            &self.retirement_artifacts,
                             &mut [&mut self.open_questions],
                             &key,
                         );
