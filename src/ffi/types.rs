@@ -830,20 +830,22 @@ fn tool_schema_entries(
     let mut converted = Vec::with_capacity(entries.len());
     let mut names = crate::tool_schema::EntryNameChecker::new();
     for (index, entry) in entries.iter().enumerate() {
-        names.check(index, &entry.name).map_err(|error| match error {
-            crate::tool_schema::EntryNameError::InvalidName { index } => {
-                AgentException::Internal {
-                    detail: format!(
-                        "tool schema entry {index} has no valid \"name\" (missing or empty)"
-                    ),
+        names
+            .check(index, &entry.name)
+            .map_err(|error| match error {
+                crate::tool_schema::EntryNameError::InvalidName { index } => {
+                    AgentException::Internal {
+                        detail: format!(
+                            "tool schema entry {index} has no valid \"name\" (missing or empty)"
+                        ),
+                    }
                 }
-            }
-            crate::tool_schema::EntryNameError::DuplicateName { name } => {
-                AgentException::Internal {
-                    detail: format!("tool schema entry '{name}' is a duplicate"),
+                crate::tool_schema::EntryNameError::DuplicateName { name } => {
+                    AgentException::Internal {
+                        detail: format!("tool schema entry '{name}' is a duplicate"),
+                    }
                 }
-            }
-        })?;
+            })?;
         converted.push(crate::tool_schema::SchemaEntry::from(
             tool_schema_entry_value(entry),
         ));
