@@ -23,3 +23,11 @@ Implementation (chunk B1)
 - Work clone: ~/workspace/tmp/enc308, branch
   shippopotamus/enc-308-agent_core-final-refactor-close-out-7-deferred-forge-mediums
   off main 6cadf23.
+
+- B1 first dispatch STOPPED at the plan risk gate (no code changed):
+  SessionContext.included_files is Option<serde_json::Value>; its sole
+  consumer parses it into a closed Vec<InputFile> struct and silently
+  returns None on malformed input. Extras inventory was clean — no
+  engine code reads any extras key behaviorally. Orchestrator decision
+  (Sean's typing doctrine): Option B, type it in the core; plan amended.
+  B1 re-dispatched with file_context.rs + model_request.rs in scope.

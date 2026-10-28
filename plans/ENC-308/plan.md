@@ -107,6 +107,21 @@ Acceptance:
 - Given a pre-change snapshot fixture whose context has extras keys,
   when imported, then the session loads with typed fields intact.
 
+**Amendment 2026-10-28 (B1 risk gate, Orchestrator decision under Sean's
+ratified typing doctrine):** B1's inventory found `SessionContext`'s
+`included_files` field is `Option<serde_json::Value>` — raw JSON wearing
+a typed field's clothes. Its only consumer (`condense_file_context`,
+src/file_context.rs) parses it into a closed struct
+`Vec<InputFile{path, token_estimate, content}>` and silently returns
+None on malformed input (another silent fallback). The shape is
+engine-owned, so it types all the way through (the worker's Option B):
+`SessionContext.included_files` becomes a typed Vec of the file-entry
+struct, `condense_file_context` takes the vec, `included_files_json()`
+and the parse are deleted. B1's file scope grows by src/file_context.rs
+and src/engine/model_request.rs. FFI-only typing (Option A) was rejected:
+it keeps a redundant Value rebuild and a parse in the core. Deferring
+the field (Option C) was rejected: the host uses the feature today.
+
 ### B2 — Typed ledger, fallible tool results, metadata bag deleted (items 9, 11, 12-message)
 Scope: src/ffi/types.rs, src/message.rs, summary/sidecar call sites.
 Introduce `FfiStateLedger` mirroring StateLedger; FfiSummaryRequest
