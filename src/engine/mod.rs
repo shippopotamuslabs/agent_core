@@ -1256,7 +1256,7 @@ impl InnerSession {
                 },
             ) {
                 Ok(compaction::Flow::Loop) => continue,
-                Ok(compaction::Flow::Done(action)) => return Ok(action),
+                Ok(compaction::Flow::Done(action)) => return Ok(action.map(|a| *a)),
                 Err(e) => return Err(e),
             }
         }

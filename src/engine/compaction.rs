@@ -272,7 +272,7 @@ impl InnerSession {
                 self.pending.summary_req = Some(req.clone());
                 self.pending.summary_ctx = Some(pass_ctx.loop_ctx);
                 self.phase = EnginePhase::AwaitingSummary;
-                Ok(Flow::Done(Some(AgentAction::RequestSummary(req))))
+                Ok(Flow::Done(Some(Box::new(AgentAction::RequestSummary(req)))))
             }
             CompactionOutcome::Applied(sess, ev) => {
                 let destructive = is_destructive_compaction_tier(&ev.tier);
@@ -382,10 +382,12 @@ pub(super) fn last_message_role(messages: &[AgentMessage]) -> Option<crate::mess
 /// `CompactionOutcome` match exists exactly once, inside the method; this
 /// 2-variant signal is all the pass loop in `run_compaction_pass` needs
 /// to continue or finish. It carries no re-encoded outcome data — every
-/// effect has already been applied by the method.
+/// effect has already been applied by the method. The finished action is
+/// boxed: `AgentAction` is large, and the pre-ENC-306 `PipelineDecision`
+/// boxed it for the same reason (clippy::large_enum_variant).
 pub(super) enum Flow {
     Loop,
-    Done(Option<AgentAction>),
+    Done(Option<Box<AgentAction>>),
 }
 
 /// Call-shape data for one pipeline iteration (ENC-306 D4): plain owned
