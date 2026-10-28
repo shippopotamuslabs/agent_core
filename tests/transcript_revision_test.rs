@@ -3,19 +3,17 @@
 use agent_core::events::CompactionTier;
 use agent_core::lalr_harness::{config_with_long_loop, run_destructive_micro_preflight_pass};
 use agent_core::long_loop_policy::LongLoopPolicy;
-use agent_core::message::{AgentMessage, AgentRole};
+use agent_core::message::{AgentMessage, AgentRole, MessageMeta};
 use agent_core::session::{AgentSession, SessionCapabilities};
 use agent_core::transcript_revision::{
     assert_append_only_transcript_invariant, replace_message_content, transcript_revision_of,
 };
-use serde_json::json;
-
 fn tool_message(id: &str, content: &str) -> AgentMessage {
     AgentMessage {
         id: id.into(),
         role: AgentRole::Tool,
         content: content.into(),
-        metadata: json!({}),
+        metadata: MessageMeta::new(),
     }
 }
 
@@ -68,11 +66,11 @@ fn lalr_04_micro_rewrite_creates_new_message_id() {
         .iter()
         .find(|m| m.id == "tool-msg-100")
         .expect("original tool-msg-100");
-    assert_eq!(original.metadata["superseded"], json!(true));
+    assert!(original.metadata.is_superseded());
 
     assert_ne!(replacement.id, "tool-msg-100");
-    assert_eq!(replacement.metadata["rewrite_of"], json!("tool-msg-100"));
-    assert_eq!(replacement.metadata["compaction_tier"], json!("micro"));
+    assert_eq!(replacement.metadata.rewrite_of(), Some("tool-msg-100"));
+    assert_eq!(replacement.metadata.compaction_tier(), Some("micro"));
 }
 
 #[test]

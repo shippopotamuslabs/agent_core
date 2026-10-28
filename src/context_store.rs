@@ -5,6 +5,18 @@
 //! and exposes deterministic-ish IDs that compaction tiers can attach to model
 //! requests as [`ContextReference`] handles. The host (or future model tool)
 //! retrieves the full payload via the engine's read/search APIs.
+//!
+//! ### ENC-292 decision: no storage port for `ContextStore`
+//!
+//! `ContextStore` is deliberately **not** behind a host-supplied storage port.
+//! It is session-scoped in-memory application state, not platform
+//! infrastructure: entries live and die with the owning session (deduplicated
+//! by content, expired by turn index), it performs no I/O, has no platform
+//! variance (no filesystem/keychain/network access), and every constructor is
+//! already plain Rust (`ContextStore::default()`). Porting it would add host
+//! surface and FFI callback round-trips for zero isolation benefit. If a host
+//! ever needs cross-session persistence, that belongs in a new snapshot
+//! import/export API on the engine — not a storage trait inside the session.
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;

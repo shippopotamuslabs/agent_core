@@ -164,7 +164,7 @@ pub(super) fn process_one_result(
         metadata: MessageMeta::new()
             .with_call_id(res.call_id.clone())
             .with_tool_name(call.name.clone())
-            .with_extra("truncated", json!(res.truncated)),
+            .with_truncated(res.truncated),
     };
     let spilled_inline = spilled.is_some() && !spill_stored_copy_only;
     ProcessedToolResult {

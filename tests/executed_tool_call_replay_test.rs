@@ -415,10 +415,7 @@ fn etr_r_09_envelope_ingest_co_metadata_preserved_after_patch() {
     let snapshot = h.integration_test_snapshot();
     let assistant = last_assistant_message(&snapshot);
     assert_eq!(
-        assistant
-            .metadata
-            .extra("envelope_ingest")
-            .and_then(|v| v.as_str()),
+        assistant.metadata.envelope_ingest(),
         Some("reified"),
         "ETR-R-09 envelope_ingest"
     );

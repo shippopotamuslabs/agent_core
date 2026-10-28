@@ -1580,11 +1580,7 @@ mod tests {
             .find(|message| message.role == AgentRole::Assistant)
             .expect("assistant message");
         assert_eq!(
-            assistant
-                .metadata
-                .extra("provider_reasoning")
-                .and_then(|value| value.get("reasoning_content"))
-                .and_then(|value| value.as_str()),
+            assistant.metadata.provider_reasoning_content(),
             Some("need tool output first"),
         );
     }

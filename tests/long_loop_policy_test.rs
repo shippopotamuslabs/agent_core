@@ -3,7 +3,7 @@
 use agent_core::action::AgentAction;
 use agent_core::lalr_harness::{
     config_with_long_loop, default_long_loop_io, guardrail_kind, next_action_at_max_tool_turns,
-    noop_transport_engine,
+    test_engine,
 };
 use agent_core::long_loop_policy::LongLoopPolicy;
 use agent_core::session::SessionCapabilities;
@@ -13,7 +13,7 @@ fn lalr_12_stops_at_five_tool_rounds() {
     let mut long_loop = LongLoopPolicy::hosted_mutable_defaults();
     long_loop.max_tool_turns = 5;
     let config = config_with_long_loop(long_loop);
-    let engine = noop_transport_engine();
+    let engine = test_engine();
     let handle = engine.create_session(
         vec![],
         config,
