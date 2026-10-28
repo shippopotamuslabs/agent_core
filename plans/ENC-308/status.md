@@ -4,7 +4,7 @@
 - [x] Research — vision approval: approved (Sean's design rulings
       2026-10-28 morning + execution commission 11:29 EDT)
 - [x] Plan
-- [ ] Implementation
+- [x] Implementation
 - [ ] Review — rounds: 0/3, result: pending
 - [ ] Ship — PR: none
 
@@ -12,7 +12,7 @@
 none
 
 ## Next Phase
-Implementation (chunk B1)
+Review
 
 ## Notes
 - 2026-10-28 (A1): Compaction encapsulation trio done. (1) `attach_summary_staging` lost its redundant `trigger` param — both callers had already settled `req.trigger` (forced-fixup in the pipeline arm; Manual ctx in the manual path), so the snapshot stamps `req.trigger`. (2) `CompactionState::set_suppress_summary_tier` deleted; suppression is the begin/end pair `begin_summary_tier_suppression() -> bool` / `end_summary_tier_suppression(previous)` owned by CompactionState, and `retry_without_summary` just brackets the re-run (restores the previous value, not a hard-coded false — behavior identical at the only call site). Grep acceptance: no `set_suppress_summary_tier` hits remain anywhere. (3) `CompactionPassState`: `last_history_ref()` deleted — the `NotApplicable` arm now uses the single consuming read `take_history_ref()` like the early-exit branch; `message_count_before` is a plain `pub(super)` field fixed at construction (getter deleted). Verification: `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; targeted tests both configs — `cargo test --locked [--no-default-features] --test compaction_triggers_test --test manual_compact_test --test context_management_end_to_end_test` (22+1+4 passed, 0 failed each config), `--lib compaction` (6 passed, 0 failed each config); extra guard `cargo test --locked --features lalr-harness --test compaction_boundary_test` runs 6 tests: 3 passed / 3 FAILED — and the identical 3 failures (lalr_03_boundary_id_literal_format, lalr_09_post_compact_revision_matches_session, lalr_15_kv_fixed_emits_boundary_without_summary_tier) reproduce on the pre-A1 plan commit 4646395, verified in a scratch worktree. Pre-existing red on main, unrelated to A1; the target requires lalr-harness+ffi so it sits outside both gate configs and its redness was never gated. (Correction to this entry's first version, which misstated the suite as "3 passed" from truncated poll output; the gate-config results above were read in full and stand.) No existing tests changed. Note: plain `cargo test --test compaction_boundary_test` under gate configs errors on required-features — run it via the lalr-harness invocation.
@@ -124,3 +124,26 @@ Implementation (chunk B1)
   enum variants); MessageMeta schema closed (unknown keys rejected at
   FFI ingress, dropped at stored reads).
   Next: chunk C.
+- 2026-10-28 (C): Docs + final gates done. Docs corrected (commit
+  db997fc): README gained a boundary-contract section (closed/typed
+  FFI surface; validation model — provider-facing JSON Schema vs the
+  engine-enforced ToolSchemaHint + semantics; the ratified JSON list
+  with reasons) and lost the Layout row for src/host.rs (deleted in
+  ENC-285); `AgentMessage.metadata`'s field doc in src/message.rs no
+  longer calls metadata an opaque host blob — it describes the closed
+  MessageMeta schema. Everything else grepped for the dead names
+  (session_context_json, state_ledger_snapshot_json, extras,
+  serializeFullRegistry, ToolSchemaRegistry) was already accurate —
+  the remaining mentions are historical notes stating those forms are
+  gone. FINAL GATES on the complete branch (logs
+  ~/workspace/tmp/enc308-c-*.log, counts read off the complete logs):
+  `cargo fmt -- --check` clean; `cargo clippy --locked --all-targets
+  -- -D warnings` clean; `cargo test --locked` — 721 passed /
+  0 failed (42 test-result sections); `cargo test --locked
+  --no-default-features` — 671 passed / 0 failed (40 sections). The
+  ticket's definition of done is met on the branch; Forge review on
+  the PR is the remaining gate (Review phase). PR description drafted
+  at plans/ENC-308/pr-description.md (14 items by part, full ENC-294
+  delta list, latent spilled-flag bug fix, item-11 unreachability
+  note, gate counts). No existing tests changed in this chunk.
+  Next: Review.
