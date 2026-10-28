@@ -467,35 +467,7 @@ fn validate_required_types(
     value: &Value,
     catalog: &ToolCatalog,
 ) -> Result<(), CanonicalizeArgumentsError> {
-    let Some(hint) = schema_hint_for(tool_name, catalog) else {
-        return Ok(());
-    };
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-
-    for field in &hint.required_fields {
-        let Some(field_value) = object.get(&field.name) else {
-            if !hint.defaults.contains_key(&field.name) {
-                return Err(CanonicalizeArgumentsError {
-                    message: format!(
-                        "Missing required field '{}' for tool '{}'",
-                        field.name, tool_name
-                    ),
-                });
-            }
-            continue;
-        };
-        if !matches_schema_type(field_value, &field.ty) {
-            return Err(CanonicalizeArgumentsError {
-                message: format!(
-                    "Field '{}' for tool '{}' could not be coerced to {}",
-                    field.name, tool_name, field.ty
-                ),
-            });
-        }
-    }
-    Ok(())
+    validate_required_types_with_hint(tool_name, value, schema_hint_for(tool_name, catalog))
 }
 
 fn validate_required_types_with_semantics(
@@ -503,12 +475,27 @@ fn validate_required_types_with_semantics(
     value: &Value,
     semantics: &ToolSemanticsConfig,
 ) -> Result<(), CanonicalizeArgumentsError> {
-    let Some(hint) = schema_hint_for_semantics(tool_name, semantics) else {
+    validate_required_types_with_hint(
+        tool_name,
+        value,
+        schema_hint_for_semantics(tool_name, semantics),
+    )
+}
+
+/// Shared body for the required-field type validators; only the hint source
+/// (catalog vs. semantics) differs between callers.
+fn validate_required_types_with_hint(
+    tool_name: &str,
+    value: &Value,
+    hint: Option<ToolSchemaHint>,
+) -> Result<(), CanonicalizeArgumentsError> {
+    let Some(hint) = hint else {
         return Ok(());
     };
     let Some(object) = value.as_object() else {
         return Ok(());
     };
+
     for field in &hint.required_fields {
         let Some(field_value) = object.get(&field.name) else {
             if !hint.defaults.contains_key(&field.name) {
