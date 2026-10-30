@@ -1,5 +1,9 @@
 # agent_core (Rust)
 
+> Agents working in this repo: start with [AGENTS.md](AGENTS.md) —
+> it is the governing agent contract. This README describes the
+> crate for human evaluators.
+
 The agent loop at the center of Enclave, as a standalone Rust crate. It runs
 the deterministic parts of a tool-using agent: the turn loop, context
 compaction in tiers, tool call parsing and repair, guardrail checks on tool
