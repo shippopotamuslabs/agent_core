@@ -1,0 +1,41 @@
+name: Chomp Review
+
+# Chomp consolidated code review (chomp-reviewer reusable workflow).
+# One review per PR from PR-Agent + the two Thermos lenses, fused by
+# the master job; re-pushes run verification instead of a new review.
+# Requires repo secrets: OPENROUTER_API_KEY, FORGE_APP_PRIVATE_KEY
+# (passed to the workflow under its new CHOMP_APP_PRIVATE_KEY name).
+# Optional: LINEAR_API_KEY (org-level secret) - Chomp's ticket step
+# fetches linked Linear tickets with it; absence changes nothing.
+#
+# Supply-chain pinning (Chomp review finding on this PR): the reusable
+# workflow and the forge_ref scripts checkout are both pinned to the
+# v2.1.2 release tag of chomp-reviewer, not a mutable branch, and only
+# the secrets the reusable workflow declares are passed — never
+# `secrets: inherit`. (An interim full-SHA pin was orphaned once by a
+# history rewrite: the object survived but no ref reached it, and
+# reusable-workflow resolution follows refs.) Upgrade = bump both
+# pins to the new tag in one commit.
+#
+# The Chomp engine is enabled via the chomp_agent input below
+# (CHOMP-30, 2026-10-30): the agent's consolidated review replaces the
+# 1.x producers on this repo.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  chomp-review:
+    uses: shippopotamuslabs/chomp-reviewer/.github/workflows/chomp-review.yml@v2.1.2
+    with:
+      chomp_ref: v2.1.2
+      chomp_agent: "on"
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CHOMP_APP_PRIVATE_KEY: ${{ secrets.FORGE_APP_PRIVATE_KEY }}
+      LINEAR_API_KEY: <redacted> secrets.LINEAR_API_KEY }}
